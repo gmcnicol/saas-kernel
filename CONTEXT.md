@@ -30,6 +30,10 @@ _Avoid_: Source of truth, mutable record
 A semantic statement derived from Projected State and used to evaluate business applicability.
 _Avoid_: Permission, raw field
 
+**Evaluation Snapshot**:
+An immutable result containing Facts and Applicable Actions derived for a subject from one Projected State version, at an explicit evaluation time, using one Semantic Pack version.
+_Avoid_: Evidence graph, decision log
+
 **Action**:
 A business capability defined by a Semantic Pack.
 _Avoid_: Command, button
@@ -45,6 +49,10 @@ _Avoid_: Applicable Action, permission
 **Intent**:
 A durable, accepted request to perform an Action against a known state version.
 _Avoid_: Intention, command, job
+
+**Stale Intent**:
+An Intent whose expected state version no longer matches current Projected State, so it cannot be handled as originally accepted.
+_Avoid_: Failed Intent, obsolete command
 
 **Event**:
 A recorded domain outcome emitted when an Intent is handled.

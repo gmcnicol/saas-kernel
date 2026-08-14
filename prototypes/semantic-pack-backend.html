@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Semantic Pack Backend Prototype</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+      }
+      body {
+        max-width: 1050px;
+        margin: 0 auto;
+        padding: 2rem 1rem;
+      }
+      nav,
+      .controls,
+      .grid {
+        display: flex;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+      button {
+        font: inherit;
+        padding: 0.55rem 0.8rem;
+      }
+      button[aria-pressed="true"] {
+        outline: 3px solid Highlight;
+      }
+      .panel {
+        border: 1px solid CanvasText;
+        border-radius: 0.5rem;
+        margin-top: 1rem;
+        padding: 1rem;
+      }
+      .grid > * {
+        flex: 1 1 280px;
+      }
+      .good {
+        border-left: 0.35rem solid #15803d;
+        padding-left: 0.75rem;
+      }
+      .warning {
+        border-left: 0.35rem solid #d97706;
+        padding-left: 0.75rem;
+      }
+      code {
+        overflow-wrap: anywhere;
+      }
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <p><strong>THROWAWAY PROTOTYPE</strong></p>
+    <h1>Semantic Pack backend</h1>
+    <p class="warning">
+      Question: does full Orbital earn a runtime place in the Kernel, or does a small backend over Taxi's compiler preserve clearer ownership?
+    </p>
+
+    <nav aria-label="Backend choice">
+      <button data-backend="custom">Custom Taxi backend</button>
+      <button data-backend="orbital">Full Orbital service</button>
+    </nav>
+
+    <section class="panel">
+      <h2>Guided walkthrough</h2>
+      <p id="guide"></p>
+      <button id="guided-step">Run next step</button>
+      <button id="reset">Reset</button>
+    </section>
+
+    <section class="panel">
+      <h2>Free play</h2>
+      <div class="controls">
+        <button data-action="load">Load Semantic Pack</button>
+        <button data-action="evaluate">Evaluate applicability</button>
+        <button data-action="offer">Authorise Action Offers</button>
+        <button data-action="handle">Handle Intent</button>
+        <button data-action="integrate">Compose external data</button>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="panel">
+        <h2>Current result</h2>
+        <div id="result"></div>
+      </article>
+      <article class="panel">
+        <h2>Runtime ownership</h2>
+        <div id="ownership"></div>
+      </article>
+    </section>
+
+    <section class="panel">
+      <h2>Minimum contract under test</h2>
+      <div class="grid">
+        <div>
+          <h3>Taxi source</h3>
+          <p>Semantic types, models, and Action operation signatures. Taxi qualified names remain stable IDs.</p>
+        </div>
+        <div>
+          <h3>Pack manifest</h3>
+          <p>Qualified pack ID, semantic version, Kernel compatibility range, Taxi source locations, and Fact and Action bindings.</p>
+        </div>
+        <div>
+          <h3>Pack code</h3>
+          <p>Pure Fact derivation with explicit evaluation time, pure applicability policies, and registered Intent handlers.</p>
+        </div>
+        <div>
+          <h3>Startup validation</h3>
+          <p>Compile Taxi, resolve every qualified ID and type, reject duplicate or missing bindings, and verify compatibility.</p>
+        </div>
+        <div>
+          <h3>Compatibility</h3>
+          <p>Record pack and payload versions on Intents and Events. Deployed contracts are append-only; breaking changes use a new version and adapter.</p>
+        </div>
+        <div>
+          <h3>Explicit exclusions</h3>
+          <p>No presentation metadata, authorisation policy, persistence, worker, retry, or service-orchestration contract.</p>
+        </div>
+      </div>
+    </section>
+
+    <script>
+      const initialState = (backend = "custom") => ({
+        backend,
+        step: 0,
+        loaded: false,
+        applicable: false,
+        offered: false,
+        handled: false,
+        integrated: false,
+        last: "Choose an action.",
+      });
+
+      const ownership = {
+        custom: {
+          "Taxi types and Action signatures": "Taxi compiler",
+          "Fact derivation and applicability": "Semantic Pack handlers",
+          "Action Offer authorisation": "Kernel and Cedar",
+          "Intent execution": "Kernel and Semantic Pack handler",
+          "External data composition": "Application adapters when needed",
+        },
+        orbital: {
+          "Taxi types and Action signatures": "Orbital schema runtime",
+          "Fact derivation and applicability": "Split between Semantic Pack and Orbital expressions",
+          "Action Offer authorisation": "Split between Cedar and Orbital data policies",
+          "Intent execution": "Kernel, unless Orbital operation invocation bypasses it",
+          "External data composition": "Orbital TaxiQL runtime",
+        },
+      };
+
+      function reduce(state, action) {
+        const next = { ...state };
+        if (action === "load") {
+          next.loaded = true;
+          next.last = state.backend === "custom"
+            ? "Taxi sources compiled and contract bindings validated in-process."
+            : "Pack published to an Orbital workspace and loaded across a service boundary.";
+        } else if (!state.loaded) {
+          next.last = "Load Semantic Pack first.";
+        } else if (action === "evaluate") {
+          next.applicable = true;
+          next.last = state.backend === "custom"
+            ? "Semantic Pack derives Facts and Applicable Actions directly."
+            : "Either Semantic Pack still owns this, leaving Orbital mostly idle, or applicability moves into Orbital expressions.";
+        } else if (action === "offer") {
+          next.offered = true;
+          next.last = state.backend === "custom"
+            ? "Cedar filters Applicable Actions into Action Offers."
+            : "Cedar remains authoritative; Orbital data policies would duplicate a separate policy model.";
+        } else if (action === "handle") {
+          next.handled = true;
+          next.last = state.backend === "custom"
+            ? "Kernel validates state version, then invokes registered Semantic Pack handler."
+            : "Kernel must prevent direct Orbital operation invocation from bypassing durable Intent handling.";
+        } else if (action === "integrate") {
+          next.integrated = true;
+          next.last = state.backend === "custom"
+            ? "No automatic cross-service composition. Add an application adapter only when a fixture needs one."
+            : "Orbital discovers and composes services through TaxiQL. This is its clear advantage.";
+        }
+        return next;
+      }
+
+      let state = initialState();
+      const guide = ["load", "evaluate", "offer", "handle", "integrate"];
+
+      function render() {
+        document.querySelectorAll("[data-backend]").forEach((button) => {
+          button.setAttribute("aria-pressed", button.dataset.backend === state.backend);
+        });
+        document.querySelector("#guide").textContent = state.step < guide.length
+          ? `Next: ${document.querySelector(`[data-action="${guide[state.step]}"]`).textContent}`
+          : "Walkthrough complete. Compare ownership and final recommendation.";
+        document.querySelector("#result").innerHTML = `
+          <p><strong>Backend:</strong> ${state.backend === "custom" ? "Custom Taxi backend" : "Full Orbital service"}</p>
+          <p><strong>Last result:</strong> ${state.last}</p>
+          <p><strong>Pack loaded:</strong> ${state.loaded}</p>
+          <p><strong>Applicability evaluated:</strong> ${state.applicable}</p>
+          <p><strong>Action Offers authorised:</strong> ${state.offered}</p>
+          <p><strong>Intent handled:</strong> ${state.handled}</p>
+          <p><strong>External data composed:</strong> ${state.integrated}</p>
+          <p class="${state.backend === "custom" ? "good" : "warning"}"><strong>Recommendation:</strong> ${
+            state.backend === "custom"
+              ? "Use this baseline. It is the smallest backend matching the agreed Kernel seams."
+              : "Use only when automatic cross-service discovery and TaxiQL composition become product requirements."
+          }</p>`;
+        document.querySelector("#ownership").innerHTML = Object.entries(ownership[state.backend])
+          .map(([concern, owner]) => `<p><strong>${concern}</strong><br />${owner}</p>`)
+          .join("");
+      }
+
+      function dispatch(action) {
+        state = reduce(state, action);
+        render();
+      }
+
+      document.querySelectorAll("[data-backend]").forEach((button) => {
+        button.addEventListener("click", () => {
+          state = initialState(button.dataset.backend);
+          render();
+        });
+      });
+      document.querySelectorAll("[data-action]").forEach((button) => {
+        button.addEventListener("click", () => dispatch(button.dataset.action));
+      });
+      document.querySelector("#guided-step").addEventListener("click", () => {
+        if (state.step >= guide.length) return;
+        const action = guide[state.step];
+        state = { ...reduce(state, action), step: state.step + 1 };
+        render();
+      });
+      document.querySelector("#reset").addEventListener("click", () => {
+        state = initialState(state.backend);
+        render();
+      });
+      render();
+    </script>
+  </body>
+</html>

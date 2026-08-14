@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Provenance and Temporal Evaluation Prototype</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+      }
+      body {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 2rem 1rem;
+      }
+      nav,
+      .controls,
+      .grid {
+        display: flex;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+      button {
+        font: inherit;
+        padding: 0.55rem 0.8rem;
+      }
+      button[aria-pressed="true"] {
+        outline: 3px solid Highlight;
+      }
+      .panel {
+        border: 1px solid CanvasText;
+        border-radius: 0.5rem;
+        margin-top: 1rem;
+        padding: 1rem;
+      }
+      .grid > * {
+        flex: 1 1 300px;
+      }
+      .notice {
+        border-left: 0.35rem solid #d97706;
+        padding-left: 0.75rem;
+      }
+      .current {
+        border-left: 0.35rem solid #15803d;
+        padding-left: 0.75rem;
+      }
+      .muted {
+        opacity: 0.7;
+      }
+      ol,
+      ul {
+        padding-left: 1.25rem;
+      }
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <p><strong>THROWAWAY PROTOTYPE</strong></p>
+    <h1>Traceable Facts through time and correction</h1>
+    <p class="notice">
+      Question: can one small Evaluation Snapshot contract explain every Fact and Applicable Action, react to time alone, and make corrections safe without inventing a generic evidence model?
+    </p>
+
+    <nav aria-label="Scenario">
+      <button data-scenario="time">Time alone</button>
+      <button data-scenario="correction">Correction before deadline</button>
+      <button data-scenario="replay">Trace an old result</button>
+    </nav>
+
+    <section class="panel">
+      <h2>Guided walkthrough</h2>
+      <p id="guide-description"></p>
+      <div id="guide-steps" class="controls"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Free play</h2>
+      <div class="controls">
+        <button data-action="advance">Advance one day</button>
+        <button data-action="correct">Correct due date by five days</button>
+        <button data-action="run">Run due reevaluations</button>
+        <button data-action="evaluate">Evaluate now</button>
+        <button data-action="reset">Reset</button>
+      </div>
+      <p id="last-result" class="current"></p>
+    </section>
+
+    <section class="grid">
+      <article class="panel">
+        <h2>Projected State</h2>
+        <div id="projected-state"></div>
+      </article>
+      <article class="panel">
+        <h2>Current Evaluation Snapshot</h2>
+        <div id="evaluation"></div>
+      </article>
+      <article class="panel">
+        <h2>Queued reevaluations</h2>
+        <div id="schedule"></div>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="panel">
+        <h2>Recorded Events</h2>
+        <div id="events"></div>
+      </article>
+      <article class="panel">
+        <h2>Evaluation history</h2>
+        <div id="history"></div>
+      </article>
+    </section>
+
+    <section class="panel">
+      <h2>Minimum contract under test</h2>
+      <ul>
+        <li><strong>Input:</strong> subject, Projected State at one version, explicit evaluation time, and exact Semantic Pack version.</li>
+        <li><strong>Output:</strong> typed Facts, Applicable Action IDs, and optional earliest reevaluation time.</li>
+        <li><strong>Provenance:</strong> state version, evaluation time, pack version, and derivation or applicability policy ID on every result.</li>
+        <li><strong>Correction:</strong> append a domain Event, advance Projected State version, and evaluate immediately. Never edit an old Event or Evaluation Snapshot.</li>
+        <li><strong>Reevaluation Worker:</strong> an in-process background loop claims durable due work containing subject, expected state version, pack version, and due instant. It discards stale work, catches up after downtime, and queues the current evaluation's successor.</li>
+        <li><strong>Deployment:</strong> no separate daemon and no cron job per subject initially. A later topology decision may move the same worker loop into its own process.</li>
+        <li><strong>Excluded:</strong> generic evidence nodes, confidence scores, source taxonomies, domain calendars, and presentation explanations.</li>
+      </ul>
+    </section>
+
+    <script>
+      const DAY = 86_400_000;
+      const addDays = (date, days) =>
+        new Date(new Date(`${date}T00:00:00Z`).getTime() + days * DAY)
+          .toISOString()
+          .slice(0, 10);
+
+      function derive(state, cause) {
+        const due = state.clock >= state.projection.followUpDueOn;
+        const evaluation = {
+          id: `evaluation-${state.evaluations.length + 1}`,
+          subject: "Contact:alex",
+          stateVersion: state.projection.version,
+          evaluationTime: `${state.clock}T00:00:00Z`,
+          pack: "keep-in-touch@1.0.0",
+          cause,
+          facts: due
+            ? [{ id: "crm.FollowUpDue", value: true, derivedBy: "crm.deriveFollowUpDue" }]
+            : [],
+          applicableActions: due
+            ? [{ id: "crm.ContactActions::RecordInteraction", decidedBy: "crm.followUpActions" }]
+            : [],
+          reevaluateAt: due ? null : `${state.projection.followUpDueOn}T00:00:00Z`,
+        };
+        const alreadyScheduled = state.schedules.some(
+          (item) =>
+            item.subject === evaluation.subject &&
+            item.expectedStateVersion === evaluation.stateVersion &&
+            item.pack === evaluation.pack &&
+            item.dueAt === evaluation.reevaluateAt &&
+            item.status === "pending",
+        );
+        const schedules = evaluation.reevaluateAt && !alreadyScheduled
+          ? [
+              ...state.schedules,
+              {
+                subject: evaluation.subject,
+                expectedStateVersion: evaluation.stateVersion,
+                pack: evaluation.pack,
+                dueAt: evaluation.reevaluateAt,
+                status: "pending",
+              },
+            ]
+          : state.schedules;
+        return {
+          ...state,
+          currentEvaluation: evaluation,
+          evaluations: [...state.evaluations, evaluation],
+          schedules,
+          last: `${cause}: recorded ${evaluation.id}.`,
+        };
+      }
+
+      function initialState() {
+        return derive(
+          {
+            clock: "2026-08-13",
+            projection: { version: 1, contact: "Alex Morgan", followUpDueOn: "2026-08-15" },
+            events: [{ id: "event-1", type: "FollowUpOpened", dueOn: "2026-08-15" }],
+            evaluations: [],
+            schedules: [],
+            currentEvaluation: null,
+            last: "",
+          },
+          "Projected State changed",
+        );
+      }
+
+      function reduce(state, action) {
+        if (action === "reset") return initialState();
+        if (action === "advance") {
+          const clock = addDays(state.clock, 1);
+          return { ...state, clock, last: `Clock advanced to ${clock}. No Event recorded.` };
+        }
+        if (action === "evaluate") return derive(state, "Manual evaluation");
+        if (action === "correct") {
+          const dueOn = addDays(state.projection.followUpDueOn, 5);
+          const corrected = {
+            ...state,
+            projection: { ...state.projection, version: state.projection.version + 1, followUpDueOn: dueOn },
+            events: [
+              ...state.events,
+              {
+                id: `event-${state.events.length + 1}`,
+                type: "FollowUpDueDateCorrected",
+                replacesDueOn: state.projection.followUpDueOn,
+                dueOn,
+              },
+            ],
+          };
+          return derive(corrected, "Correction Event applied");
+        }
+        if (action === "run") {
+          let next = { ...state, schedules: state.schedules.map((schedule) => ({ ...schedule })) };
+          let ran = 0;
+          let stale = 0;
+          next.schedules.forEach((schedule) => {
+            if (schedule.status !== "pending" || schedule.dueAt.slice(0, 10) > next.clock) return;
+            if (
+              schedule.expectedStateVersion !== next.projection.version ||
+              schedule.pack !== next.currentEvaluation.pack
+            ) {
+              schedule.status = "discarded as stale";
+              stale += 1;
+              return;
+            }
+            schedule.status = "completed";
+            ran += 1;
+          });
+          if (ran > 0) next = derive(next, "Reevaluation Worker");
+          return {
+            ...next,
+          last: `Reevaluation Worker completed ${ran}; discarded ${stale} stale; future work unchanged.`,
+          };
+        }
+        return state;
+      }
+
+      const scenarios = {
+        time: {
+          description: "Advance to due date, then let the Reevaluation Worker show that time alone creates Follow Up Due without recording an Event.",
+          actions: ["advance", "advance", "run"],
+        },
+        correction: {
+          description: "Correct due date before old timer fires. Old work must be discarded because its expected state version is stale.",
+          actions: ["correct", "advance", "advance", "run", "advance", "advance", "advance", "advance", "advance", "run"],
+        },
+        replay: {
+          description: "Evaluate twice at different explicit times. Each immutable result retains enough coordinates to reproduce it from Events and pack artefact.",
+          actions: ["evaluate", "advance", "evaluate"],
+        },
+      };
+
+      let state = initialState();
+      let scenario = "time";
+      let guideStep = 0;
+
+      function renderList(items, empty, renderItem) {
+        return items.length ? `<ol>${items.map((item) => `<li>${renderItem(item)}</li>`).join("")}</ol>` : `<p class="muted">${empty}</p>`;
+      }
+
+      function render() {
+        document.querySelectorAll("[data-scenario]").forEach((button) => {
+          button.setAttribute("aria-pressed", button.dataset.scenario === scenario);
+        });
+        document.querySelector("#guide-description").textContent = scenarios[scenario].description;
+        document.querySelector("#guide-steps").innerHTML = scenarios[scenario].actions
+          .map((action, index) => {
+            const label = document.querySelector(`[data-action="${action}"]`).textContent;
+            return `<button data-guide-index="${index}" ${index !== guideStep ? "disabled" : ""}>${index + 1}. ${label}</button>`;
+          })
+          .join("");
+        document.querySelector("#last-result").textContent = state.last;
+        document.querySelector("#projected-state").innerHTML = `
+          <p><strong>Clock:</strong> ${state.clock}</p>
+          <p><strong>Subject:</strong> ${state.projection.contact}</p>
+          <p><strong>State version:</strong> ${state.projection.version}</p>
+          <p><strong>Follow-up due:</strong> ${state.projection.followUpDueOn}</p>`;
+        const evaluation = state.currentEvaluation;
+        document.querySelector("#evaluation").innerHTML = `
+          <p><strong>ID:</strong> ${evaluation.id}</p>
+          <p><strong>Coordinates:</strong> state ${evaluation.stateVersion}, ${evaluation.evaluationTime}, ${evaluation.pack}</p>
+          <p><strong>Cause:</strong> ${evaluation.cause}</p>
+          <p><strong>Facts:</strong> ${evaluation.facts.length ? evaluation.facts.map((fact) => `${fact.id} (${fact.derivedBy})`).join(", ") : "none"}</p>
+          <p><strong>Applicable Actions:</strong> ${evaluation.applicableActions.length ? evaluation.applicableActions.map((action) => `${action.id} (${action.decidedBy})`).join(", ") : "none"}</p>
+          <p><strong>Reevaluate at:</strong> ${evaluation.reevaluateAt ?? "no known time boundary"}</p>`;
+        document.querySelector("#schedule").innerHTML = renderList(
+          state.schedules,
+          "Nothing scheduled.",
+          (item) => `${item.dueAt}: expected state ${item.expectedStateVersion}, ${item.status}`,
+        );
+        document.querySelector("#events").innerHTML = renderList(
+          state.events,
+          "No Events.",
+          (event) => `${event.id}: ${event.type}, due ${event.dueOn}`,
+        );
+        document.querySelector("#history").innerHTML = renderList(
+          state.evaluations,
+          "No evaluations.",
+          (item) => `${item.id}: state ${item.stateVersion} at ${item.evaluationTime}; ${item.facts.length} Fact(s), ${item.applicableActions.length} Applicable Action(s)`,
+        );
+        document.querySelectorAll("[data-guide-index]").forEach((button) => {
+          button.addEventListener("click", () => {
+            state = reduce(state, scenarios[scenario].actions[guideStep]);
+            guideStep += 1;
+            render();
+          });
+        });
+      }
+
+      document.querySelectorAll("[data-scenario]").forEach((button) => {
+        button.addEventListener("click", () => {
+          scenario = button.dataset.scenario;
+          guideStep = 0;
+          state = initialState();
+          render();
+        });
+      });
+      document.querySelectorAll("[data-action]").forEach((button) => {
+        button.addEventListener("click", () => {
+          state = reduce(state, button.dataset.action);
+          render();
+        });
+      });
+      render();
+    </script>
+  </body>
+</html>
