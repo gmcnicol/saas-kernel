@@ -1,0 +1,55 @@
+# Semantic Workflow Kernel
+
+A reusable core for products whose current facts determine which human actions are applicable, authorised, and durably executed.
+
+## Language
+
+**Kernel**:
+The product-neutral contracts and mechanisms shared by every semantic workflow product.
+_Avoid_: Platform, framework, core kernel
+
+**Semantic Pack**:
+An extension defining a product domain through semantic types, facts, actions, policies, and action handling.
+_Avoid_: Product pack, domain plugin
+
+**Presentation Pack**:
+An extension defining how semantic capabilities appear and behave for a particular audience or workflow.
+_Avoid_: UI theme, semantic pack
+
+**Acceptance Fixture**:
+A product-shaped scenario that validates the Kernel contract. Acceptance Fixtures are contrasting peers, not levels in a complexity ladder.
+_Avoid_: Demo app, complexity stage
+
+## Workflow
+
+**Projected State**:
+The current domain state derived from recorded Events.
+_Avoid_: Source of truth, mutable record
+
+**Fact**:
+A semantic statement derived from Projected State and used to evaluate business applicability.
+_Avoid_: Permission, raw field
+
+**Action**:
+A business capability defined by a Semantic Pack.
+_Avoid_: Command, button
+
+**Applicable Action**:
+An Action whose business preconditions hold for a subject in the current Projected State.
+_Avoid_: Authorised action, available button
+
+**Action Offer**:
+An Applicable Action that a principal is authorised to discover or invoke.
+_Avoid_: Applicable Action, permission
+
+**Intent**:
+A durable, accepted request to perform an Action against a known state version.
+_Avoid_: Intention, command, job
+
+**Event**:
+A recorded domain outcome emitted when an Intent is handled.
+_Avoid_: Intent, notification
+
+**Business Workflow**:
+The product-specific progression of work as Projected State changes and new Actions become applicable. A Business Workflow may use explicit domain concepts, but is not a universal stage-and-transition graph.
+_Avoid_: Intent lifecycle, workflow engine
