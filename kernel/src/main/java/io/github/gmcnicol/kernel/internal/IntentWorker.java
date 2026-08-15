@@ -1,37 +1,26 @@
 package io.github.gmcnicol.kernel.internal;
 
 import java.time.Clock;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import org.springframework.context.SmartLifecycle;
 
-final class IntentWorker implements SmartLifecycle {
+final class IntentWorker extends FixedDelayWorker {
 
     private static final System.Logger LOG = System.getLogger(IntentWorker.class.getName());
     private final IntentExecutionService execution;
-    private final IntentWorkerProperties policy;
     private final Clock clock;
-    private volatile boolean running;
-    private ScheduledExecutorService scheduler;
 
     IntentWorker(IntentExecutionService execution, IntentWorkerProperties policy, Clock clock) {
+        super(policy);
         this.execution = execution;
-        this.policy = policy;
         this.clock = clock;
     }
 
     @Override
-    public void start() {
-        if (!policy.enabled() || running) return;
-        scheduler = Executors.newSingleThreadScheduledExecutor(runnable ->
-                Thread.ofPlatform().daemon().name("kernel-intent-worker").unstarted(runnable));
-        long delay = policy.pollingInterval().toMillis();
-        scheduler.scheduleWithFixedDelay(this::poll, delay, delay, TimeUnit.MILLISECONDS);
-        running = true;
+    String threadName() {
+        return "kernel-intent-worker";
     }
 
-    private void poll() {
+    @Override
+    void poll() {
         try {
             execution.processDue(clock.instant());
         } catch (RuntimeException exception) {
@@ -40,14 +29,4 @@ final class IntentWorker implements SmartLifecycle {
         }
     }
 
-    @Override
-    public void stop() {
-        if (scheduler != null) scheduler.shutdown();
-        running = false;
-    }
-
-    @Override
-    public boolean isRunning() {
-        return running;
-    }
 }

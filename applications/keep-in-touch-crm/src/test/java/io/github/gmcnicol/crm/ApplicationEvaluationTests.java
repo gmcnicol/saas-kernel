@@ -24,6 +24,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -133,11 +134,23 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         assertThat(initial.facts()).isEmpty();
         assertThat(kernel.processNextReevaluation(firstDue.minusSeconds(1))).isEmpty();
 
+        var dueSnapshot = kernel.processNextReevaluation(firstDue).orElseThrow();
         var correctedDue = Instant.parse("2035-08-15T12:00:00Z");
-        kernel.evaluate(new ProjectedState("tenant-one", subject, 201, Map.of(
-                "followUpDueAt", correctedDue.toString(), "followUpCompleted", "false")),
-                Instant.parse("2035-08-15T10:05:00Z"));
-        assertThat(kernel.processNextReevaluation(firstDue)).isEmpty();
+        restoreDerivationAt(firstDue);
+        var snoozeOffer = kernel.authorise(
+                        "tenant-one", dueSnapshot.id(), new Principal("Owner", "gareth"), firstDue)
+                .actionOffers().stream()
+                .filter(candidate -> candidate.actionId().endsWith("snoozeFollowUp"))
+                .findFirst().orElseThrow();
+        var correction = kernel.accept(snoozeOffer.id(), UUID.randomUUID(), new CandidatePayload(
+                "io.github.gmcnicol.crm.SnoozeFollowUpInput", 1, Map.of("until", correctedDue.toString())));
+        assertThat(processUntil(correction.id(), firstDue.plusSeconds(1)).status()).isEqualTo(IntentStatus.SUCCEEDED);
+        assertThat(kernel.processNextReevaluation(firstDue.plusSeconds(1)))
+                .hasValueSatisfying(snapshot -> {
+                    assertThat(snapshot.projectedStateVersion()).isEqualTo(201);
+                    assertThat(snapshot.facts()).isEmpty();
+                    assertThat(snapshot.reevaluateAt()).contains(correctedDue);
+                });
         assertThat(kernel.processNextReevaluation(correctedDue.plusSeconds(3_600)))
                 .hasValueSatisfying(snapshot -> assertThat(snapshot.facts())
                         .extracting(fact -> fact.type())
@@ -211,6 +224,85 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         assertThat(kernel.processNextReevaluation(dueAt))
                 .hasValueSatisfying(snapshot -> assertThat(snapshot.subject()).isEqualTo(subject));
         assertThat(kernel.processNextReevaluation(dueAt)).isEmpty();
+    }
+
+    @Test
+    void rollsBackReevaluationWhenLeaseExpiresDuringDerivation() {
+        var dueAt = Instant.parse("2038-08-15T09:00:00Z");
+        for (int request = 0; request < 100; request++) {
+            kernel.processNextReevaluation(dueAt.minusSeconds(1));
+        }
+        var subject = new Subject("crm.Contact", "expired-during-derivation");
+        kernel.evaluate(new ProjectedState("tenant-one", subject, 206, Map.of(
+                "followUpDueAt", dueAt.toString(), "followUpCompleted", "false")),
+                dueAt.minusSeconds(3_600));
+
+        var claimedAt = Instant.parse("2038-08-15T08:00:00Z");
+        expireReevaluationLeaseDuringDerivation(claimedAt);
+        assertThat(kernel.processNextReevaluation(dueAt)).isEmpty();
+        Integer committed = new TransactionTemplate(transactionManager).execute(status -> {
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            return jdbc.queryForObject("""
+                    SELECT count(*) FROM kernel.evaluation_snapshot
+                    WHERE subject_type = ? AND subject_id = ? AND evaluated_at = ?
+                    """, Integer.class, subject.type(), subject.id(), java.sql.Timestamp.from(dueAt));
+        });
+        assertThat(committed).isZero();
+
+        restoreDerivationAt(claimedAt.plusSeconds(31));
+        assertThat(kernel.processNextReevaluation(dueAt))
+                .hasValueSatisfying(snapshot -> assertThat(snapshot.subject()).isEqualTo(subject));
+    }
+
+    @Test
+    void catchesUpOverdueReevaluationAfterApplicationRestart() {
+        var subject = new Subject("crm.Contact", "restart-temporal-alex");
+        var dueAt = Instant.parse("2039-08-15T09:00:00Z");
+        var properties = Map.<String, Object>of(
+                "spring.datasource.url", postgres.getJdbcUrl(),
+                "spring.datasource.username", "kernel_test_login",
+                "spring.datasource.password", "kernel-test",
+                "spring.flyway.url", postgres.getJdbcUrl(),
+                "spring.flyway.user", postgres.getUsername(),
+                "spring.flyway.password", postgres.getPassword(),
+                "kernel.intent-worker.enabled", "false");
+
+        try (var beforeRestart = new SpringApplicationBuilder(KeepInTouchCrmApplication.class)
+                .properties(properties).run()) {
+            beforeRestart.getBean(Kernel.class).evaluate(new ProjectedState(
+                    "tenant-one", subject, 207, Map.of(
+                            "followUpDueAt", dueAt.toString(), "followUpCompleted", "false")),
+                    dueAt.minusSeconds(3_600));
+        }
+        try (var afterRestart = new SpringApplicationBuilder(KeepInTouchCrmApplication.class)
+                .properties(properties).run()) {
+            var restartedKernel = afterRestart.getBean(Kernel.class);
+            var caughtUp = java.util.stream.IntStream.range(0, 100)
+                    .mapToObj(ignored -> restartedKernel.processNextReevaluation(dueAt.plusSeconds(3_600)))
+                    .flatMap(Optional::stream)
+                    .filter(snapshot -> snapshot.subject().equals(subject))
+                    .findFirst();
+            assertThat(caughtUp).hasValueSatisfying(snapshot -> {
+                assertThat(snapshot.facts()).hasSize(1);
+                assertThat(snapshot.applicableActions()).hasSize(3);
+            });
+        }
+
+        var persistedOutputCounts = new TransactionTemplate(transactionManager).execute(status -> {
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            return java.util.List.of(
+                    jdbc.queryForObject("""
+                            SELECT count(*) FROM kernel.evaluation_fact fact
+                            JOIN kernel.evaluation_snapshot snapshot ON snapshot.id = fact.snapshot_id
+                            WHERE snapshot.subject_type = ? AND snapshot.subject_id = ?
+                            """, Integer.class, subject.type(), subject.id()),
+                    jdbc.queryForObject("""
+                            SELECT count(*) FROM kernel.evaluation_applicable_action action
+                            JOIN kernel.evaluation_snapshot snapshot ON snapshot.id = action.snapshot_id
+                            WHERE snapshot.subject_type = ? AND snapshot.subject_id = ?
+                            """, Integer.class, subject.type(), subject.id()));
+        });
+        assertThat(persistedOutputCounts).containsExactly(1, 3);
     }
 
     @Test

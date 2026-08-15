@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import io.github.gmcnicol.kernel.application.RetryableIntentException;
+import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -54,6 +55,9 @@ class ApplicationEvaluationTests {
 
     @MockitoSpyBean("recordRecordsReceivedHandler")
     IntentHandler recordsHandler;
+
+    @MockitoSpyBean
+    private SemanticPackVersion semanticPack;
 
     @Test
     void derivesFilingAndRecordsFactsFromContrastingState() {
@@ -94,7 +98,7 @@ class ApplicationEvaluationTests {
     }
 
     @Test
-    void catchesUpDeadlineAndSupersedesCorrectionThroughApplicationSeam() {
+    void catchesUpDeadlineAndSupersedesEventCorrectionThroughApplicationSeam() {
         var subject = new Subject("ledgerling.Filing", "temporal-acme");
         var firstDue = Instant.parse("2036-09-01T09:00:00Z");
         var firstChange = firstDue.minusSeconds(7 * 24 * 60 * 60);
@@ -102,22 +106,52 @@ class ApplicationEvaluationTests {
             kernel.processNextReevaluation(firstChange.minusSeconds(86_400));
         }
         var initial = kernel.evaluate(new ProjectedState("tenant-one", subject, 200, Map.of(
-                "filingDueAt", firstDue.toString(), "recordsOutstanding", "false",
+                "filingDueAt", firstDue.toString(), "recordsOutstanding", "true",
+                "documentRequestId", "request-temporal-acme",
                 "preparationStarted", "false")), Instant.parse("2036-08-01T09:00:00Z"));
         assertThat(initial.reevaluateAt()).contains(firstChange);
         assertThat(kernel.processNextReevaluation(firstChange.minusSeconds(1))).isEmpty();
 
-        var correctedDue = Instant.parse("2036-10-01T09:00:00Z");
-        var correctedChange = correctedDue.minusSeconds(7 * 24 * 60 * 60);
-        kernel.evaluate(new ProjectedState("tenant-one", subject, 201, Map.of(
-                "filingDueAt", correctedDue.toString(), "recordsOutstanding", "false",
-                "preparationStarted", "false")), Instant.parse("2036-08-02T09:00:00Z"));
-        assertThat(kernel.processNextReevaluation(firstChange)).isEmpty();
-        assertThat(kernel.processNextReevaluation(correctedChange.plusSeconds(86_400)))
+        var offer = kernel.authorise(
+                        "tenant-one", initial.id(), new Principal("Staff", "accountant"),
+                        Instant.parse("2036-08-02T08:59:00Z"))
+                .actionOffers().getFirst();
+        var correction = kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
+                "io.github.gmcnicol.ledgerling.RecordRecordsReceivedInput", 1,
+                Map.of("receivedAt", "2036-08-02T09:00:00Z")));
+        assertThat(processUntil(correction.id(), Instant.parse("2036-08-02T09:00:00Z")).status())
+                .isEqualTo(IntentStatus.SUCCEEDED);
+        assertThat(kernel.processNextReevaluation(Instant.parse("2036-08-02T09:00:01Z")))
+                .hasValueSatisfying(snapshot -> {
+                    assertThat(snapshot.projectedStateVersion()).isEqualTo(201);
+                    assertThat(snapshot.facts()).isEmpty();
+                    assertThat(snapshot.applicableActions()).extracting(action -> action.actionId())
+                            .containsExactly("io.github.gmcnicol.ledgerling.LedgerlingActions.startPreparation");
+                    assertThat(snapshot.reevaluateAt()).contains(firstChange);
+                });
+        assertThat(kernel.processNextReevaluation(firstChange))
                 .hasValueSatisfying(snapshot -> assertThat(snapshot.facts())
                         .extracting(fact -> fact.type())
                         .containsExactly("io.github.gmcnicol.ledgerling.FilingDueSoon"));
-        assertThat(kernel.processNextReevaluation(correctedChange.plusSeconds(86_400))).isEmpty();
+        assertThat(kernel.processNextReevaluation(firstChange)).isEmpty();
+    }
+
+    @Test
+    void discardsLedgerlingReevaluationWhenSemanticPackChanges() {
+        var dueAt = Instant.parse("2037-09-01T09:00:00Z");
+        for (int request = 0; request < 100; request++) {
+            kernel.processNextReevaluation(dueAt.minusSeconds(1));
+        }
+        var subject = new Subject("ledgerling.Filing", "stale-temporal-acme");
+        kernel.evaluate(new ProjectedState("tenant-one", subject, 202, Map.of(
+                "filingDueAt", dueAt.plusSeconds(7 * 24 * 60 * 60).toString(),
+                "recordsOutstanding", "false", "preparationStarted", "false")),
+                dueAt.minusSeconds(86_400));
+
+        org.mockito.Mockito.doReturn("0".repeat(64)).when(semanticPack).checksum();
+        assertThat(kernel.processNextReevaluation(dueAt)).isEmpty();
+        org.mockito.Mockito.reset(semanticPack);
+        assertThat(kernel.processNextReevaluation(dueAt)).isEmpty();
     }
 
     @Test
@@ -295,7 +329,7 @@ class ApplicationEvaluationTests {
 
     @AfterEach
     void restoreHandler() {
-        org.mockito.Mockito.reset(recordsHandler);
+        org.mockito.Mockito.reset(recordsHandler, semanticPack);
     }
 
     private io.github.gmcnicol.kernel.application.Intent acceptRecords(String subjectId, long version) {

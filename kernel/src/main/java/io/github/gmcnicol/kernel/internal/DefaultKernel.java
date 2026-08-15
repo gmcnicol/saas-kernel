@@ -121,8 +121,12 @@ final class DefaultKernel implements Kernel {
         ReevaluationClaim claim = transactions.execute(status -> claimReevaluation(
                 token, evaluatedAt, claimedAt, claimedAt.plus(worker.leaseDuration())));
         if (claim == null) return new ReevaluationOutcome(false, null);
-        return new ReevaluationOutcome(
-                true, transactions.execute(status -> reevaluate(claim, token, evaluatedAt)));
+        try {
+            return new ReevaluationOutcome(
+                    true, transactions.execute(status -> reevaluate(claim, token, evaluatedAt)));
+        } catch (ReevaluationLeaseLostException ignored) {
+            return new ReevaluationOutcome(true, null);
+        }
     }
 
     @Override
@@ -141,6 +145,13 @@ final class DefaultKernel implements Kernel {
         }
         TenantContext.use(jdbc, state.tenantId());
         TenantContext.lockSubject(jdbc, state.tenantId(), state.subject());
+        EvaluationSnapshot snapshot = evaluateSnapshot(state, evaluatedAt);
+        EvaluationSnapshot persisted = persist(snapshot);
+        scheduleReevaluation(persisted);
+        return persisted;
+    }
+
+    private EvaluationSnapshot evaluateSnapshot(ProjectedState state, Instant evaluatedAt) {
         String stateChecksum = persistProjectedState(state);
         List<FactDerivation.Derivation> results = derivations.stream()
                 .map(derivation -> derivation.derive(state, evaluatedAt))
@@ -160,7 +171,7 @@ final class DefaultKernel implements Kernel {
                         policies.stream().flatMap(policy -> policy.nextChange(state, facts, evaluatedAt).stream()))
                 .filter(evaluatedAt::isBefore)
                 .min(Comparator.naturalOrder());
-        var snapshot = new EvaluationSnapshot(
+        return new EvaluationSnapshot(
                 UUID.randomUUID(),
                 state.tenantId(),
                 state.subject(),
@@ -173,9 +184,6 @@ final class DefaultKernel implements Kernel {
                 facts,
                 actions,
                 reevaluateAt);
-        EvaluationSnapshot persisted = persist(snapshot);
-        scheduleReevaluation(persisted);
-        return persisted;
     }
 
     private ReevaluationClaim claimReevaluation(UUID token, Instant dueAt, Instant claimedAt, Instant claimUntil) {
@@ -198,13 +206,14 @@ final class DefaultKernel implements Kernel {
         TenantContext.assumeWorkerRole(jdbc);
         TenantContext.useAfterRole(jdbc, claim.tenantId());
         TenantContext.lockSubject(jdbc, claim.tenantId(), claim.subject());
-        Integer owned = jdbc.queryForObject("""
-                SELECT count(*) FROM kernel.reevaluation_request
+        List<Instant> leases = jdbc.query("""
+                SELECT lease_until FROM kernel.reevaluation_request
                 WHERE tenant_id = ? AND subject_type = ? AND subject_id = ?
                   AND lease_token = ? AND lease_until >= ?
-                """, Integer.class, claim.tenantId(), claim.subject().type(), claim.subject().id(), token,
-                Timestamp.from(clock.instant()));
-        if (owned == null || owned != 1) return null;
+                FOR UPDATE
+                """, (result, row) -> result.getTimestamp("lease_until").toInstant(),
+                claim.tenantId(), claim.subject().type(), claim.subject().id(), token, Timestamp.from(clock.instant()));
+        if (leases.isEmpty()) return null;
         ProjectedState state = execution.currentState(claim.tenantId(), claim.subject());
         if (state.version() != claim.expectedStateVersion()
                 || !semanticPackVersion.id().equals(claim.semanticPackId())
@@ -215,7 +224,19 @@ final class DefaultKernel implements Kernel {
                     """, claim.tenantId(), claim.subject().type(), claim.subject().id(), token);
             return null;
         }
-        return evaluateInTransaction(state, evaluatedAt);
+        TenantContext.use(jdbc, claim.tenantId());
+        EvaluationSnapshot persisted = persist(evaluateSnapshot(state, evaluatedAt));
+        Integer owned = jdbc.queryForObject("""
+                SELECT count(*) FROM kernel.reevaluation_request
+                WHERE tenant_id = ? AND subject_type = ? AND subject_id = ?
+                  AND lease_token = ? AND lease_until >= ?
+                """, Integer.class, claim.tenantId(), claim.subject().type(), claim.subject().id(), token,
+                Timestamp.from(clock.instant()));
+        if (owned == null || owned != 1) {
+            throw new ReevaluationLeaseLostException();
+        }
+        scheduleReevaluation(persisted);
+        return persisted;
     }
 
     private void scheduleReevaluation(EvaluationSnapshot snapshot) {
@@ -367,4 +388,6 @@ final class DefaultKernel implements Kernel {
             String semanticPackChecksum) {}
 
     private record ReevaluationOutcome(boolean claimed, EvaluationSnapshot snapshot) {}
+
+    private static final class ReevaluationLeaseLostException extends RuntimeException {}
 }

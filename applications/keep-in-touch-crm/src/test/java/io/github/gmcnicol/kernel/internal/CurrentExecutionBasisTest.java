@@ -7,7 +7,10 @@ import static org.mockito.Mockito.reset;
 
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.application.RetryableIntentException;
+import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
+import java.time.Clock;
+import java.time.Instant;
 import org.junit.jupiter.api.AfterEach;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
@@ -21,6 +24,12 @@ public abstract class CurrentExecutionBasisTest {
 
     @MockitoSpyBean("recordInteractionHandler")
     private IntentHandler recordInteractionHandler;
+
+    @MockitoSpyBean("followUpDueDerivation")
+    private FactDerivation followUpDueDerivation;
+
+    @MockitoSpyBean
+    private Clock clock;
 
     protected final void changeCurrentSemanticPack() {
         doReturn("0".repeat(64)).when(semanticPack).checksum();
@@ -53,8 +62,21 @@ public abstract class CurrentExecutionBasisTest {
         reset(recordInteractionHandler);
     }
 
+    protected final void expireReevaluationLeaseDuringDerivation(Instant claimedAt) {
+        doReturn(claimedAt).when(clock).instant();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            doReturn(claimedAt.plusSeconds(31)).when(clock).instant();
+            return invocation.callRealMethod();
+        }).when(followUpDueDerivation).derive(any(), any());
+    }
+
+    protected final void restoreDerivationAt(Instant currentTime) {
+        reset(followUpDueDerivation, clock);
+        doReturn(currentTime).when(clock).instant();
+    }
+
     @AfterEach
     void restoreCurrentExecutionBasis() {
-        reset(cedar, semanticPack, recordInteractionHandler);
+        reset(cedar, semanticPack, recordInteractionHandler, followUpDueDerivation, clock);
     }
 }
