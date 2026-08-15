@@ -39,7 +39,9 @@ final class LedgerlingPresentation {
         String field = action.equals("recordRecordsReceived")
                 ? "<input name=\"receivedAt\" required>"
                 : "<input type=\"hidden\" name=\"confirmed\" value=\"true\">";
-        return "<form method=\"post\" action=\"/presentation/intents/" + offer.id() + "\">"
+        return "<form method=\"post\" action=\"/presentation/intents/" + offer.id()
+                + "\" data-on:submit=\"@post('/presentation/intents/" + offer.id()
+                + "', {contentType: 'form'})\">"
                 + "<input type=\"hidden\" name=\"intentId\" value=\"" + UUID.randomUUID() + "\">"
                 + "<input type=\"hidden\" name=\"payloadType\" value=\""
                 + escape(offer.inputType()) + "\">"

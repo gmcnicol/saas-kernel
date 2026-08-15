@@ -34,8 +34,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import org.testcontainers.junit.jupiter.Container;
@@ -405,7 +407,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
 
         var desktop = desktopPresentation.render(envelope);
         var mobile = mobilePresentation.render(envelope);
-        assertThat(desktop.html()).contains("Relationship workspace", "Alex &lt;Morgan&gt;")
+        assertThat(desktop.html()).contains("Relationship workspace", "Alex &lt;Morgan&gt;", "data-on:submit", "@post(")
                 .doesNotContain("never render");
         assertThat(mobile.html()).contains("Next relationship").doesNotContain("Relationship workspace");
         assertThat(desktop.eventStream()).startsWith("event: datastar-patch-elements\n");
@@ -422,6 +424,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 .findFirst().orElseThrow();
         var intentId = UUID.randomUUID();
         mvc.perform(post("/presentation/intents/{offerId}", offer.id())
+                        .with(user("gareth"))
                         .contentType("application/x-www-form-urlencoded")
                         .param("intentId", intentId.toString())
                         .param("payloadType", offer.inputType())
@@ -438,8 +441,14 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                         .header("X-Tenant-Id", "tenant-one")
                         .header("X-Principal-Type", "Owner")
                         .header("X-Principal-Id", "gareth")
-                        .param("snapshotId", snapshot.id().toString())
-                        .param("at", presentedAt.toString()))
+                        .param("snapshotId", snapshot.id().toString()))
+                .andExpect(status().isUnauthorized());
+
+        mvc.perform(get("/presentation/crm/desktop/events")
+                        .with(user("gareth").authorities(
+                                new SimpleGrantedAuthority("TENANT_tenant-one"),
+                                new SimpleGrantedAuthority("PRINCIPAL_Owner")))
+                        .param("snapshotId", snapshot.id().toString()))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith("text/event-stream"))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("Relationship workspace")));

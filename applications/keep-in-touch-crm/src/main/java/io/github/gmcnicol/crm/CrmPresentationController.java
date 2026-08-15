@@ -5,6 +5,7 @@ import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.presentationpack.PresentationResult;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -12,11 +13,12 @@ import java.util.UUID;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.Authentication;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -26,36 +28,33 @@ final class CrmPresentationController {
     private final Kernel kernel;
     private final PresentationPack desktop;
     private final PresentationPack mobile;
+    private final Clock clock;
 
     CrmPresentationController(
             Kernel kernel,
             @Qualifier("crmDesktopPresentationPack") PresentationPack desktop,
-            @Qualifier("crmMobilePresentationPack") PresentationPack mobile) {
+            @Qualifier("crmMobilePresentationPack") PresentationPack mobile,
+            Clock clock) {
         this.kernel = kernel;
         this.desktop = desktop;
         this.mobile = mobile;
+        this.clock = clock;
     }
 
     @GetMapping(path = "/presentation/crm/{experience}", produces = MediaType.TEXT_HTML_VALUE)
     String html(
             @PathVariable String experience,
-            @RequestHeader("X-Tenant-Id") String tenantId,
-            @RequestHeader("X-Principal-Type") String principalType,
-            @RequestHeader("X-Principal-Id") String principalId,
-            @RequestParam UUID snapshotId,
-            @RequestParam Instant at) {
-        return render(experience, tenantId, principalType, principalId, snapshotId, at).html();
+            Authentication authentication,
+            @RequestParam UUID snapshotId) {
+        return render(experience, caller(authentication), snapshotId).html();
     }
 
     @GetMapping(path = "/presentation/crm/{experience}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     String events(
             @PathVariable String experience,
-            @RequestHeader("X-Tenant-Id") String tenantId,
-            @RequestHeader("X-Principal-Type") String principalType,
-            @RequestHeader("X-Principal-Id") String principalId,
-            @RequestParam UUID snapshotId,
-            @RequestParam Instant at) {
-        return render(experience, tenantId, principalType, principalId, snapshotId, at).eventStream();
+            Authentication authentication,
+            @RequestParam UUID snapshotId) {
+        return render(experience, caller(authentication), snapshotId).eventStream();
     }
 
     @PostMapping(
@@ -82,18 +81,37 @@ final class CrmPresentationController {
 
     private PresentationResult render(
             String experience,
-            String tenantId,
-            String principalType,
-            String principalId,
-            UUID snapshotId,
-            Instant at) {
+            Caller caller,
+            UUID snapshotId) {
         PresentationPack pack = switch (experience) {
             case "desktop" -> desktop;
             case "mobile" -> mobile;
             default -> throw new IllegalArgumentException("Unknown CRM presentation experience");
         };
-        return pack.render(kernel.present(tenantId, snapshotId, new Principal(principalType, principalId), at));
+        return pack.render(kernel.present(
+                caller.tenantId(), snapshotId, new Principal(caller.principalType(), caller.principalId()),
+                Instant.now(clock)));
     }
+
+    private static Caller caller(Authentication authentication) {
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new AccessDeniedException("Authenticated caller required");
+        }
+        String tenant = authority(authentication, "TENANT_");
+        String type = authority(authentication, "PRINCIPAL_");
+        return new Caller(tenant, type, authentication.getName());
+    }
+
+    private static String authority(Authentication authentication, String prefix) {
+        var values = authentication.getAuthorities().stream().map(Object::toString)
+                .filter(value -> value.startsWith(prefix)).toList();
+        if (values.size() != 1 || values.getFirst().length() == prefix.length()) {
+            throw new AccessDeniedException("Exactly one " + prefix + " authority required");
+        }
+        return values.getFirst().substring(prefix.length());
+    }
+
+    private record Caller(String tenantId, String principalType, String principalId) {}
 
     private static String single(MultiValueMap<String, String> form, String name) {
         var values = form.get(name);

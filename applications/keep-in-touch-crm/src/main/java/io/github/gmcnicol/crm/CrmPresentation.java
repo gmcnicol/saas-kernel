@@ -47,7 +47,9 @@ final class CrmPresentation {
             case "snoozeFollowUp" -> "<input name=\"until\" required>";
             default -> "";
         };
-        return "<form method=\"post\" action=\"/presentation/intents/" + offer.id() + "\">"
+        return "<form method=\"post\" action=\"/presentation/intents/" + offer.id()
+                + "\" data-on:submit=\"@post('/presentation/intents/" + offer.id()
+                + "', {contentType: 'form'})\">"
                 + "<input type=\"hidden\" name=\"intentId\" value=\"" + UUID.randomUUID() + "\">"
                 + "<input type=\"hidden\" name=\"payloadType\" value=\"" + escape(offer.inputType()) + "\">"
                 + "<input type=\"hidden\" name=\"payloadVersion\" value=\"1\">" + field

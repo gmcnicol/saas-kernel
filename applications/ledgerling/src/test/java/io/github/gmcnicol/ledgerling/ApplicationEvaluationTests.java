@@ -34,8 +34,10 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -207,7 +209,7 @@ class ApplicationEvaluationTests {
                 "tenant-one", snapshot.id(), new Principal("Client", "acme"), presentedAt);
 
         var rendered = presentation.render(staff);
-        assertThat(rendered.html()).contains("Filing operations", "Waiting &lt;for&gt; records")
+        assertThat(rendered.html()).contains("Filing operations", "Waiting &lt;for&gt; records", "data-on:submit", "@post(")
                 .doesNotContain("principal", "semanticPackChecksum", "stateVersion");
         assertThat(rendered.eventStream()).startsWith("event: datastar-patch-elements\n");
         assertThat(presentation.render(client).html()).doesNotContain("<form");
@@ -215,6 +217,7 @@ class ApplicationEvaluationTests {
         var offer = staff.actionOffers().getFirst();
         var intentId = UUID.randomUUID();
         mvc.perform(post("/presentation/intents/{offerId}", offer.id())
+                        .with(user("accountant"))
                         .contentType("application/x-www-form-urlencoded")
                         .param("intentId", intentId.toString())
                         .param("payloadType", offer.inputType())
@@ -230,8 +233,14 @@ class ApplicationEvaluationTests {
                         .header("X-Tenant-Id", "tenant-one")
                         .header("X-Principal-Type", "Staff")
                         .header("X-Principal-Id", "accountant")
-                        .param("snapshotId", snapshot.id().toString())
-                        .param("at", presentedAt.toString()))
+                        .param("snapshotId", snapshot.id().toString()))
+                .andExpect(status().isUnauthorized());
+
+        mvc.perform(get("/presentation/ledgerling/events")
+                        .with(user("accountant").authorities(
+                                new SimpleGrantedAuthority("TENANT_tenant-one"),
+                                new SimpleGrantedAuthority("PRINCIPAL_Staff")))
+                        .param("snapshotId", snapshot.id().toString()))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith("text/event-stream"))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("Filing operations")));

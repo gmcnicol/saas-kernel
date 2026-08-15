@@ -4,17 +4,19 @@ import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.Authentication;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -23,30 +25,26 @@ final class LedgerlingPresentationController {
 
     private final Kernel kernel;
     private final PresentationPack pack;
+    private final Clock clock;
 
-    LedgerlingPresentationController(Kernel kernel, PresentationPack pack) {
+    LedgerlingPresentationController(Kernel kernel, PresentationPack pack, Clock clock) {
         this.kernel = kernel;
         this.pack = pack;
+        this.clock = clock;
     }
 
     @GetMapping(path = "/presentation/ledgerling", produces = MediaType.TEXT_HTML_VALUE)
     String html(
-            @RequestHeader("X-Tenant-Id") String tenantId,
-            @RequestHeader("X-Principal-Type") String principalType,
-            @RequestHeader("X-Principal-Id") String principalId,
-            @RequestParam UUID snapshotId,
-            @RequestParam Instant at) {
-        return render(tenantId, principalType, principalId, snapshotId, at).html();
+            Authentication authentication,
+            @RequestParam UUID snapshotId) {
+        return render(caller(authentication), snapshotId).html();
     }
 
     @GetMapping(path = "/presentation/ledgerling/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     String events(
-            @RequestHeader("X-Tenant-Id") String tenantId,
-            @RequestHeader("X-Principal-Type") String principalType,
-            @RequestHeader("X-Principal-Id") String principalId,
-            @RequestParam UUID snapshotId,
-            @RequestParam Instant at) {
-        return render(tenantId, principalType, principalId, snapshotId, at).eventStream();
+            Authentication authentication,
+            @RequestParam UUID snapshotId) {
+        return render(caller(authentication), snapshotId).eventStream();
     }
 
     @PostMapping(
@@ -72,13 +70,32 @@ final class LedgerlingPresentationController {
     }
 
     private io.github.gmcnicol.kernel.presentationpack.PresentationResult render(
-            String tenantId,
-            String principalType,
-            String principalId,
-            UUID snapshotId,
-            Instant at) {
-        return pack.render(kernel.present(tenantId, snapshotId, new Principal(principalType, principalId), at));
+            Caller caller,
+            UUID snapshotId) {
+        return pack.render(kernel.present(
+                caller.tenantId(), snapshotId, new Principal(caller.principalType(), caller.principalId()),
+                Instant.now(clock)));
     }
+
+    private static Caller caller(Authentication authentication) {
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new AccessDeniedException("Authenticated caller required");
+        }
+        return new Caller(
+                authority(authentication, "TENANT_"), authority(authentication, "PRINCIPAL_"),
+                authentication.getName());
+    }
+
+    private static String authority(Authentication authentication, String prefix) {
+        var values = authentication.getAuthorities().stream().map(Object::toString)
+                .filter(value -> value.startsWith(prefix)).toList();
+        if (values.size() != 1 || values.getFirst().length() == prefix.length()) {
+            throw new AccessDeniedException("Exactly one " + prefix + " authority required");
+        }
+        return values.getFirst().substring(prefix.length());
+    }
+
+    private record Caller(String tenantId, String principalType, String principalId) {}
 
     private static String single(MultiValueMap<String, String> form, String name) {
         var values = form.get(name);
