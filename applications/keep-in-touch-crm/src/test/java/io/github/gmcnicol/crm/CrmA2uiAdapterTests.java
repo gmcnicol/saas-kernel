@@ -21,6 +21,8 @@ class CrmA2uiAdapterTests {
 
     @Test
     void validatesAndRendersOnlyCurrentOpaqueOffer() {
+        assertThat(CrmA2uiAdapter.CATALOGUE)
+                .isEqualTo("https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json");
         var rendered = adapter.render(envelope(), messages(OFFER_ID, "Text", "/title"));
 
         assertThat(rendered.html())
@@ -61,6 +63,25 @@ class CrmA2uiAdapterTests {
                 .isInstanceOf(CrmA2uiAdapter.InvalidSurface.class);
         assertThatThrownBy(() -> adapter.render(envelope(), valid.replace("invokeActionOffer", "inventAction")))
                 .isInstanceOf(CrmA2uiAdapter.InvalidSurface.class);
+        assertThatThrownBy(() -> adapter.render(envelope(), valid.replace("\"id\":\"root\"", "\"id\":\"page\"")))
+                .isInstanceOf(CrmA2uiAdapter.InvalidSurface.class);
+    }
+
+    @Test
+    void rejectsNestedButtonsAndAmplifiedOutput() {
+        assertThatThrownBy(() -> adapter.render(envelope(), nestedButtons(false)))
+                .isInstanceOf(CrmA2uiAdapter.InvalidSurface.class);
+        assertThatThrownBy(() -> adapter.render(envelope(), nestedButtons(true)))
+                .isInstanceOf(CrmA2uiAdapter.InvalidSurface.class);
+
+        String fields = java.util.stream.IntStream.range(0, 17)
+                .mapToObj(index -> "\"field" + index + "\":{\"path\":\"/note\"}")
+                .collect(java.util.stream.Collectors.joining(","));
+        String amplified = messages(OFFER_ID, "Text", "/title")
+                .replace("\"note\":{\"path\":\"/note\"}", fields)
+                .replace("Talk <soon>", "x".repeat(4_096));
+        assertThatThrownBy(() -> adapter.render(envelope(), amplified))
+                .isInstanceOf(CrmA2uiAdapter.InvalidSurface.class);
     }
 
     private static PresentationEnvelope envelope() {
@@ -97,5 +118,24 @@ class CrmA2uiAdapterTests {
                   }}
                 ]
                 """.formatted(CrmA2uiAdapter.CATALOGUE, textComponent, path, offerId);
+    }
+
+    private static String nestedButtons(boolean throughColumn) {
+        String middle = throughColumn
+                ? "{\"id\":\"middle\",\"component\":\"Column\",\"children\":[\"inner\"]},"
+                : "";
+        String child = throughColumn ? "middle" : "inner";
+        return """
+                [
+                  {"version":"v0.9.1","createSurface":{"surfaceId":"follow-up","catalogId":"%s"}},
+                  {"version":"v0.9.1","updateComponents":{"surfaceId":"follow-up","components":[
+                    {"id":"root","component":"Button","child":"%s","action":{"event":{"name":"invokeActionOffer","context":{"actionOfferId":"%s"}}}},
+                    %s
+                    {"id":"inner","component":"Button","child":"label","action":{"event":{"name":"invokeActionOffer","context":{"actionOfferId":"%s"}}}},
+                    {"id":"label","component":"Text","text":"Label"}
+                  ]}},
+                  {"version":"v0.9.1","updateDataModel":{"surfaceId":"follow-up","path":"/","value":{}}}
+                ]
+                """.formatted(CrmA2uiAdapter.CATALOGUE, child, OFFER_ID, middle, OFFER_ID);
     }
 }

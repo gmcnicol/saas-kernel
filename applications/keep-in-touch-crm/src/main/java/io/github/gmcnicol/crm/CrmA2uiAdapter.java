@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import java.nio.charset.StandardCharsets;
 import org.springframework.web.util.HtmlUtils;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
@@ -24,13 +25,14 @@ import tools.jackson.databind.ObjectMapper;
 final class CrmA2uiAdapter {
 
     static final String PROTOCOL = "v0.9.1";
-    static final String CATALOGUE = "https://a2ui.org/specification/v0_9_1/catalogs/basic/catalog.json";
+    static final String CATALOGUE = "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json";
     private static final Set<String> COMPONENTS = Set.of("Column", "Text", "Button");
     private static final Set<String> RESERVED_PAYLOAD = Set.of("intentId", "payloadType", "payloadVersion");
     private static final Pattern PAYLOAD_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_.-]{0,127}");
     private static final int MAX_COMPONENTS = 64;
     private static final int MAX_DATA_CHARS = 16_384;
     private static final int MAX_TEXT_CHARS = 4_096;
+    private static final int MAX_OUTPUT_BYTES = 65_536;
 
     private final ObjectMapper json;
     private final ObservationRegistry observations;
@@ -66,6 +68,7 @@ final class CrmA2uiAdapter {
         JsonNode data = updateData(messages.get(2), surface);
         Graph graph = validateGraph(components, envelope, data);
         String html = render(graph.root(), components, data, envelope, new HashSet<>());
+        if (html.getBytes(StandardCharsets.UTF_8).length > MAX_OUTPUT_BYTES) fail();
         return new PresentationResult(html, patch(html), graph.offers());
     }
 
@@ -132,22 +135,22 @@ final class CrmA2uiAdapter {
             Map<String, JsonNode> components, PresentationEnvelope envelope, JsonNode data) {
         Set<String> referenced = new HashSet<>();
         Set<UUID> offers = new HashSet<>();
+        var budget = new OutputBudget();
         for (var entry : components.entrySet()) {
             JsonNode component = entry.getValue();
             switch (text(component, "component")) {
                 case "Column" -> validateColumn(component, referenced);
-                case "Text" -> validateText(component, data);
-                case "Button" -> offers.add(validateButton(component, referenced, envelope, data));
+                case "Text" -> validateText(component, data, budget);
+                case "Button" -> offers.add(validateButton(component, referenced, envelope, data, budget));
                 default -> fail();
             }
         }
         if (!components.keySet().containsAll(referenced)) fail();
-        List<String> roots = components.keySet().stream().filter(id -> !referenced.contains(id)).toList();
-        if (roots.size() != 1) fail();
+        if (!components.containsKey("root") || referenced.contains("root")) fail();
         Set<String> visited = new HashSet<>();
-        visit(roots.getFirst(), components, new HashSet<>(), visited);
+        visit("root", components, new HashSet<>(), visited, false);
         if (visited.size() != components.size()) fail();
-        return new Graph(roots.getFirst(), offers);
+        return new Graph("root", offers);
     }
 
     private static void validateColumn(JsonNode component, Set<String> referenced) {
@@ -157,16 +160,20 @@ final class CrmA2uiAdapter {
         for (JsonNode child : children) addReference(referenced, scalarText(child));
     }
 
-    private static void validateText(JsonNode component, JsonNode data) {
+    private static void validateText(JsonNode component, JsonNode data, OutputBudget budget) {
         Set<String> fields = fields(component);
         if (!fields.equals(Set.of("id", "component", "text"))
                 && !fields.equals(Set.of("id", "component", "text", "variant"))) fail();
         if (component.has("variant") && !"h2".equals(text(component, "variant"))) fail();
-        resolve(component.get("text"), data);
+        budget.add(resolve(component.get("text"), data));
     }
 
     private static UUID validateButton(
-            JsonNode component, Set<String> referenced, PresentationEnvelope envelope, JsonNode data) {
+            JsonNode component,
+            Set<String> referenced,
+            PresentationEnvelope envelope,
+            JsonNode data,
+            OutputBudget budget) {
         exact(component, "id", "component", "child", "action");
         addReference(referenced, text(component, "child"));
         JsonNode action = component.get("action");
@@ -189,22 +196,27 @@ final class CrmA2uiAdapter {
                 .forEach(entry -> {
                     if (!PAYLOAD_NAME.matcher(entry.getKey()).matches()
                             || RESERVED_PAYLOAD.contains(entry.getKey())) fail();
-                    resolve(entry.getValue(), data);
+                    budget.add(resolve(entry.getValue(), data));
                 });
         return offerId;
     }
 
     private static void visit(
-            String id, Map<String, JsonNode> components, Set<String> ancestors, Set<String> visited) {
+            String id,
+            Map<String, JsonNode> components,
+            Set<String> ancestors,
+            Set<String> visited,
+            boolean insideButton) {
         if (!ancestors.add(id)) fail();
         visited.add(id);
         JsonNode component = components.get(id);
         if (component == null) fail();
         if ("Column".equals(text(component, "component"))) {
             component.get("children").forEach(child -> visit(scalarText(child), components,
-                    new HashSet<>(ancestors), visited));
+                    new HashSet<>(ancestors), visited, insideButton));
         } else if ("Button".equals(text(component, "component"))) {
-            visit(text(component, "child"), components, new HashSet<>(ancestors), visited);
+            if (insideButton) fail();
+            visit(text(component, "child"), components, new HashSet<>(ancestors), visited, true);
         }
     }
 
@@ -337,6 +349,15 @@ final class CrmA2uiAdapter {
     private record Graph(String root, Set<UUID> offers) {
         private Graph {
             offers = Set.copyOf(offers);
+        }
+    }
+
+    private static final class OutputBudget {
+        private int bytes;
+
+        void add(String value) {
+            bytes += value.getBytes(StandardCharsets.UTF_8).length;
+            if (bytes > MAX_OUTPUT_BYTES) fail();
         }
     }
 }
