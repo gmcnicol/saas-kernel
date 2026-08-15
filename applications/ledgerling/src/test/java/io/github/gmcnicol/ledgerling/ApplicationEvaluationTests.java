@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.CandidatePayload;
+import io.github.gmcnicol.kernel.application.IntentFailureReason;
 import io.github.gmcnicol.kernel.application.IntentStatus;
 import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Principal;
@@ -136,6 +137,32 @@ class ApplicationEvaluationTests {
                 "recordsReceivedAt", "2026-08-15T10:02:00Z")), Instant.parse("2026-08-15T10:04:00Z"));
         assertThat(reevaluated.applicableActions()).singleElement().satisfies(action -> assertThat(action.actionId())
                 .isEqualTo("io.github.gmcnicol.ledgerling.LedgerlingActions.startPreparation"));
+    }
+
+    @Test
+    void rejectsIntentWhenStateChangesAfterAcceptance() {
+        var subject = new Subject("ledgerling.Filing", "stale-intent-acme");
+        var snapshot = kernel.evaluate(new ProjectedState(
+                "tenant-one", subject, 40, Map.of(
+                        "filingDueAt", "2026-08-20T09:00:00Z",
+                        "recordsOutstanding", "true",
+                        "documentRequestId", "request-85")), Instant.parse("2026-08-15T10:00:00Z"));
+        var offer = kernel.authorise(
+                        "tenant-one", snapshot.id(), new Principal("Staff", "accountant"),
+                        Instant.parse("2026-08-15T10:01:00Z"))
+                .actionOffers().getFirst();
+        var intent = kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
+                "io.github.gmcnicol.ledgerling.RecordRecordsReceivedInput", 1,
+                Map.of("receivedAt", "2026-08-15T10:02:00Z")));
+
+        kernel.evaluate(new ProjectedState("tenant-one", subject, 41, Map.of(
+                "filingDueAt", "2026-08-20T09:00:00Z",
+                "recordsOutstanding", "false",
+                "documentRequestId", "request-85")), Instant.parse("2026-08-15T10:03:00Z"));
+
+        var rejected = processUntil(intent.id(), Instant.parse("2026-08-15T23:04:00Z"));
+        assertThat(rejected.status()).isEqualTo(IntentStatus.STALE);
+        assertThat(rejected.failureReason()).contains(IntentFailureReason.STATE_OR_SEMANTIC_STALE);
     }
 
     private io.github.gmcnicol.kernel.application.Intent processUntil(UUID intentId, Instant processedAt) {

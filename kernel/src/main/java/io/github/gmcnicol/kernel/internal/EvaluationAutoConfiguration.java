@@ -153,8 +153,14 @@ public class EvaluationAutoConfiguration {
             PlatformTransactionManager transactionManager,
             List<io.github.gmcnicol.kernel.semanticpack.IntentHandler> handlers,
             TaxiPayloadValidator payloads,
+            SemanticPackVersion semanticPackVersion,
+            List<ApplicabilityPolicy> policies,
+            List<FactDerivation> derivations,
+            CedarAuthoriser cedar,
             Clock clock) {
-        return new IntentExecutionService(jdbc, new TransactionTemplate(transactionManager), handlers, payloads, clock);
+        return new IntentExecutionService(
+                jdbc, new TransactionTemplate(transactionManager), handlers, payloads,
+                semanticPackVersion, policies, derivations, cedar, clock);
     }
 
     @Bean

@@ -2,12 +2,18 @@ package io.github.gmcnicol.kernel.internal;
 
 import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.Event;
+import io.github.gmcnicol.kernel.application.Fact;
 import io.github.gmcnicol.kernel.application.Intent;
+import io.github.gmcnicol.kernel.application.IntentFailureReason;
 import io.github.gmcnicol.kernel.application.IntentStatus;
+import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.ProjectedState;
+import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.application.Subject;
 import io.github.gmcnicol.kernel.application.W3cTraceContext;
 import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
+import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
+import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
@@ -29,6 +35,10 @@ final class IntentExecutionService {
     private final TransactionOperations transactions;
     private final Map<String, IntentHandler> handlers;
     private final TaxiPayloadValidator payloads;
+    private final SemanticPackVersion semanticPack;
+    private final List<ApplicabilityPolicy> policies;
+    private final List<FactDerivation> derivations;
+    private final CedarAuthoriser cedar;
     private final Clock clock;
 
     IntentExecutionService(
@@ -36,12 +46,20 @@ final class IntentExecutionService {
             TransactionOperations transactions,
             List<IntentHandler> handlers,
             TaxiPayloadValidator payloads,
+            SemanticPackVersion semanticPack,
+            List<ApplicabilityPolicy> policies,
+            List<FactDerivation> derivations,
+            CedarAuthoriser cedar,
             Clock clock) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.handlers = handlers.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(
                 IntentHandler::target, handler -> handler));
         this.payloads = payloads;
+        this.semanticPack = semanticPack;
+        this.policies = List.copyOf(policies);
+        this.derivations = List.copyOf(derivations);
+        this.cedar = cedar;
         this.clock = clock;
     }
 
@@ -76,9 +94,32 @@ final class IntentExecutionService {
         TenantContext.lockSubject(jdbc, claim.tenantId(), stored.subject());
         ProjectedState state = currentState(claim.tenantId(), stored.subject());
         Intent claimed = new Intent(stored.id(), stored.actionOfferId(), IntentStatus.CLAIMED, stored.acceptedAt());
+        List<Fact> facts = derivations.stream()
+                .map(derivation -> java.util.Map.entry(derivation, derivation.derive(state, processedAt)))
+                .flatMap(result -> result.getValue().values().stream()
+                        .map(values -> new Fact(result.getKey().target(), result.getKey().id(), values)))
+                .toList();
+        ApplicabilityPolicy policy = policies.stream()
+                .filter(candidate -> candidate.target().equals(stored.actionId())
+                        && candidate.id().equals(stored.policyId()))
+                .findFirst()
+                .orElse(null);
+        boolean applicable = policy != null && policy.isApplicable(state, facts);
+        boolean authorised = cedar.allows(stored.principal(), stored.subject(), stored.actionId());
         if (state.version() != stored.expectedStateVersion()
-                || !DefaultKernel.stateChecksum(state).equals(stored.expectedStateChecksum())) {
-            return rejectStale(claim, stored, token, processedAt);
+                || !DefaultKernel.stateChecksum(state).equals(stored.expectedStateChecksum())
+                || !semanticPack.id().equals(stored.semanticPackId())
+                || !semanticPack.checksum().equals(stored.semanticPackChecksum())) {
+            return reject(claim, stored, token, processedAt, state, policy, applicable, authorised,
+                    IntentStatus.STALE, IntentFailureReason.STATE_OR_SEMANTIC_STALE);
+        }
+        if (!applicable) {
+            return reject(claim, stored, token, processedAt, state, policy, false, authorised,
+                    IntentStatus.FAILED, IntentFailureReason.NOT_APPLICABLE);
+        }
+        if (!authorised) {
+            return reject(claim, stored, token, processedAt, state, policy, true, false,
+                    IntentStatus.FAILED, IntentFailureReason.AUTHORISATION_DENIED);
         }
         IntentHandler handler = Optional.ofNullable(handlers.get(stored.actionId()))
                 .orElseThrow(() -> new IllegalStateException("Missing Intent handler: " + stored.actionId()));
@@ -125,20 +166,38 @@ final class IntentExecutionService {
         return new Intent(stored.id(), stored.actionOfferId(), IntentStatus.SUCCEEDED, stored.acceptedAt());
     }
 
-    private Intent rejectStale(Claim claim, StoredIntent stored, UUID token, Instant processedAt) {
+    private Intent reject(
+            Claim claim,
+            StoredIntent stored,
+            UUID token,
+            Instant processedAt,
+            ProjectedState state,
+            ApplicabilityPolicy policy,
+            boolean applicable,
+            boolean authorised,
+            IntentStatus status,
+            IntentFailureReason reason) {
         int updated = jdbc.update("""
-                UPDATE kernel.intent SET status = 'STALE', lease_token = NULL, lease_until = NULL, completed_at = ?
+                UPDATE kernel.intent SET status = ?, lease_token = NULL, lease_until = NULL, completed_at = ?
                 WHERE tenant_id = ? AND id = ? AND status = 'CLAIMED' AND lease_token = ? AND lease_until >= ?
-                """, Timestamp.from(processedAt), claim.tenantId(), stored.id(), token, Timestamp.from(clock.instant()));
+                """, status.name(), Timestamp.from(processedAt), claim.tenantId(), stored.id(), token,
+                Timestamp.from(clock.instant()));
         if (updated != 1) {
             throw new IllegalStateException("Intent lease is no longer owned");
         }
         jdbc.update("""
                 INSERT INTO kernel.intent_audit
-                    (id, tenant_id, intent_id, sequence, from_status, to_status, occurred_at, reason, correlation)
-                VALUES (?, ?, ?, 2, 'CLAIMED', 'STALE', ?, 'projected-state-mismatch', ?)
-                """, UUID.randomUUID(), claim.tenantId(), stored.id(), Timestamp.from(processedAt), UUID.randomUUID());
-        return new Intent(stored.id(), stored.actionOfferId(), IntentStatus.STALE, stored.acceptedAt());
+                    (id, tenant_id, intent_id, sequence, from_status, to_status, occurred_at, reason, correlation,
+                     failure_reason, evidence_state_version, evidence_state_checksum,
+                     semantic_pack_id, semantic_pack_checksum, applicability_policy_id, applicability_result,
+                     authorisation_bundle_id, authorisation_bundle_checksum,
+                     authorisation_allowed, authorisation_correlation)
+                VALUES (?, ?, ?, 2, 'CLAIMED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, UUID.randomUUID(), claim.tenantId(), stored.id(), status.name(), Timestamp.from(processedAt),
+                reason.name(), UUID.randomUUID(), reason.name(), state.version(), DefaultKernel.stateChecksum(state),
+                semanticPack.id(), semanticPack.checksum(), policy == null ? null : policy.id(), applicable,
+                cedar.bundleId(), cedar.bundleChecksum(), authorised, UUID.randomUUID());
+        return new Intent(stored.id(), stored.actionOfferId(), status, stored.acceptedAt(), Optional.of(reason));
     }
 
     private StoredIntent load(UUID intentId, UUID token) {
@@ -146,6 +205,8 @@ final class IntentExecutionService {
                 SELECT action_offer_id, subject_type, subject_id, action_id, payload_type, payload_version,
                        expected_state_version, expected_state_checksum,
                        semantic_pack_id, semantic_pack_checksum, accepted_at,
+                       applicability_policy_id, principal_type, principal_id,
+                       authorisation_bundle_id, authorisation_bundle_checksum,
                        traceparent, tracestate, prior_intent_id
                 FROM kernel.intent
                 WHERE id = ? AND status = 'CLAIMED' AND lease_token = ?
@@ -158,6 +219,10 @@ final class IntentExecutionService {
                         result.getLong("expected_state_version"), result.getString("expected_state_checksum"),
                         result.getString("semantic_pack_id"), result.getString("semantic_pack_checksum"),
                         result.getTimestamp("accepted_at").toInstant(),
+                        result.getString("applicability_policy_id"),
+                        new Principal(result.getString("principal_type"), result.getString("principal_id")),
+                        result.getString("authorisation_bundle_id"),
+                        result.getString("authorisation_bundle_checksum"),
                         result.getString("traceparent"), result.getString("tracestate"),
                         result.getObject("prior_intent_id", UUID.class)), intentId, token);
         if (intents.isEmpty()) {
@@ -236,6 +301,10 @@ final class IntentExecutionService {
             String semanticPackId,
             String semanticPackChecksum,
             Instant acceptedAt,
+            String policyId,
+            Principal principal,
+            String bundleId,
+            String bundleChecksum,
             String traceparent,
             String tracestate,
             UUID priorIntentId,
@@ -253,18 +322,24 @@ final class IntentExecutionService {
                 String semanticPackId,
                 String semanticPackChecksum,
                 Instant acceptedAt,
+                String policyId,
+                Principal principal,
+                String bundleId,
+                String bundleChecksum,
                 String traceparent,
                 String tracestate,
                 UUID priorIntentId) {
             this(id, actionOfferId, subject, actionId, payloadType, payloadVersion,
                     expectedStateVersion, expectedStateChecksum, semanticPackId, semanticPackChecksum,
-                    acceptedAt, traceparent, tracestate, priorIntentId, null);
+                    acceptedAt, policyId, principal, bundleId, bundleChecksum,
+                    traceparent, tracestate, priorIntentId, null);
         }
 
         StoredIntent withPayload(CandidatePayload replacement) {
             return new StoredIntent(id, actionOfferId, subject, actionId, payloadType, payloadVersion,
                     expectedStateVersion, expectedStateChecksum, semanticPackId, semanticPackChecksum,
-                    acceptedAt, traceparent, tracestate, priorIntentId, replacement);
+                    acceptedAt, policyId, principal, bundleId, bundleChecksum,
+                    traceparent, tracestate, priorIntentId, replacement);
         }
     }
 }

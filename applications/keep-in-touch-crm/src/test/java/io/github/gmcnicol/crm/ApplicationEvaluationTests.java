@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.IntentConflictException;
+import io.github.gmcnicol.kernel.application.IntentFailureReason;
 import io.github.gmcnicol.kernel.application.IntentRejectedException;
 import io.github.gmcnicol.kernel.application.IntentStatus;
 import io.github.gmcnicol.kernel.application.W3cTraceContext;
@@ -365,6 +366,88 @@ class ApplicationEvaluationTests {
                             Integer.class, intent.id()));
         });
         assertThat(persisted).containsExactly(0, 0, 0, 1, 2);
+    }
+
+    @Test
+    void rejectsStaleInapplicableAndReauthorisationDeniedIntentWithoutEvents() throws Exception {
+        while (kernel.processNext(Instant.parse("2026-08-15T23:00:00Z")).isPresent()) {
+            // Drain Intent left by other independent acceptance tests.
+        }
+
+        var stale = acceptedRecordInteraction(
+                "stale-execution", 60, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+        kernel.evaluate(new ProjectedState("tenant-one", new Subject("crm.Contact", "stale-execution"), 61, Map.of(
+                "followUpDueAt", "2026-08-15T09:00:00Z", "followUpCompleted", "false")),
+                Instant.parse("2026-08-15T10:01:00Z"));
+        var staleResult = processUntil(stale.id(), Instant.parse("2026-08-15T23:01:00Z"));
+        assertThat(staleResult.status()).isEqualTo(IntentStatus.STALE);
+        assertThat(staleResult.failureReason()).contains(IntentFailureReason.STATE_OR_SEMANTIC_STALE);
+
+        var stalePack = acceptedRecordInteraction(
+                "stale-pack", 70, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+        var inapplicable = acceptedRecordInteraction(
+                "policy-revoked", 80, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+
+        var denied = acceptedRecordInteraction(
+                "authorisation-revoked", 90, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+        try (var admin = DriverManager.getConnection(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+                var stalePackStatement = admin.prepareStatement("""
+                        UPDATE kernel.intent SET semantic_pack_checksum = repeat('0', 64) WHERE id = ?
+                        """);
+                var policyStatement = admin.prepareStatement("""
+                        UPDATE kernel.intent SET applicability_policy_id = 'removed.policy' WHERE id = ?
+                        """);
+                var deniedStatement = admin.prepareStatement("""
+                        UPDATE kernel.intent SET principal_type = 'Viewer' WHERE id = ?
+                        """)) {
+            stalePackStatement.setObject(1, stalePack.id());
+            stalePackStatement.executeUpdate();
+            policyStatement.setObject(1, inapplicable.id());
+            policyStatement.executeUpdate();
+            deniedStatement.setObject(1, denied.id());
+            deniedStatement.executeUpdate();
+        }
+
+        var stalePackResult = processUntil(stalePack.id(), Instant.parse("2026-08-15T23:02:00Z"));
+        assertThat(stalePackResult.status()).isEqualTo(IntentStatus.STALE);
+        assertThat(stalePackResult.failureReason()).contains(IntentFailureReason.STATE_OR_SEMANTIC_STALE);
+        var inapplicableResult = processUntil(inapplicable.id(), Instant.parse("2026-08-15T23:03:00Z"));
+        assertThat(inapplicableResult.status()).isEqualTo(IntentStatus.FAILED);
+        assertThat(inapplicableResult.failureReason()).contains(IntentFailureReason.NOT_APPLICABLE);
+        var deniedResult = processUntil(denied.id(), Instant.parse("2026-08-15T23:02:00Z"));
+        assertThat(deniedResult.status()).isEqualTo(IntentStatus.FAILED);
+        assertThat(deniedResult.failureReason()).contains(IntentFailureReason.AUTHORISATION_DENIED);
+
+        var evidence = new TransactionTemplate(transactionManager).execute(status -> {
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            return java.util.List.of(
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.event WHERE intent_id IN (?, ?, ?, ?)",
+                            Integer.class, stale.id(), stalePack.id(), inapplicable.id(), denied.id()),
+                    jdbc.queryForObject("""
+                            SELECT count(*) FROM kernel.intent_audit
+                            WHERE intent_id IN (?, ?, ?, ?) AND failure_reason IS NOT NULL
+                              AND evidence_state_checksum IS NOT NULL AND semantic_pack_checksum IS NOT NULL
+                              AND applicability_result IS NOT NULL AND authorisation_bundle_checksum IS NOT NULL
+                              AND authorisation_allowed IS NOT NULL
+                            """, Integer.class, stale.id(), stalePack.id(), inapplicable.id(), denied.id()));
+        });
+        assertThat(evidence).containsExactly(0, 4);
+    }
+
+    private io.github.gmcnicol.kernel.application.Intent acceptedRecordInteraction(
+            String subjectId, long version, String dueAt, String evaluatedAt) {
+        var snapshot = kernel.evaluate(new ProjectedState(
+                "tenant-one", new Subject("crm.Contact", subjectId), version,
+                Map.of("followUpDueAt", dueAt, "followUpCompleted", "false")), Instant.parse(evaluatedAt));
+        var offer = kernel.authorise(
+                        "tenant-one", snapshot.id(), new Principal("Owner", "gareth"),
+                        Instant.parse("2026-08-15T14:00:00Z"))
+                .actionOffers().stream()
+                .filter(candidate -> candidate.actionId().endsWith("recordInteraction"))
+                .findFirst().orElseThrow();
+        return kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
+                "io.github.gmcnicol.crm.RecordInteractionInput", 1, Map.of("note", "Safety check")));
     }
 
     private io.github.gmcnicol.kernel.application.Intent processUntil(UUID intentId, Instant processedAt) {
