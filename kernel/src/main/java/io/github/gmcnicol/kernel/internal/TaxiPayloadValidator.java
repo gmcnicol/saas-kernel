@@ -6,8 +6,9 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
-import java.util.HashSet;
 import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.Set;
 import lang.taxi.TaxiDocument;
 import lang.taxi.types.Field;
 import lang.taxi.types.PrimitiveType;
@@ -27,9 +28,11 @@ final class TaxiPayloadValidator {
             PrimitiveType.INSTANT,
             PrimitiveType.DOUBLE);
 
-    TaxiPayloadValidator(TaxiDocument taxi) {
+    TaxiPayloadValidator(TaxiDocument taxi, Set<String> actions) {
         this.taxi = taxi;
-        taxi.getServices().stream().flatMap(service -> service.getOperations().stream()).forEach(operation -> {
+        actions.forEach(action -> {
+            int separator = action.lastIndexOf('.');
+            var operation = taxi.service(action.substring(0, separator)).operation(action.substring(separator + 1));
             if (operation.getParameters().size() != 1
                     || !(operation.getParameterType(0) instanceof lang.taxi.types.ObjectType input)
                     || input.getAllFields().stream().anyMatch(field ->

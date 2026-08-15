@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 import java.util.stream.Collectors;
 import lang.taxi.Compiler;
 import lang.taxi.CompilerConfig;
@@ -107,8 +108,12 @@ public class EvaluationAutoConfiguration {
                 .map(String::trim)
                 .toList();
         String source = sources.stream().map(path -> read(resources, path)).collect(Collectors.joining("\n"));
+        Set<String> actions = java.util.Arrays.stream(manifest.getProperty("bindings").split(","))
+                .filter(binding -> binding.startsWith("ACTION="))
+                .map(binding -> binding.substring("ACTION=".length()))
+                .collect(Collectors.toSet());
         return new TaxiPayloadValidator(
-                new Compiler(source, sources.getFirst(), List.of(), new CompilerConfig()).compile());
+                new Compiler(source, sources.getFirst(), List.of(), new CompilerConfig()).compile(), actions);
     }
 
     @Bean

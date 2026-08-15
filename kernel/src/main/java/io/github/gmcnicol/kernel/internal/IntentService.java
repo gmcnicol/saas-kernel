@@ -60,7 +60,8 @@ final class IntentService {
     }
 
     Intent accept(UUID actionOfferId, UUID intentId, CandidatePayload payload) {
-        if (actionOfferId == null || intentId == null || payload == null) {
+        if (actionOfferId == null || intentId == null || payload == null
+                || payload.priorIntentId().filter(intentId::equals).isPresent()) {
             throw new IntentRejectedException();
         }
         try {

@@ -220,6 +220,10 @@ class ApplicationEvaluationTests {
                 .isInstanceOf(IntentRejectedException.class);
         assertThatThrownBy(() -> kernel.accept(UUID.randomUUID(), UUID.randomUUID(), payload))
                 .isInstanceOf(IntentRejectedException.class);
+        var selfLinkedIntentId = UUID.randomUUID();
+        assertThatThrownBy(() -> kernel.accept(offer.id(), selfLinkedIntentId, new CandidatePayload(
+                payload.type(), payload.version(), payload.values(), Optional.empty(), Optional.of(selfLinkedIntentId))))
+                .isInstanceOf(IntentRejectedException.class);
 
         var trace = new W3cTraceContext(
                 "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "kernel=test");
