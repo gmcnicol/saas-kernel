@@ -34,10 +34,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.httpBasic;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import org.testcontainers.junit.jupiter.Container;
@@ -63,6 +62,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         properties.add("spring.flyway.user", postgres::getUsername);
         properties.add("spring.flyway.password", postgres::getPassword);
         properties.add("kernel.intent-worker.enabled", () -> "false");
+        properties.add("spring.security.user.password", () -> "test-password");
     }
 
     @Autowired Kernel kernel;
@@ -424,7 +424,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 .findFirst().orElseThrow();
         var intentId = UUID.randomUUID();
         mvc.perform(post("/presentation/intents/{offerId}", offer.id())
-                        .with(user("gareth"))
+                        .with(httpBasic("gareth", "test-password"))
                         .contentType("application/x-www-form-urlencoded")
                         .param("intentId", intentId.toString())
                         .param("payloadType", offer.inputType())
@@ -445,13 +445,18 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 .andExpect(status().isUnauthorized());
 
         mvc.perform(get("/presentation/crm/desktop/events")
-                        .with(user("gareth").authorities(
-                                new SimpleGrantedAuthority("TENANT_tenant-one"),
-                                new SimpleGrantedAuthority("PRINCIPAL_Owner")))
+                        .with(httpBasic("gareth", "test-password"))
                         .param("snapshotId", snapshot.id().toString()))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith("text/event-stream"))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("Relationship workspace")));
+
+        mvc.perform(get("/presentation/crm/desktop")
+                        .with(httpBasic("gareth", "test-password"))
+                        .param("snapshotId", snapshot.id().toString()))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("datastar@v1.0.2")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("data-on:submit")));
     }
 
     @Test

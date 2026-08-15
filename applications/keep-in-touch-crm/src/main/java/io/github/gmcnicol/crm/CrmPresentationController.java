@@ -46,7 +46,7 @@ final class CrmPresentationController {
             @PathVariable String experience,
             Authentication authentication,
             @RequestParam UUID snapshotId) {
-        return render(experience, caller(authentication), snapshotId).html();
+        return shell(render(experience, caller(authentication), snapshotId).html());
     }
 
     @GetMapping(path = "/presentation/crm/{experience}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -97,8 +97,8 @@ final class CrmPresentationController {
         if (authentication == null || !authentication.isAuthenticated()) {
             throw new AccessDeniedException("Authenticated caller required");
         }
-        String tenant = authority(authentication, "TENANT_");
-        String type = authority(authentication, "PRINCIPAL_");
+        String tenant = authority(authentication, "ROLE_TENANT_");
+        String type = authority(authentication, "ROLE_PRINCIPAL_");
         return new Caller(tenant, type, authentication.getName());
     }
 
@@ -112,6 +112,12 @@ final class CrmPresentationController {
     }
 
     private record Caller(String tenantId, String principalType, String principalId) {}
+
+    private static String shell(String body) {
+        return "<!doctype html><html><head><script type=\"module\" "
+                + "src=\"https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.2/bundles/datastar.js\">"
+                + "</script></head><body>" + body + "</body></html>";
+    }
 
     private static String single(MultiValueMap<String, String> form, String name) {
         var values = form.get(name);

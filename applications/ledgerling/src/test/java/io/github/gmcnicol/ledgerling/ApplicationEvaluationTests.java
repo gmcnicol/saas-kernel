@@ -34,10 +34,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 import org.springframework.test.web.servlet.MockMvc;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.httpBasic;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -59,6 +58,7 @@ class ApplicationEvaluationTests {
         properties.add("spring.flyway.user", postgres::getUsername);
         properties.add("spring.flyway.password", postgres::getPassword);
         properties.add("kernel.intent-worker.enabled", () -> "false");
+        properties.add("spring.security.user.password", () -> "test-password");
     }
 
     @Autowired Kernel kernel;
@@ -217,7 +217,7 @@ class ApplicationEvaluationTests {
         var offer = staff.actionOffers().getFirst();
         var intentId = UUID.randomUUID();
         mvc.perform(post("/presentation/intents/{offerId}", offer.id())
-                        .with(user("accountant"))
+                        .with(httpBasic("accountant", "test-password"))
                         .contentType("application/x-www-form-urlencoded")
                         .param("intentId", intentId.toString())
                         .param("payloadType", offer.inputType())
@@ -237,13 +237,18 @@ class ApplicationEvaluationTests {
                 .andExpect(status().isUnauthorized());
 
         mvc.perform(get("/presentation/ledgerling/events")
-                        .with(user("accountant").authorities(
-                                new SimpleGrantedAuthority("TENANT_tenant-one"),
-                                new SimpleGrantedAuthority("PRINCIPAL_Staff")))
+                        .with(httpBasic("accountant", "test-password"))
                         .param("snapshotId", snapshot.id().toString()))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith("text/event-stream"))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("Filing operations")));
+
+        mvc.perform(get("/presentation/ledgerling")
+                        .with(httpBasic("accountant", "test-password"))
+                        .param("snapshotId", snapshot.id().toString()))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("datastar@v1.0.2")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("data-on:submit")));
     }
 
     @Test

@@ -37,7 +37,7 @@ final class LedgerlingPresentationController {
     String html(
             Authentication authentication,
             @RequestParam UUID snapshotId) {
-        return render(caller(authentication), snapshotId).html();
+        return shell(render(caller(authentication), snapshotId).html());
     }
 
     @GetMapping(path = "/presentation/ledgerling/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -82,7 +82,7 @@ final class LedgerlingPresentationController {
             throw new AccessDeniedException("Authenticated caller required");
         }
         return new Caller(
-                authority(authentication, "TENANT_"), authority(authentication, "PRINCIPAL_"),
+                authority(authentication, "ROLE_TENANT_"), authority(authentication, "ROLE_PRINCIPAL_"),
                 authentication.getName());
     }
 
@@ -96,6 +96,12 @@ final class LedgerlingPresentationController {
     }
 
     private record Caller(String tenantId, String principalType, String principalId) {}
+
+    private static String shell(String body) {
+        return "<!doctype html><html><head><script type=\"module\" "
+                + "src=\"https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.2/bundles/datastar.js\">"
+                + "</script></head><body>" + body + "</body></html>";
+    }
 
     private static String single(MultiValueMap<String, String> form, String name) {
         var values = form.get(name);
