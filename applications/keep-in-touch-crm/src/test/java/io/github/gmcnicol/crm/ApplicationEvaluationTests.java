@@ -455,7 +455,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                         .with(httpBasic("gareth", "test-password"))
                         .param("snapshotId", snapshot.id().toString()))
                 .andExpect(status().isOk())
-                .andExpect(content().string(org.hamcrest.Matchers.containsString("datastar@v1.0.2")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("integrity=\"sha384-")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("data-on:submit")));
     }
 

@@ -99,7 +99,9 @@ final class LedgerlingPresentationController {
 
     private static String shell(String body) {
         return "<!doctype html><html><head><script type=\"module\" "
-                + "src=\"https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.2/bundles/datastar.js\">"
+                + "src=\"https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.2/bundles/datastar.js\" "
+                + "integrity=\"sha384-SnyFlWTdFL3c8+9/1WsPuMFBq6AQOGC1LmS9upY4YkM3En3wZr5q2UvydHaMgOVG\" "
+                + "crossorigin=\"anonymous\">"
                 + "</script></head><body>" + body + "</body></html>";
     }
 
