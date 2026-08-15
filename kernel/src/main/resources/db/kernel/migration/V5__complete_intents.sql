@@ -83,7 +83,7 @@ DECLARE
 BEGIN
     SELECT candidate.id, candidate.tenant_id INTO selected_id, selected_tenant
     FROM kernel.intent candidate
-    WHERE candidate.status = 'PENDING'
+    WHERE candidate.status = 'PENDING' AND candidate.accepted_at <= claimed_at
     ORDER BY candidate.accepted_at, candidate.id
     FOR UPDATE SKIP LOCKED
     LIMIT 1;
@@ -111,9 +111,10 @@ REVOKE ALL ON FUNCTION kernel.claim_due_intent(uuid, timestamptz, timestamptz, u
 GRANT EXECUTE ON FUNCTION kernel.claim_due_intent(uuid, timestamptz, timestamptz, uuid, uuid)
     TO kernel_worker;
 
-GRANT SELECT, INSERT, UPDATE ON kernel.intent, kernel.intent_audit TO kernel_worker;
-GRANT SELECT, INSERT ON kernel.event, kernel.event_payload_value, kernel.reevaluation_request
-    TO kernel_runtime, kernel_worker;
+GRANT SELECT, UPDATE ON kernel.intent TO kernel_worker;
+GRANT SELECT, INSERT ON kernel.intent_audit TO kernel_worker;
+GRANT SELECT, INSERT ON kernel.event, kernel.event_payload_value, kernel.reevaluation_request TO kernel_worker;
+GRANT SELECT ON kernel.event, kernel.event_payload_value, kernel.reevaluation_request TO kernel_runtime;
 GRANT UPDATE ON kernel.reevaluation_request TO kernel_worker;
 
 ALTER TABLE kernel.event ENABLE ROW LEVEL SECURITY;

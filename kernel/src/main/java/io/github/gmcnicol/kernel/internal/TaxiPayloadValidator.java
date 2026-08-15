@@ -63,8 +63,10 @@ final class TaxiPayloadValidator {
         validateModel(payload.type(), payload.values());
     }
 
-    void validateEvent(String type, int version, java.util.Map<String, String> values) {
-        if (version != 1 || !events.contains(type)) {
+    void validateEvent(String actionId, String type, int version, java.util.Map<String, String> values) {
+        int separator = actionId.lastIndexOf('.');
+        var operation = taxi.service(actionId.substring(0, separator)).operation(actionId.substring(separator + 1));
+        if (version != 1 || !events.contains(type) || !operation.getReturnType().getQualifiedName().equals(type)) {
             throw new IllegalArgumentException("Unsupported Event type or version");
         }
         validateModel(type, values);

@@ -269,7 +269,7 @@ class ApplicationEvaluationTests {
         var intent = kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
                 "io.github.gmcnicol.crm.RecordInteractionInput", 1, Map.of("note", "Spoke to Alex")));
 
-        var completed = processUntil(intent.id(), Instant.parse("2026-08-15T10:02:00Z"));
+        var completed = processUntil(intent.id(), Instant.parse("2026-08-15T23:02:00Z"));
 
         assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
         var resultingState = new ProjectedState("tenant-one", subject, 41, Map.of(
@@ -303,7 +303,8 @@ class ApplicationEvaluationTests {
 
     @Test
     void rollsBackEveryCompletionEffectWhenAuditInsertionFails() throws Exception {
-        var processedAt = Instant.parse("2026-08-15T11:00:00Z");
+        assertThat(kernel.processNext(Instant.EPOCH)).isEmpty();
+        var processedAt = Instant.parse("2026-08-15T23:00:00Z");
         while (kernel.processNext(processedAt).isPresent()) {
             // Drain Intent left by other independent acceptance tests.
         }

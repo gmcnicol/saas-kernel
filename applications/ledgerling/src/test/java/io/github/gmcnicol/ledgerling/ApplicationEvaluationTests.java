@@ -127,7 +127,7 @@ class ApplicationEvaluationTests {
         assertThat(intent.actionOfferId()).isEqualTo(offer.id());
         assertThat(intent.status()).isEqualTo(IntentStatus.PENDING);
 
-        var completed = processUntil(intent.id(), Instant.parse("2026-08-15T10:03:00Z"));
+        var completed = processUntil(intent.id(), Instant.parse("2026-08-15T23:03:00Z"));
         assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
         var reevaluated = kernel.evaluate(new ProjectedState("tenant-one", subject, 31, Map.of(
                 "filingDueAt", "2026-08-20T09:00:00Z",
