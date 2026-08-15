@@ -30,6 +30,9 @@ BEGIN
     END IF;
 END $$;
 
+ALTER ROLE kernel_runtime NOLOGIN NOSUPERUSER NOBYPASSRLS;
+ALTER ROLE kernel_worker NOLOGIN NOSUPERUSER NOBYPASSRLS;
+
 GRANT USAGE ON SCHEMA kernel TO kernel_runtime, kernel_worker;
 GRANT SELECT, INSERT ON kernel.projected_state_version, kernel.projected_state_value,
     kernel.evaluation_snapshot, kernel.evaluation_fact, kernel.evaluation_fact_value,

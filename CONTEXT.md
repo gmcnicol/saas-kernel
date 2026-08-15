@@ -34,6 +34,10 @@ _Avoid_: Permission, raw field
 An immutable result containing Facts and Applicable Actions derived for a subject from one Projected State version, at an explicit evaluation time, using one Semantic Pack version.
 _Avoid_: Evidence graph, decision log
 
+**Authorisation Envelope**:
+A principal-specific projection containing only Cedar-authorised fields, Facts, and Action Offers for one Evaluation Snapshot.
+_Avoid_: Authorised Evaluation, Evaluation Snapshot
+
 **Action**:
 A business capability defined by a Semantic Pack.
 _Avoid_: Command, button
