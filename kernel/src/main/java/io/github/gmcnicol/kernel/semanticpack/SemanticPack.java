@@ -1,7 +1,7 @@
 package io.github.gmcnicol.kernel.semanticpack;
 
-/** Application-owned semantic definitions discovered as ordinary Spring beans. */
+/** Application-owned semantic definition loaded from a fixed classpath manifest. */
 public interface SemanticPack {
 
-    String id();
+    String manifestResource();
 }

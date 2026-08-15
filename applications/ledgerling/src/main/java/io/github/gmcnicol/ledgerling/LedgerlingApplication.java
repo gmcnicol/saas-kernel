@@ -1,6 +1,8 @@
 package io.github.gmcnicol.ledgerling;
 
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
+import io.github.gmcnicol.kernel.semanticpack.AuthorisationBundle;
+import io.github.gmcnicol.kernel.semanticpack.SemanticImplementation;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -15,7 +17,27 @@ public class LedgerlingApplication {
 
     @Bean
     SemanticPack ledgerlingSemanticPack() {
-        return () -> "ledgerling";
+        return () -> "semantic-pack/manifest.properties";
+    }
+
+    @Bean
+    AuthorisationBundle ledgerlingAuthorisationBundle() {
+        return () -> "authorisation/manifest.properties";
+    }
+
+    @Bean
+    SemanticImplementation recordsOutstandingDerivation() {
+        return new SemanticImplementation(SemanticImplementation.Kind.DERIVATION, "io.github.gmcnicol.ledgerling.RecordsOutstanding");
+    }
+
+    @Bean
+    SemanticImplementation recordRecordsReceivedApplicability() {
+        return new SemanticImplementation(SemanticImplementation.Kind.APPLICABILITY, "io.github.gmcnicol.ledgerling.LedgerlingActions.recordRecordsReceived");
+    }
+
+    @Bean
+    SemanticImplementation recordRecordsReceivedHandler() {
+        return new SemanticImplementation(SemanticImplementation.Kind.HANDLER, "io.github.gmcnicol.ledgerling.LedgerlingActions.recordRecordsReceived");
     }
 
     @Bean

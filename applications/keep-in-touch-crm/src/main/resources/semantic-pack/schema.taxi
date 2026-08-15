@@ -1,0 +1,19 @@
+namespace io.github.gmcnicol.crm
+
+type ContactId inherits String
+
+model FollowUpDue {
+    contactId: ContactId
+}
+
+model RecordInteractionInput {
+    note: String
+}
+
+model InteractionRecorded {
+    contactId: ContactId
+}
+
+service CrmActions {
+    operation recordInteraction(input: RecordInteractionInput): InteractionRecorded
+}

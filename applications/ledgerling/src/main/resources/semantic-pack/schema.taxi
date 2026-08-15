@@ -1,0 +1,19 @@
+namespace io.github.gmcnicol.ledgerling
+
+type DocumentRequestId inherits String
+
+model RecordsOutstanding {
+    requestId: DocumentRequestId
+}
+
+model RecordRecordsReceivedInput {
+    receivedAt: Instant
+}
+
+model RecordsReceived {
+    requestId: DocumentRequestId
+}
+
+service LedgerlingActions {
+    operation recordRecordsReceived(input: RecordRecordsReceivedInput): RecordsReceived
+}

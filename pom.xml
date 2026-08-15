@@ -26,6 +26,9 @@
         <java.version>25</java.version>
         <spring-modulith.version>2.1.0</spring-modulith.version>
         <testcontainers.version>2.0.5</testcontainers.version>
+        <taxi.version>1.70.0</taxi.version>
+        <cedar-java.version>4.2.3</cedar-java.version>
+        <maven-antrun-plugin.version>3.2.0</maven-antrun-plugin.version>
     </properties>
 
     <dependencyManagement>

@@ -1,0 +1,17 @@
+namespace test
+
+model SampleFact {
+    value: String
+}
+
+model SampleInput {
+    value: String
+}
+
+model SampleEvent {
+    value: String
+}
+
+service Actions {
+    operation act(input: SampleInput): SampleEvent
+}

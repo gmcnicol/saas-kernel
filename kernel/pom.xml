@@ -30,6 +30,17 @@
             <artifactId>spring-modulith-api</artifactId>
             <optional>true</optional>
         </dependency>
+        <dependency>
+            <groupId>org.taxilang</groupId>
+            <artifactId>compiler</artifactId>
+            <version>${taxi.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.cedarpolicy</groupId>
+            <artifactId>cedar-java</artifactId>
+            <version>${cedar-java.version}</version>
+            <classifier>uber</classifier>
+        </dependency>
 
         <dependency>
             <groupId>org.springframework.modulith</groupId>
