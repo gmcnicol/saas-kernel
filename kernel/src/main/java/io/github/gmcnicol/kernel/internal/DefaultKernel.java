@@ -159,7 +159,7 @@ final class DefaultKernel implements Kernel {
     }
 
     @Override
-    public List<IntentAuditEntry> findIntentAudit(IntentQuery query) {
+    public List<IntentAuditEntry> findIntentAudit(io.github.gmcnicol.kernel.application.IntentAuditQuery query) {
         return intentQueries.audit(query);
     }
 

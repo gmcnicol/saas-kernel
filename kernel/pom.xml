@@ -188,7 +188,6 @@
                         <accessModifier>public</accessModifier>
                         <includes>
                             <include>io.github.gmcnicol.kernel.application.*</include>
-                            <include>io.github.gmcnicol.kernel.authorisation.*</include>
                             <include>io.github.gmcnicol.kernel.presentationpack.*</include>
                             <include>io.github.gmcnicol.kernel.semanticpack.*</include>
                         </includes>

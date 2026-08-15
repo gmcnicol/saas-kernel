@@ -1,4 +1,4 @@
-package io.github.gmcnicol.kernel.authorisation;
+package io.github.gmcnicol.kernel.application;
 
 import java.util.Map;
 

@@ -33,6 +33,9 @@ final class SemanticDeploymentGuard implements SmartLifecycle {
         try {
             connection = dataSource.getConnection();
             connection.setAutoCommit(true);
+            try (var statement = connection.createStatement()) {
+                statement.execute("SET ROLE kernel_runtime");
+            }
             try (var statement = connection.prepareStatement("SELECT hashtextextended(?, 0)")) {
                 statement.setString(1, applicationId);
                 try (var result = statement.executeQuery()) {

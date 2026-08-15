@@ -24,5 +24,5 @@ public interface Kernel {
 
     List<IntentView> findIntents(IntentQuery query);
 
-    List<IntentAuditEntry> findIntentAudit(IntentQuery query);
+    List<IntentAuditEntry> findIntentAudit(IntentAuditQuery query);
 }

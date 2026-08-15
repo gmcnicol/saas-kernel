@@ -94,6 +94,7 @@ class ApplicationBootTests {
                         Optional.of(firstPage.getFirst()), 1))
                 .singleElement().satisfies(contact -> assertThat(contact.contactId()).isEqualTo("grace"));
         Integer crossTenantRows = new TransactionTemplate(transactionManager).execute(status -> {
+            runtimeJdbc.execute("SET LOCAL ROLE kernel_runtime");
             runtimeJdbc.queryForObject(
                     "SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-hot-query");
             return runtimeJdbc.queryForObject(

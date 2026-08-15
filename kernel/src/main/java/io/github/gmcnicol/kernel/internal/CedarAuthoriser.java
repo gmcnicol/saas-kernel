@@ -9,7 +9,7 @@ import com.cedarpolicy.value.EntityTypeName;
 import com.cedarpolicy.value.EntityUID;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.Subject;
-import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
+import io.github.gmcnicol.kernel.application.AuthorisationModel;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;

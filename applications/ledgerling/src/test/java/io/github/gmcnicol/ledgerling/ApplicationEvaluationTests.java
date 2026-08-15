@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.IntentFailureReason;
+import io.github.gmcnicol.kernel.application.IntentAuditQuery;
 import io.github.gmcnicol.kernel.application.IntentQuery;
 import io.github.gmcnicol.kernel.application.IntentRejectedException;
 import io.github.gmcnicol.kernel.application.IntentStatus;
@@ -30,6 +31,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.availability.ApplicationAvailability;
@@ -78,6 +80,7 @@ class ApplicationEvaluationTests {
     @Autowired MeterRegistry meters;
     @Autowired ObservationRegistry observations;
     @Autowired ApplicationAvailability availability;
+    @Autowired LedgerlingFilingQueries filings;
 
     @MockitoSpyBean("recordRecordsReceivedHandler")
     IntentHandler recordsHandler;
@@ -331,12 +334,19 @@ class ApplicationEvaluationTests {
                 "io.github.gmcnicol.ledgerling.RecordRecordsReceivedInput",
                 1,
                 Map.of("receivedAt", "2026-08-15T10:02:00Z")));
+        seedOutstandingFiling(subject.id(), Instant.parse("2026-08-30T09:00:00Z"));
+        assertThat(filings.outstandingBy(
+                "tenant-one", Instant.parse("2026-08-31T09:00:00Z"), Optional.empty(), 10))
+                .extracting(LedgerlingFilingQueries.FilingOutstanding::filingId).contains(subject.id());
 
         assertThat(intent.actionOfferId()).isEqualTo(offer.id());
         assertThat(intent.status()).isEqualTo(IntentStatus.PENDING);
 
         var completed = processUntil(intent.id(), Instant.parse("2026-08-15T23:03:00Z"));
         assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
+        assertThat(filings.outstandingBy(
+                "tenant-one", Instant.parse("2026-08-31T09:00:00Z"), Optional.empty(), 10))
+                .extracting(LedgerlingFilingQueries.FilingOutstanding::filingId).doesNotContain(subject.id());
         var reevaluated = kernel.processNextReevaluation(Instant.parse("2026-08-15T23:04:00Z")).orElseThrow();
         assertThat(reevaluated.applicableActions()).singleElement().satisfies(action -> assertThat(action.actionId())
                 .isEqualTo("io.github.gmcnicol.ledgerling.LedgerlingActions.startPreparation"));
@@ -411,7 +421,8 @@ class ApplicationEvaluationTests {
                 Optional.of(new Subject("ledgerling.Filing", "ledger-failed")),
                 Optional.of(failedIntent.id()), Optional.empty());
         assertThat(kernel.findIntents(failedQuery)).singleElement();
-        assertThat(kernel.findIntentAudit(failedQuery)).extracting(entry -> entry.toStatus())
+        assertThat(kernel.findIntentAudit(IntentAuditQuery.firstPage("tenant-one", failedIntent.id())))
+                .extracting(entry -> entry.toStatus())
                 .containsExactly(IntentStatus.PENDING, IntentStatus.CLAIMED, IntentStatus.FAILED);
 
         var recoveryOffer = currentRecordsOffer("ledger-failed", 60);
@@ -453,8 +464,7 @@ class ApplicationEvaluationTests {
         }
         assertThat(processUntil(intent.id(), dueAt).status()).isEqualTo(IntentStatus.SUCCEEDED);
         assertThat(kernel.processNext(dueAt)).isEmpty();
-        assertThat(kernel.findIntentAudit(new IntentQuery(
-                "tenant-one", Optional.empty(), Optional.empty(), Optional.of(intent.id()), Optional.empty())))
+        assertThat(kernel.findIntentAudit(IntentAuditQuery.firstPage("tenant-one", intent.id())))
                 .extracting(entry -> entry.toStatus())
                 .containsExactly(IntentStatus.PENDING, IntentStatus.CLAIMED, IntentStatus.CLAIMED,
                         IntentStatus.SUCCEEDED);
@@ -470,6 +480,20 @@ class ApplicationEvaluationTests {
         return kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
                 "io.github.gmcnicol.ledgerling.RecordRecordsReceivedInput", 1,
                 Map.of("receivedAt", "2026-08-15T10:02:00Z")));
+    }
+
+    private void seedOutstandingFiling(String filingId, Instant dueAt) {
+        var admin = new JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("""
+                INSERT INTO ledger_filing_projection
+                    (tenant_id, filing_id, client_reference, filing_due_at,
+                     records_outstanding, preparation_started)
+                VALUES ('tenant-one', ?, ?, ?, true, false)
+                ON CONFLICT (tenant_id, filing_id) DO UPDATE SET
+                    filing_due_at = EXCLUDED.filing_due_at,
+                    records_outstanding = true
+                """, filingId, filingId, java.sql.Timestamp.from(dueAt));
     }
 
     private io.github.gmcnicol.kernel.application.ActionOffer currentRecordsOffer(String subjectId, long version) {

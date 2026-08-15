@@ -1,11 +1,13 @@
 package io.github.gmcnicol.ledgerling;
 
-import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
-import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
+import io.github.gmcnicol.kernel.application.AuthorisationBundle;
+import io.github.gmcnicol.kernel.application.AuthorisationModel;
 import io.github.gmcnicol.kernel.application.Event;
+import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
+import io.github.gmcnicol.kernel.semanticpack.EventProjector;
 import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import io.github.gmcnicol.kernel.semanticpack.SemanticVersionAdapter;
@@ -17,6 +19,7 @@ import java.util.Map;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.jdbc.core.JdbcTemplate;
 import io.micrometer.observation.ObservationRegistry;
 
 @SpringBootApplication
@@ -141,11 +144,41 @@ public class LedgerlingApplication {
     }
 
     @Bean
+    EventProjector recordsReceivedProjector(JdbcTemplate jdbc) {
+        return EventProjector.of("io.github.gmcnicol.ledgerling.RecordsReceived",
+                (state, event) -> projectFiling(jdbc, state, event.resultingState()));
+    }
+
+    @Bean
+    EventProjector preparationStartedProjector(JdbcTemplate jdbc) {
+        return EventProjector.of("io.github.gmcnicol.ledgerling.PreparationStarted",
+                (state, event) -> projectFiling(jdbc, state, event.resultingState()));
+    }
+
+    @Bean
     PresentationPack ledgerlingPresentationPack(ObservationRegistry observations) {
         return LedgerlingPresentation.defaultPack().observed(observations);
     }
 
     private static SemanticVersionAdapter adapter(SemanticVersionAdapter.Contract contract, String type) {
         return SemanticVersionAdapter.identity(contract, type, 1, 2);
+    }
+
+    private static void projectFiling(JdbcTemplate jdbc, ProjectedState state, Map<String, String> values) {
+        jdbc.update("""
+                INSERT INTO ledger_filing_projection
+                    (tenant_id, filing_id, client_reference, filing_due_at,
+                     records_outstanding, preparation_started)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (tenant_id, filing_id) DO UPDATE SET
+                    client_reference = EXCLUDED.client_reference,
+                    filing_due_at = EXCLUDED.filing_due_at,
+                    records_outstanding = EXCLUDED.records_outstanding,
+                    preparation_started = EXCLUDED.preparation_started
+                """, state.tenantId(), state.subject().id(),
+                values.getOrDefault("clientReference", state.subject().id()),
+                java.sql.Timestamp.from(Instant.parse(values.get("filingDueAt"))),
+                Boolean.parseBoolean(values.getOrDefault("recordsOutstanding", "false")),
+                Boolean.parseBoolean(values.getOrDefault("preparationStarted", "false")));
     }
 }

@@ -2,8 +2,8 @@ package io.github.gmcnicol;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
-import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
+import io.github.gmcnicol.kernel.application.AuthorisationBundle;
+import io.github.gmcnicol.kernel.application.AuthorisationModel;
 import io.github.gmcnicol.kernel.internal.ApplicationValidationAutoConfiguration;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.presentationpack.PresentationResult;

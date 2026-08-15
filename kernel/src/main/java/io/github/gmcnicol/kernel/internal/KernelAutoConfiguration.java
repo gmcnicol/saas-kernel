@@ -36,7 +36,7 @@ public class KernelAutoConfiguration {
     @DependsOn("applicationFlyway")
     Object runtimeRoleValidator(JdbcTemplate jdbc) {
         var access = jdbc.queryForMap("""
-                SELECT current_user AS username, rolsuper, rolbypassrls,
+                SELECT current_user AS username, rolsuper, rolbypassrls, rolinherit,
                   pg_has_role(current_user, 'kernel_runtime', 'SET') AS runtime_set,
                   pg_has_role(current_user, 'kernel_worker', 'SET') AS worker_set,
                   NOT EXISTS (
@@ -55,11 +55,13 @@ public class KernelAutoConfiguration {
                 """);
         if (Boolean.TRUE.equals(access.get("rolsuper"))
                 || Boolean.TRUE.equals(access.get("rolbypassrls"))
+                || Boolean.TRUE.equals(access.get("rolinherit"))
                 || !Boolean.TRUE.equals(access.get("runtime_set"))
                 || !Boolean.TRUE.equals(access.get("worker_set"))
                 || !Boolean.TRUE.equals(access.get("protected_roles_safe"))
                 || Boolean.TRUE.equals(access.get("owns_kernel_tables"))) {
-            throw new IllegalStateException("Kernel datasource must use a non-owner, non-bypass runtime role: " + access);
+            throw new IllegalStateException(
+                    "Kernel datasource must use a NOINHERIT, non-owner, non-bypass login: " + access);
         }
         return new Object();
     }

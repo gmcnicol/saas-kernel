@@ -7,18 +7,24 @@ import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.IntentConflictException;
 import io.github.gmcnicol.kernel.application.IntentFailureReason;
+import io.github.gmcnicol.kernel.application.IntentAuditQuery;
 import io.github.gmcnicol.kernel.application.IntentQuery;
 import io.github.gmcnicol.kernel.application.IntentRejectedException;
 import io.github.gmcnicol.kernel.application.IntentStatus;
 import io.github.gmcnicol.kernel.application.W3cTraceContext;
 import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Principal;
+import io.github.gmcnicol.kernel.application.RetryableIntentException;
+import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.application.Subject;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
+import io.github.gmcnicol.kernel.application.AuthorisationModel;
+import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
+import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
 import io.github.gmcnicol.kernel.semanticpack.SemanticVersionAdapter;
-import io.github.gmcnicol.kernel.internal.CurrentExecutionBasisTest;
 import java.sql.DriverManager;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.Map;
 import java.util.List;
@@ -30,6 +36,7 @@ import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationHandler;
 import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -42,6 +49,7 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -60,7 +68,7 @@ import org.testcontainers.utility.DockerImageName;
 @SpringBootTest
 @AutoConfigureMockMvc
 @ExtendWith(OutputCaptureExtension.class)
-class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
+class ApplicationEvaluationTests {
 
     @Container
     static final PostgreSQLContainer postgres = new PostgreSQLContainer(DockerImageName.parse("postgres:18-alpine"))
@@ -86,9 +94,73 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
     @Autowired ObservationRegistry observations;
     @Autowired ApplicationAvailability availability;
     @Autowired CrmA2uiAdapter a2ui;
+    @Autowired CrmContactQueries contacts;
     @Autowired List<SemanticVersionAdapter> semanticAdapters;
     @Autowired @Qualifier("crmDesktopPresentationPack") PresentationPack desktopPresentation;
     @Autowired @Qualifier("crmMobilePresentationPack") PresentationPack mobilePresentation;
+
+    @MockitoSpyBean private AuthorisationModel authorisationModel;
+    @MockitoSpyBean private SemanticPackVersion semanticPack;
+    @MockitoSpyBean("recordInteractionHandler") private IntentHandler recordInteractionHandler;
+    @MockitoSpyBean("followUpDueDerivation") private FactDerivation followUpDueDerivation;
+    @MockitoSpyBean private Clock clock;
+
+    private void changeCurrentSemanticPack() {
+        org.mockito.Mockito.doReturn("0".repeat(64)).when(semanticPack).checksum();
+    }
+
+    private void restoreCurrentSemanticPack() {
+        org.mockito.Mockito.reset(semanticPack);
+    }
+
+    private void revokeCurrentAuthorisation() {
+        org.mockito.Mockito.doReturn("RevokedContact").when(authorisationModel).resourceType();
+    }
+
+    private void failRecordInteractionTransiently() {
+        org.mockito.Mockito.doThrow(new RetryableIntentException("temporary outage"))
+                .when(recordInteractionHandler).handle(
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any());
+    }
+
+    private void failRecordInteractionDeterministically() {
+        org.mockito.Mockito.doThrow(new IllegalArgumentException("invalid Intent transition"))
+                .when(recordInteractionHandler).handle(
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any());
+    }
+
+    private void crashRecordInteractionHandler() {
+        org.mockito.Mockito.doThrow(new AssertionError("simulated process crash"))
+                .when(recordInteractionHandler).handle(
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any());
+    }
+
+    private void restoreRecordInteractionHandler() {
+        org.mockito.Mockito.reset(recordInteractionHandler);
+    }
+
+    private void expireReevaluationLeaseDuringDerivation(Instant claimedAt) {
+        org.mockito.Mockito.doReturn(claimedAt).when(clock).instant();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            org.mockito.Mockito.doReturn(claimedAt.plusSeconds(31)).when(clock).instant();
+            return invocation.callRealMethod();
+        }).when(followUpDueDerivation).derive(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+    }
+
+    private void restoreDerivationAt(Instant currentTime) {
+        org.mockito.Mockito.reset(followUpDueDerivation, clock);
+        org.mockito.Mockito.doReturn(currentTime).when(clock).instant();
+    }
+
+    @AfterEach
+    void restoreCurrentExecutionBasis() {
+        org.mockito.Mockito.reset(
+                authorisationModel, semanticPack, recordInteractionHandler, followUpDueDerivation, clock);
+    }
 
     @Test
     void derivesDueFollowUpAndThreeApplicableActionsReproducibly() {
@@ -141,7 +213,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         assertThat(snapshot.applicableActions()).isEmpty();
         assertThat(snapshot.reevaluateAt()).contains(dueAt);
         Integer scheduled = new TransactionTemplate(transactionManager).execute(status -> {
-            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            useTenant();
             return jdbc.queryForObject("""
                     SELECT count(*) FROM kernel.reevaluation_request
                     WHERE subject_type = 'crm.Contact' AND subject_id = 'alex'
@@ -278,7 +350,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         expireReevaluationLeaseDuringDerivation(claimedAt);
         assertThat(kernel.processNextReevaluation(dueAt)).isEmpty();
         Integer committed = new TransactionTemplate(transactionManager).execute(status -> {
-            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            useTenant();
             return jdbc.queryForObject("""
                     SELECT count(*) FROM kernel.evaluation_snapshot
                     WHERE subject_type = ? AND subject_id = ? AND evaluated_at = ?
@@ -326,7 +398,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         }
 
         var persistedOutputCounts = new TransactionTemplate(transactionManager).execute(status -> {
-            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            useTenant();
             return java.util.List.of(
                     jdbc.queryForObject("""
                             SELECT count(*) FROM kernel.evaluation_fact fact
@@ -379,7 +451,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 "io.github.gmcnicol.crm.CrmActions.snoozeFollowUp",
                 "io.github.gmcnicol.crm.CrmActions.completeFollowUp");
         Integer evidence = new TransactionTemplate(transactionManager).execute(status -> {
-            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            useTenant();
             return jdbc.queryForObject("""
                     SELECT count(*) FROM kernel.action_offer
                     WHERE tenant_id = ? AND evaluation_snapshot_id = ? AND principal_type = ? AND principal_id = ?
@@ -614,6 +686,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 .isInstanceOf(IllegalArgumentException.class);
 
         Integer visible = new TransactionTemplate(transactionManager).execute(status -> {
+            jdbc.execute("SET LOCAL ROLE kernel_runtime");
             return jdbc.queryForObject("SELECT count(*) FROM kernel.evaluation_snapshot", Integer.class);
         });
         assertThat(visible).isZero();
@@ -677,7 +750,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 .isInstanceOf(IntentRejectedException.class);
 
         var persisted = new TransactionTemplate(transactionManager).execute(status -> {
-            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            useTenant();
             return java.util.List.of(
                     jdbc.queryForObject("SELECT count(*) FROM kernel.intent", Integer.class),
                     jdbc.queryForObject("SELECT count(*) FROM kernel.intent_payload_value", Integer.class),
@@ -705,6 +778,10 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 .findFirst().orElseThrow();
         var intent = kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
                 "io.github.gmcnicol.crm.RecordInteractionInput", 1, Map.of("note", "Spoke to Alex")));
+        seedOpenContact(subject.id(), Instant.parse("2026-08-15T09:00:00Z"));
+        assertThat(contacts.dueBy(
+                "tenant-one", Instant.parse("2026-08-15T23:00:00Z"), Optional.empty(), 10))
+                .extracting(CrmContactQueries.ContactDue::contactId).contains(subject.id());
 
         var completed = processUntil(intent.id(), Instant.parse("2026-08-15T23:02:00Z"));
 
@@ -712,12 +789,16 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         var resultingState = new ProjectedState("tenant-one", subject, 41, Map.of(
                 "followUpDueAt", "2026-08-15T09:00:00Z",
                 "followUpCompleted", "true",
-                "lastInteractionNote", "Spoke to Alex"));
+                "lastInteractionNote", "Spoke to Alex",
+                "lastInteractionAt", intent.acceptedAt().toString()));
         var reevaluated = kernel.evaluate(resultingState, Instant.parse("2026-08-15T10:03:00Z"));
         assertThat(reevaluated.applicableActions()).isEmpty();
+        assertThat(contacts.dueBy(
+                "tenant-one", Instant.parse("2026-08-15T23:00:00Z"), Optional.empty(), 10))
+                .extracting(CrmContactQueries.ContactDue::contactId).doesNotContain(subject.id());
 
         var persisted = new TransactionTemplate(transactionManager).execute(status -> {
-            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            useTenant();
             return java.util.List.of(
                     jdbc.queryForObject("SELECT count(*) FROM kernel.event WHERE intent_id = ?", Integer.class,
                             intent.id()),
@@ -736,6 +817,30 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                             """, Integer.class));
         });
         assertThat(persisted).containsExactly(1, 1, 0);
+
+        var reopened = kernel.evaluate(new ProjectedState("tenant-one", subject, 42, Map.of(
+                "followUpDueAt", "2026-08-15T09:00:00Z",
+                "followUpCompleted", "false",
+                "lastInteractionAt", intent.acceptedAt().toString())),
+                Instant.parse("2026-08-15T10:04:00Z"));
+        var snooze = kernel.authorise(
+                        "tenant-one", reopened.id(), new Principal("Owner", "gareth"),
+                        Instant.parse("2026-08-15T10:05:00Z"))
+                .actionOffers().stream().filter(candidate -> candidate.actionId().endsWith("snoozeFollowUp"))
+                .findFirst().orElseThrow();
+        var snoozeIntent = kernel.accept(snooze.id(), UUID.randomUUID(), new CandidatePayload(
+                "io.github.gmcnicol.crm.SnoozeFollowUpInput", 1,
+                Map.of("until", "2026-08-20T09:00:00Z")));
+        assertThat(processUntil(snoozeIntent.id(), Instant.parse("2026-08-15T23:06:00Z")).status())
+                .isEqualTo(IntentStatus.SUCCEEDED);
+        Instant projectedInteraction = new TransactionTemplate(transactionManager).execute(status -> {
+            useTenant();
+            return jdbc.queryForObject("""
+                    SELECT last_interaction_at FROM crm_contact_engagement_projection
+                    WHERE tenant_id = 'tenant-one' AND contact_id = 'processed-alex'
+                    """, (result, row) -> result.getTimestamp(1).toInstant());
+        });
+        assertThat(projectedInteraction).isEqualTo(intent.acceptedAt());
     }
 
     @Test
@@ -757,6 +862,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 .findFirst().orElseThrow();
         var intent = kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
                 "io.github.gmcnicol.crm.RecordInteractionInput", 1, Map.of("note", "Must roll back")));
+        seedOpenContact(subject.id(), Instant.parse("2026-08-15T09:00:00Z"));
 
         try (var admin = DriverManager.getConnection(
                 postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
@@ -784,7 +890,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         }
 
         var persisted = new TransactionTemplate(transactionManager).execute(status -> {
-            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            useTenant();
             return java.util.List.of(
                     jdbc.queryForObject("SELECT count(*) FROM kernel.event WHERE intent_id = ?", Integer.class,
                             intent.id()),
@@ -802,6 +908,9 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                             Integer.class, intent.id()));
         });
         assertThat(persisted).containsExactly(0, 0, 0, 1, 3);
+        assertThat(contacts.dueBy(
+                "tenant-one", Instant.parse("2026-08-15T23:00:00Z"), Optional.empty(), 10))
+                .extracting(CrmContactQueries.ContactDue::contactId).contains(subject.id());
         assertThat(output.getOut().lines().filter(line -> line.contains("\"message\":\"event_committed\"")
                         && line.contains("\"intent\":\"" + intent.id() + "\"")))
                 .isEmpty();
@@ -847,7 +956,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 .failureReason()).contains(IntentFailureReason.AUTHORISATION_DENIED);
 
         var evidence = new TransactionTemplate(transactionManager).execute(status -> {
-            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            useTenant();
             return java.util.List.of(
                     jdbc.queryForObject("SELECT count(*) FROM kernel.event WHERE intent_id IN (?, ?, ?, ?)",
                             Integer.class, stale.id(), stalePack.id(), inapplicable.id(), denied.id()),
@@ -934,7 +1043,8 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
             assertThat(view.attemptCount()).isEqualTo(3);
             assertThat(view.failureReason()).contains(IntentFailureReason.TRANSIENT_ATTEMPTS_EXHAUSTED);
         });
-        assertThat(kernel.findIntentAudit(failedQuery)).extracting(entry -> entry.toStatus())
+        assertThat(kernel.findIntentAudit(IntentAuditQuery.firstPage("tenant-one", exhausted.id())))
+                .extracting(entry -> entry.toStatus())
                 .containsExactly(
                         IntentStatus.PENDING, IntentStatus.CLAIMED, IntentStatus.RETRY_WAIT,
                         IntentStatus.CLAIMED, IntentStatus.RETRY_WAIT, IntentStatus.CLAIMED, IntentStatus.FAILED);
@@ -942,6 +1052,23 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 "tenant-one", Optional.empty(), Optional.of(new Subject("crm.Contact", "human-recovery")),
                 Optional.of(retryId), Optional.empty())))
                 .singleElement().satisfies(view -> assertThat(view.priorIntentId()).contains(deterministic.id()));
+
+        var firstPage = kernel.findIntents(new IntentQuery(
+                "tenant-one", Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty(), 1));
+        assertThat(firstPage).hasSize(1);
+        var first = firstPage.getFirst();
+        assertThat(kernel.findIntents(new IntentQuery(
+                "tenant-one", Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.of(new IntentQuery.Cursor(first.acceptedAt(), first.id())), 1)))
+                .singleElement().satisfies(next -> assertThat(next.id()).isNotEqualTo(first.id()));
+        var firstAudit = kernel.findIntentAudit(new IntentAuditQuery(
+                "tenant-one", exhausted.id(), java.util.OptionalInt.empty(), 1));
+        assertThat(firstAudit).hasSize(1);
+        assertThat(kernel.findIntentAudit(new IntentAuditQuery(
+                "tenant-one", exhausted.id(), java.util.OptionalInt.of(firstAudit.getFirst().sequence()), 1)))
+                .singleElement().satisfies(next -> assertThat(next.sequence())
+                        .isGreaterThan(firstAudit.getFirst().sequence()));
     }
 
     @Test
@@ -974,9 +1101,8 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
 
         assertThat(processUntil(intent.id(), processedAt).status()).isEqualTo(IntentStatus.SUCCEEDED);
         assertThat(kernel.processNext(processedAt)).isEmpty();
-        var query = new IntentQuery("tenant-one", Optional.empty(), Optional.empty(),
-                Optional.of(intent.id()), Optional.empty());
-        assertThat(kernel.findIntentAudit(query)).extracting(entry -> entry.toStatus())
+        assertThat(kernel.findIntentAudit(IntentAuditQuery.firstPage("tenant-one", intent.id())))
+                .extracting(entry -> entry.toStatus())
                 .containsExactly(IntentStatus.PENDING, IntentStatus.CLAIMED, IntentStatus.CLAIMED,
                         IntentStatus.SUCCEEDED);
     }
@@ -1013,7 +1139,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         processUntil(afterCommit.id(), processedAt); // Simulate the caller losing the successful acknowledgement.
         assertThat(kernel.processNext(processedAt)).isEmpty();
         var committed = new TransactionTemplate(transactionManager).execute(status -> {
-            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            useTenant();
             return java.util.List.of(
                     jdbc.queryForObject("SELECT count(*) FROM kernel.event WHERE intent_id = ?", Integer.class,
                             duringHandling.id()),
@@ -1180,5 +1306,23 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
             statement.setObject(2, intentId);
             assertThat(statement.executeUpdate()).isEqualTo(1);
         }
+    }
+
+    private void seedOpenContact(String contactId, Instant dueAt) {
+        var admin = new JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("""
+                INSERT INTO crm_contact_engagement_projection
+                    (tenant_id, contact_id, display_name, next_contact_due_at, open_follow_up_id)
+                VALUES ('tenant-one', ?, ?, ?, ?)
+                ON CONFLICT (tenant_id, contact_id) DO UPDATE SET
+                    next_contact_due_at = EXCLUDED.next_contact_due_at,
+                    open_follow_up_id = EXCLUDED.open_follow_up_id
+                """, contactId, contactId, java.sql.Timestamp.from(dueAt), UUID.randomUUID());
+    }
+
+    private void useTenant() {
+        jdbc.execute("SET LOCAL ROLE kernel_runtime");
+        jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
     }
 }

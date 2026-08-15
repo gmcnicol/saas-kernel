@@ -9,6 +9,7 @@ import java.sql.SQLException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Set;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.MethodOrderer;
@@ -134,6 +135,22 @@ class KernelOperationsTests {
         changed.start();
         changed.stop();
         guard.stop();
+    }
+
+    @Test
+    @Order(3)
+    void installsBoundedWorkQueueAndHistoryIndexes() {
+        var jdbc = new JdbcTemplate(new DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+
+        assertThat(Set.copyOf(jdbc.queryForList("""
+                SELECT indexname FROM pg_indexes
+                WHERE schemaname = 'kernel' AND indexname IN (
+                    'intent_pending_due', 'intent_retry_due', 'intent_claimed_expiry',
+                    'intent_tenant_history', 'reevaluation_unleased_due', 'reevaluation_lease_expiry')
+                """, String.class))).containsExactlyInAnyOrder(
+                "intent_pending_due", "intent_retry_due", "intent_claimed_expiry",
+                "intent_tenant_history", "reevaluation_unleased_due", "reevaluation_lease_expiry");
     }
 
     @Test

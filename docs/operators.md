@@ -4,6 +4,10 @@ Each Application is one executable Spring Boot JAR or standard JVM buildpack ima
 contains HTTP delivery, Kernel runtime, Intent Worker, and Reevaluation Worker. PostgreSQL is the
 only required external runtime service.
 
+Configure the Application datasource as a `NOINHERIT`, non-owner, non-superuser,
+non-`BYPASSRLS` login with `SET` membership in `kernel_runtime` and `kernel_worker`. Kernel selects
+one least-privilege role inside each transaction. Use separate privileged Flyway credentials.
+
 ## Probes and shutdown
 
 Use `/actuator/health/liveness` for liveness and `/actuator/health/readiness` for readiness on the

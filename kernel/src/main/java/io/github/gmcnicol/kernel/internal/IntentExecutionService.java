@@ -15,7 +15,9 @@ import io.github.gmcnicol.kernel.application.W3cTraceContext;
 import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
+import io.github.gmcnicol.kernel.semanticpack.EventProjector;
 import java.sql.Timestamp;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.Duration;
@@ -34,6 +36,7 @@ final class IntentExecutionService {
     private final JdbcTemplate jdbc;
     private final TransactionOperations transactions;
     private final Map<String, IntentHandler> handlers;
+    private final Map<String, EventProjector> projectors;
     private final TaxiPayloadValidator payloads;
     private final SemanticPackVersion semanticPack;
     private final List<ApplicabilityPolicy> policies;
@@ -50,6 +53,7 @@ final class IntentExecutionService {
             JdbcTemplate jdbc,
             TransactionOperations transactions,
             List<IntentHandler> handlers,
+            List<EventProjector> projectors,
             TaxiPayloadValidator payloads,
             SemanticPackVersion semanticPack,
             List<ApplicabilityPolicy> policies,
@@ -65,6 +69,8 @@ final class IntentExecutionService {
         this.transactions = transactions;
         this.handlers = handlers.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(
                 IntentHandler::target, handler -> handler));
+        this.projectors = projectors.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(
+                EventProjector::eventType, projector -> projector));
         this.payloads = payloads;
         this.semanticPack = semanticPack;
         this.policies = List.copyOf(policies);
@@ -222,12 +228,18 @@ final class IntentExecutionService {
     private long persistEventsAndState(
             Claim claim, StoredIntent stored, ProjectedState state, List<Event> events, Instant processedAt) {
         long version = state.version();
+        ProjectedState previousState = state;
         for (int index = 0; index < events.size(); index++) {
             Event event = compatibility.adapt(events.get(index));
             payloads.validateEvent(stored.actionId(), event.type(), event.version(), event.payload());
+            ProjectedState currentState = previousState;
+            Optional.ofNullable(projectors.get(event.type()))
+                    .ifPresent(projector -> projector.project(currentState, event));
             version++;
             persistEvent(claim, stored, event, index + 1, version, processedAt);
-            persistState(new ProjectedState(claim.tenantId(), stored.subject(), version, event.resultingState()));
+            previousState = new ProjectedState(
+                    claim.tenantId(), stored.subject(), version, event.resultingState());
+            persistState(previousState);
         }
         return version;
     }
@@ -339,10 +351,9 @@ final class IntentExecutionService {
 
     private static FatalInvariantError databaseInvariant(Throwable failure) {
         for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
-            String message = cause.getMessage();
-            if (message != null && (message.contains("invalid Intent transition")
-                    || message.contains("invalid Event sequence"))) {
-                return new FatalInvariantError(message);
+            if (cause instanceof SQLException sql
+                    && ("K0001".equals(sql.getSQLState()) || "K0002".equals(sql.getSQLState()))) {
+                return new FatalInvariantError(sql.getMessage());
             }
         }
         return null;

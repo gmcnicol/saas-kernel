@@ -3,8 +3,8 @@ package io.github.gmcnicol.kernel.internal;
 import com.cedarpolicy.model.policy.PolicySet;
 import com.cedarpolicy.model.schema.Schema;
 import io.github.gmcnicol.kernel.application.ApplicationVersion;
-import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
-import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
+import io.github.gmcnicol.kernel.application.AuthorisationBundle;
+import io.github.gmcnicol.kernel.application.AuthorisationModel;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
@@ -233,6 +233,7 @@ public class EvaluationAutoConfiguration {
             JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager,
             List<io.github.gmcnicol.kernel.semanticpack.IntentHandler> handlers,
+            List<io.github.gmcnicol.kernel.semanticpack.EventProjector> projectors,
             TaxiPayloadValidator payloads,
             SemanticPackVersion semanticPackVersion,
             List<ApplicabilityPolicy> policies,
@@ -245,7 +246,7 @@ public class EvaluationAutoConfiguration {
             KernelTelemetry telemetry,
             SemanticCompatibility compatibility) {
         return new IntentExecutionService(
-                jdbc, new TransactionTemplate(transactionManager), handlers, payloads,
+                jdbc, new TransactionTemplate(transactionManager), handlers, projectors, payloads,
                 semanticPackVersion, policies, derivations, cedar, worker, invariants, fatalInvariants, clock,
                 telemetry, compatibility);
     }

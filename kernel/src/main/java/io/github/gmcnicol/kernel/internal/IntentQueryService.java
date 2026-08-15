@@ -1,6 +1,7 @@
 package io.github.gmcnicol.kernel.internal;
 
 import io.github.gmcnicol.kernel.application.IntentAuditEntry;
+import io.github.gmcnicol.kernel.application.IntentAuditQuery;
 import io.github.gmcnicol.kernel.application.IntentFailureReason;
 import io.github.gmcnicol.kernel.application.IntentQuery;
 import io.github.gmcnicol.kernel.application.IntentStatus;
@@ -36,7 +37,10 @@ final class IntentQueryService {
                       AND (?::text IS NULL OR subject_id = ?::text)
                       AND (?::uuid IS NULL OR id = ?::uuid)
                       AND (?::timestamptz IS NULL OR accepted_at < ?::timestamptz)
+                      AND (?::timestamptz IS NULL
+                           OR (accepted_at, id) > (?::timestamptz, ?::uuid))
                     ORDER BY accepted_at, id
+                    LIMIT ?
                     """, (result, row) -> new IntentView(
                             result.getObject("id", java.util.UUID.class),
                             result.getString("tenant_id"),
@@ -52,7 +56,7 @@ final class IntentQueryService {
         });
     }
 
-    List<IntentAuditEntry> audit(IntentQuery query) {
+    List<IntentAuditEntry> audit(IntentAuditQuery query) {
         return transactions.execute(status -> {
             TenantContext.assumeRuntimeRole(jdbc);
             TenantContext.useAfterRole(jdbc, query.tenantId());
@@ -61,13 +65,10 @@ final class IntentQueryService {
                            audit.occurred_at, audit.reason, audit.failure_reason, audit.correlation
                     FROM kernel.intent_audit audit
                     JOIN kernel.intent intent ON intent.id = audit.intent_id AND intent.tenant_id = audit.tenant_id
-                    WHERE intent.tenant_id = ?
-                      AND (?::text IS NULL OR intent.status = ?::text)
-                      AND (?::text IS NULL OR intent.subject_type = ?::text)
-                      AND (?::text IS NULL OR intent.subject_id = ?::text)
-                      AND (?::uuid IS NULL OR intent.id = ?::uuid)
-                      AND (?::timestamptz IS NULL OR intent.accepted_at < ?::timestamptz)
-                    ORDER BY audit.intent_id, audit.sequence
+                    WHERE intent.tenant_id = ? AND intent.id = ?
+                      AND (?::integer IS NULL OR audit.sequence > ?::integer)
+                    ORDER BY audit.sequence
+                    LIMIT ?
                     """, (result, row) -> new IntentAuditEntry(
                             result.getObject("id", java.util.UUID.class),
                             result.getObject("intent_id", java.util.UUID.class),
@@ -79,7 +80,10 @@ final class IntentQueryService {
                             Optional.ofNullable(result.getString("failure_reason"))
                                     .map(IntentFailureReason::valueOf),
                             result.getObject("correlation", java.util.UUID.class)),
-                    parameters(query));
+                    query.tenantId(), query.intentId(),
+                    query.afterSequence().isPresent() ? query.afterSequence().getAsInt() : null,
+                    query.afterSequence().isPresent() ? query.afterSequence().getAsInt() : null,
+                    query.limit());
         });
     }
 
@@ -89,7 +93,11 @@ final class IntentQueryService {
         String subjectId = query.subject().map(Subject::id).orElse(null);
         java.util.UUID intentId = query.intentId().orElse(null);
         Timestamp acceptedBefore = query.acceptedBefore().map(Timestamp::from).orElse(null);
+        Timestamp cursorTime = query.after().map(IntentQuery.Cursor::acceptedAt).map(Timestamp::from).orElse(null);
+        java.util.UUID cursorId = query.after().map(IntentQuery.Cursor::intentId).orElse(null);
         return new Object[] { query.tenantId(), status, status, subjectType, subjectType, subjectId, subjectId,
-                intentId, intentId, acceptedBefore, acceptedBefore };
+                intentId, intentId, acceptedBefore, acceptedBefore,
+                cursorTime, cursorTime, cursorId, query.limit() };
     }
+
 }

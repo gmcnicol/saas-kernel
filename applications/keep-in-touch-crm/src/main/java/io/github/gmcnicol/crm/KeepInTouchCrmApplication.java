@@ -1,11 +1,13 @@
 package io.github.gmcnicol.crm;
 
-import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
-import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
+import io.github.gmcnicol.kernel.application.AuthorisationBundle;
+import io.github.gmcnicol.kernel.application.AuthorisationModel;
 import io.github.gmcnicol.kernel.application.Event;
+import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
+import io.github.gmcnicol.kernel.semanticpack.EventProjector;
 import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import io.github.gmcnicol.kernel.semanticpack.SemanticVersionAdapter;
@@ -16,6 +18,7 @@ import java.util.Map;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.jdbc.core.JdbcTemplate;
 import io.micrometer.observation.ObservationRegistry;
 import tools.jackson.databind.ObjectMapper;
 
@@ -89,6 +92,7 @@ public class KeepInTouchCrmApplication {
             var resultingState = new HashMap<>(state.values());
             resultingState.put("followUpCompleted", "true");
             resultingState.put("lastInteractionNote", payload.values().get("note"));
+            resultingState.put("lastInteractionAt", intent.acceptedAt().toString());
             return List.of(new Event("io.github.gmcnicol.crm.InteractionRecorded", 1,
                     Map.of("contactId", state.subject().id()), resultingState));
         });
@@ -151,6 +155,24 @@ public class KeepInTouchCrmApplication {
     }
 
     @Bean
+    EventProjector interactionRecordedProjector(JdbcTemplate jdbc) {
+        return EventProjector.of("io.github.gmcnicol.crm.InteractionRecorded",
+                (state, event) -> projectContact(jdbc, state, event.resultingState(), false));
+    }
+
+    @Bean
+    EventProjector followUpSnoozedProjector(JdbcTemplate jdbc) {
+        return EventProjector.of("io.github.gmcnicol.crm.FollowUpSnoozed",
+                (state, event) -> projectContact(jdbc, state, event.resultingState(), true));
+    }
+
+    @Bean
+    EventProjector followUpCompletedProjector(JdbcTemplate jdbc) {
+        return EventProjector.of("io.github.gmcnicol.crm.FollowUpCompleted",
+                (state, event) -> projectContact(jdbc, state, event.resultingState(), false));
+    }
+
+    @Bean
     PresentationPack crmDesktopPresentationPack(ObservationRegistry observations) {
         return CrmPresentation.desktop().observed(observations);
     }
@@ -179,4 +201,28 @@ public class KeepInTouchCrmApplication {
     private static SemanticVersionAdapter adapter(SemanticVersionAdapter.Contract contract, String type) {
         return SemanticVersionAdapter.identity(contract, type, 1, 2);
     }
+
+    private static void projectContact(
+            JdbcTemplate jdbc, ProjectedState state, Map<String, String> values, boolean followUpOpen) {
+        Instant lastInteractionAt = java.util.Optional.ofNullable(values.get("lastInteractionAt"))
+                .map(Instant::parse).orElse(null);
+        jdbc.update("""
+                INSERT INTO crm_contact_engagement_projection
+                    (tenant_id, contact_id, display_name, last_interaction_at,
+                     next_contact_due_at, open_follow_up_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (tenant_id, contact_id) DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    last_interaction_at = EXCLUDED.last_interaction_at,
+                    next_contact_due_at = EXCLUDED.next_contact_due_at,
+                    open_follow_up_id = EXCLUDED.open_follow_up_id
+                """, state.tenantId(), state.subject().id(),
+                values.getOrDefault("displayName", state.subject().id()),
+                lastInteractionAt == null ? null : java.sql.Timestamp.from(lastInteractionAt),
+                java.sql.Timestamp.from(Instant.parse(values.get("followUpDueAt"))),
+                followUpOpen ? java.util.UUID.nameUUIDFromBytes(
+                        (state.tenantId() + ":" + state.subject().id()).getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                        : null);
+    }
+
 }
