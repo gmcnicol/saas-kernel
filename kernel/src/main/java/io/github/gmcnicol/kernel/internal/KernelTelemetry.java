@@ -11,7 +11,11 @@ import io.micrometer.observation.ObservationRegistry;
 import io.micrometer.tracing.Link;
 import io.micrometer.tracing.Span;
 import io.micrometer.tracing.Tracer;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.HexFormat;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
@@ -48,7 +52,7 @@ final class KernelTelemetry {
     <T> T observeLinked(String name, String traceparent, Supplier<T> work) {
         Span span;
         try {
-            var builder = tracer.spanBuilder().setNoParent().name(name);
+            var builder = tracer.spanBuilder().setNoParent().name("kernel.intent.worker");
             if (traceparent != null) builder.addLink(new Link(traceContext(traceparent)));
             span = builder.start();
         } catch (RuntimeException exporterFailure) {
@@ -58,7 +62,6 @@ final class KernelTelemetry {
             safe(span::end);
             return observe(name, true, work);
         }
-        long started = System.nanoTime();
         Tracer.SpanInScope scope = null;
         try {
             try {
@@ -66,14 +69,13 @@ final class KernelTelemetry {
             } catch (RuntimeException ignored) {
                 // Telemetry is never authoritative.
             }
-            return work.get();
+            return observe(name, false, work);
         } catch (RuntimeException | Error businessFailure) {
             safe(() -> span.error(businessFailure));
             throw businessFailure;
         } finally {
             if (scope != null) safe(scope::close);
             safe(span::end);
-            timer(name, Duration.ofNanos(System.nanoTime() - started));
         }
     }
 
@@ -115,7 +117,7 @@ final class KernelTelemetry {
         afterCommit(() -> LOG.atInfo()
                 .addKeyValue("tenant", snapshot.tenantId())
                 .addKeyValue("subject_type", snapshot.subject().type())
-                .addKeyValue("subject_id", snapshot.subject().id())
+                .addKeyValue("subject_correlation", subjectCorrelation(snapshot.tenantId(), snapshot.subject()))
                 .addKeyValue("evaluation_snapshot", snapshot.id())
                 .addKeyValue("application_version", application.version())
                 .addKeyValue("kernel_version", kernelVersion)
@@ -127,7 +129,7 @@ final class KernelTelemetry {
         afterCommit(() -> LOG.atInfo()
                 .addKeyValue("tenant", tenantId)
                 .addKeyValue("subject_type", subject.type())
-                .addKeyValue("subject_id", subject.id())
+                .addKeyValue("subject_correlation", subjectCorrelation(tenantId, subject))
                 .addKeyValue("evaluation_snapshot", snapshotId)
                 .addKeyValue("action_offer", offerId)
                 .addKeyValue("application_version", application.version())
@@ -146,7 +148,7 @@ final class KernelTelemetry {
         afterCommit(() -> LOG.atInfo()
                 .addKeyValue("tenant", tenantId)
                 .addKeyValue("subject_type", subject.type())
-                .addKeyValue("subject_id", subject.id())
+                .addKeyValue("subject_correlation", subjectCorrelation(tenantId, subject))
                 .addKeyValue("action_offer", offerId)
                 .addKeyValue("intent", intentId)
                 .addKeyValue("intent_outcome", status.name().toLowerCase())
@@ -160,7 +162,7 @@ final class KernelTelemetry {
         afterCommit(() -> LOG.atInfo()
                 .addKeyValue("tenant", tenantId)
                 .addKeyValue("subject_type", subject.type())
-                .addKeyValue("subject_id", subject.id())
+                .addKeyValue("subject_correlation", subjectCorrelation(tenantId, subject))
                 .addKeyValue("intent", intentId)
                 .addKeyValue("event", eventId)
                 .addKeyValue("application_version", application.version())
@@ -219,6 +221,16 @@ final class KernelTelemetry {
                 .spanId(traceparent.substring(36, 52))
                 .sampled((Integer.parseInt(traceparent.substring(53, 55), 16) & 1) == 1)
                 .build();
+    }
+
+    private static String subjectCorrelation(String tenantId, Subject subject) {
+        try {
+            byte[] value = (tenantId + "\0" + subject.type() + "\0" + subject.id())
+                    .getBytes(StandardCharsets.UTF_8);
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value));
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+        }
     }
 
     static void afterCommit(Runnable signal) {

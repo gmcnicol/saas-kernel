@@ -474,7 +474,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                         "\"intent\":\"" + intentId + "\"",
                         "\"trace_correlation\":\"" + traceId + "\"",
                         "\"event\":")
-                .doesNotContain("Spoke through rendered control", "never render");
+                .doesNotContain(subject.id(), "Spoke through rendered control", "never render");
 
         mvc.perform(get("/presentation/crm/desktop/events")
                         .header("X-Tenant-Id", "tenant-one")

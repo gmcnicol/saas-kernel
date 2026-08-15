@@ -266,7 +266,7 @@ class ApplicationEvaluationTests {
                         "\"intent\":\"" + intentId + "\"",
                         "\"trace_correlation\":\"" + traceId + "\"",
                         "\"event\":")
-                .doesNotContain("2026-08-15T10:02:00Z", "private filing note");
+                .doesNotContain(subject.id(), "2026-08-15T10:02:00Z", "private filing note");
 
         mvc.perform(get("/presentation/ledgerling/events")
                         .header("X-Tenant-Id", "tenant-one")

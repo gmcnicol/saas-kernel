@@ -60,6 +60,13 @@ class KernelTelemetryTests {
     @Test
     void workerObservationIsANewRootLinkedToIncomingTrace() {
         var observations = ObservationRegistry.create();
+        var observed = new AtomicBoolean();
+        observations.observationConfig().observationHandler(new ObservationHandler<>() {
+            @Override public void onStop(Observation.Context context) {
+                if (context.getName().equals("kernel.intent.attempt")) observed.set(true);
+            }
+            @Override public boolean supportsContext(Observation.Context context) { return true; }
+        });
         var tracer = new SimpleTracer();
         var telemetry = new KernelTelemetry(
                 observations, new SimpleMeterRegistry(), tracer, new ApplicationVersion("test.app", "1"), "1");
@@ -74,8 +81,9 @@ class KernelTelemetryTests {
         }
 
         var worker = tracer.getSpans().stream()
-                .filter(span -> span.getName().equals("kernel.intent.attempt"))
+                .filter(span -> span.getName().equals("kernel.intent.worker"))
                 .findFirst().orElseThrow();
+        assertThat(observed).isTrue();
         assertThat(worker.getParentId()).isBlank();
         assertThat(worker.getTraceId()).isNotEqualTo("4bf92f3577b34da6a3ce929d0e0e4736");
         assertThat(worker.getLinks()).singleElement().satisfies(link -> {
