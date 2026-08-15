@@ -228,10 +228,12 @@ public class EvaluationAutoConfiguration {
             MeterRegistry meters,
             ObjectProvider<Tracer> tracer,
             @Value("${spring.application.name}") String applicationId,
-            @Value("${spring.application.version}") String applicationVersion) {
+            @Value("${spring.application.version}") String applicationVersion,
+            @Value("${kernel.telemetry.subject-key}") String subjectKey,
+            @Value("${kernel.telemetry.subject-key-id}") String subjectKeyId) {
         return new KernelTelemetry(
                 observations, meters, tracer.getIfAvailable(() -> Tracer.NOOP),
-                new ApplicationVersion(applicationId, applicationVersion), kernelVersion());
+                new ApplicationVersion(applicationId, applicationVersion), kernelVersion(), subjectKey, subjectKeyId);
     }
 
     @Bean

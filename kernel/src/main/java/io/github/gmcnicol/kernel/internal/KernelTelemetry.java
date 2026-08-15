@@ -12,12 +12,13 @@ import io.micrometer.tracing.Link;
 import io.micrometer.tracing.Span;
 import io.micrometer.tracing.Tracer;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.HexFormat;
 import java.util.UUID;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -26,23 +27,34 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 final class KernelTelemetry {
 
     private static final Logger LOG = LoggerFactory.getLogger("io.github.gmcnicol.kernel.workflow");
+    private static final Pattern KEY_ID = Pattern.compile("[A-Za-z0-9._-]{1,32}");
     private final ObservationRegistry observations;
     private final MeterRegistry meters;
     private final Tracer tracer;
     private final ApplicationVersion application;
     private final String kernelVersion;
+    private final byte[] subjectKey;
+    private final String subjectKeyId;
 
     KernelTelemetry(
             ObservationRegistry observations,
             MeterRegistry meters,
             Tracer tracer,
             ApplicationVersion application,
-            String kernelVersion) {
+            String kernelVersion,
+            String subjectKey,
+            String subjectKeyId) {
+        if (subjectKey == null || subjectKey.getBytes(StandardCharsets.UTF_8).length < 32
+                || subjectKeyId == null || !KEY_ID.matcher(subjectKeyId).matches()) {
+            throw new IllegalArgumentException("Telemetry subject key needs 32 bytes and a safe key ID");
+        }
         this.observations = observations;
         this.meters = meters;
         this.tracer = tracer;
         this.application = application;
         this.kernelVersion = kernelVersion;
+        this.subjectKey = subjectKey.getBytes(StandardCharsets.UTF_8);
+        this.subjectKeyId = subjectKeyId;
     }
 
     <T> T observe(String name, Supplier<T> work) {
@@ -223,13 +235,15 @@ final class KernelTelemetry {
                 .build();
     }
 
-    private static String subjectCorrelation(String tenantId, Subject subject) {
+    String subjectCorrelation(String tenantId, Subject subject) {
         try {
+            Mac hmac = Mac.getInstance("HmacSHA256");
+            hmac.init(new SecretKeySpec(subjectKey, "HmacSHA256"));
             byte[] value = (tenantId + "\0" + subject.type() + "\0" + subject.id())
                     .getBytes(StandardCharsets.UTF_8);
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value));
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 is unavailable", impossible);
+            return subjectKeyId + ":" + HexFormat.of().formatHex(hmac.doFinal(value));
+        } catch (java.security.GeneralSecurityException impossible) {
+            throw new IllegalStateException("HMAC-SHA-256 is unavailable", impossible);
         }
     }
 

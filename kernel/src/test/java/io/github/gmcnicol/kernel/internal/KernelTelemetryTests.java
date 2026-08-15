@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.gmcnicol.kernel.application.ApplicationVersion;
 import io.github.gmcnicol.kernel.application.IntentStatus;
+import io.github.gmcnicol.kernel.application.Subject;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationHandler;
@@ -27,7 +28,8 @@ class KernelTelemetryTests {
         });
         var meters = new SimpleMeterRegistry();
         var telemetry = new KernelTelemetry(
-                observations, meters, Tracer.NOOP, new ApplicationVersion("test.app", "1"), "1");
+                observations, meters, Tracer.NOOP, new ApplicationVersion("test.app", "1"), "1",
+                "01234567890123456789012345678901", "test-v1");
         var ran = new AtomicBoolean();
 
         String result = telemetry.observe("kernel.test", () -> {
@@ -69,7 +71,8 @@ class KernelTelemetryTests {
         });
         var tracer = new SimpleTracer();
         var telemetry = new KernelTelemetry(
-                observations, new SimpleMeterRegistry(), tracer, new ApplicationVersion("test.app", "1"), "1");
+                observations, new SimpleMeterRegistry(), tracer, new ApplicationVersion("test.app", "1"), "1",
+                "01234567890123456789012345678901", "test-v1");
         String traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
         var parent = tracer.nextSpan().name("acceptance").start();
@@ -105,5 +108,23 @@ class KernelTelemetryTests {
         } finally {
             TransactionSynchronizationManager.clearSynchronization();
         }
+    }
+
+    @Test
+    void subjectCorrelationIsKeyedAndRotatable() {
+        var first = new KernelTelemetry(
+                ObservationRegistry.NOOP, new SimpleMeterRegistry(), Tracer.NOOP,
+                new ApplicationVersion("test.app", "1"), "1",
+                "01234567890123456789012345678901", "v1");
+        var rotated = new KernelTelemetry(
+                ObservationRegistry.NOOP, new SimpleMeterRegistry(), Tracer.NOOP,
+                new ApplicationVersion("test.app", "1"), "1",
+                "abcdefghijklmnopqrstuvwxyzABCDEF", "v2");
+        var subject = new Subject("crm.Contact", "alex@example.com");
+
+        assertThat(first.subjectCorrelation("tenant-one", subject))
+                .startsWith("v1:")
+                .doesNotContain(subject.id())
+                .isNotEqualTo(rotated.subjectCorrelation("tenant-one", subject));
     }
 }
