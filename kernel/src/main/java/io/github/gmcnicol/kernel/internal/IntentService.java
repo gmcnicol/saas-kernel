@@ -88,6 +88,13 @@ final class IntentService {
         if (existing != null) {
             return existing;
         }
+        payload.priorIntentId().ifPresent(priorIntentId -> {
+            Boolean terminal = jdbc.queryForObject("""
+                    SELECT status IN ('SUCCEEDED', 'STALE', 'FAILED')
+                    FROM kernel.intent WHERE tenant_id = ? AND id = ?
+                    """, Boolean.class, tenantId, priorIntentId);
+            if (!Boolean.TRUE.equals(terminal)) throw new IntentRejectedException();
+        });
 
         Offer offer = loadOffer(tenantId, actionOfferId);
         TenantContext.lockSubject(jdbc, tenantId, offer.subject());

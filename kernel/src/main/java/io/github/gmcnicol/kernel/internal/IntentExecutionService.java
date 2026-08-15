@@ -23,8 +23,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.springframework.dao.TransientDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.dao.DataAccessException;
+import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionOperations;
 
 final class IntentExecutionService {
@@ -76,28 +77,14 @@ final class IntentExecutionService {
         }
         UUID token = UUID.randomUUID();
         Instant claimedAt = clock.instant();
-        Claim claim;
-        try {
-            claim = transactions.execute(status -> claim(token, processedAt, claimedAt));
-        } catch (FatalInvariantError error) {
-            fatalInvariants.terminate(error);
-            throw error;
-        }
+        Claim claim = inTransaction(status -> claim(token, processedAt, claimedAt));
         if (claim == null) {
             return Optional.empty();
         }
         try {
-            return Optional.of(transactions.execute(status -> complete(claim, token, processedAt)));
-        } catch (FatalInvariantError error) {
-            fatalInvariants.terminate(error);
-            throw error;
+            return Optional.of(inTransaction(status -> complete(claim, token, processedAt)));
         } catch (RuntimeException exception) {
-            FatalInvariantError invariant = databaseInvariant(exception);
-            if (invariant != null) {
-                fatalInvariants.terminate(invariant);
-                throw invariant;
-            }
-            return Optional.of(transactions.execute(status -> failAttempt(claim, token, processedAt, exception)));
+            return Optional.of(inTransaction(status -> failAttempt(claim, token, processedAt, exception)));
         }
     }
 
@@ -140,6 +127,10 @@ final class IntentExecutionService {
                 || !semanticPack.checksum().equals(stored.semanticPackChecksum())) {
             return reject(claim, stored, token, processedAt, state, null, null, null,
                     IntentStatus.STALE, IntentFailureReason.STATE_OR_SEMANTIC_STALE);
+        }
+        if (stored.attemptCount() > worker.maximumAttempts()) {
+            return reject(claim, stored, token, processedAt, state, null, null, null,
+                    IntentStatus.FAILED, IntentFailureReason.TRANSIENT_ATTEMPTS_EXHAUSTED);
         }
         ExecutionEvidence evidence = evidence(stored, state, processedAt);
         if (!evidence.applicable()) {
@@ -240,14 +231,17 @@ final class IntentExecutionService {
         TenantContext.assumeWorkerRole(jdbc);
         TenantContext.useAfterRole(jdbc, claim.tenantId());
         StoredIntent stored = load(claim.intentId(), token);
-        boolean retryable = exception instanceof RetryableIntentException || exception instanceof DataAccessException;
+        boolean retryable = exception instanceof RetryableIntentException
+                || exception instanceof TransientDataAccessException;
         if (retryable && stored.attemptCount() < worker.maximumAttempts()) {
+            Instant failedAt = clock.instant();
             invariants.transition(IntentStatus.CLAIMED, IntentStatus.RETRY_WAIT);
             int updated = jdbc.update("""
                     UPDATE kernel.intent SET status = 'RETRY_WAIT', lease_token = NULL, lease_until = NULL,
                         next_attempt_at = ?
-                    WHERE tenant_id = ? AND id = ? AND status = 'CLAIMED' AND lease_token = ?
-                    """, Timestamp.from(processedAt.plus(worker.retryBackoff())), claim.tenantId(), stored.id(), token);
+                    WHERE tenant_id = ? AND id = ? AND status = 'CLAIMED' AND lease_token = ? AND lease_until >= ?
+                    """, Timestamp.from(failedAt.plus(worker.retryBackoff())), claim.tenantId(), stored.id(), token,
+                    Timestamp.from(failedAt));
             if (updated != 1) {
                 throw new IllegalStateException("Intent lease is no longer owned");
             }
@@ -257,7 +251,7 @@ final class IntentExecutionService {
                          occurred_at, reason, correlation)
                     VALUES (?, ?, ?, ?, 'CLAIMED', 'RETRY_WAIT', ?, 'transient failure', ?)
                     """, UUID.randomUUID(), claim.tenantId(), stored.id(), nextAuditSequence(stored.id()),
-                    Timestamp.from(processedAt), UUID.randomUUID());
+                    Timestamp.from(failedAt), UUID.randomUUID());
             return new Intent(stored.id(), stored.actionOfferId(), IntentStatus.RETRY_WAIT, stored.acceptedAt());
         }
         TenantContext.lockSubject(jdbc, claim.tenantId(), stored.subject());
@@ -306,6 +300,20 @@ final class IntentExecutionService {
             }
         }
         return null;
+    }
+
+    private <T> T inTransaction(TransactionCallback<T> action) {
+        try {
+            return transactions.execute(action);
+        } catch (FatalInvariantError error) {
+            fatalInvariants.terminate(error);
+            throw error;
+        } catch (RuntimeException exception) {
+            FatalInvariantError invariant = databaseInvariant(exception);
+            if (invariant == null) throw exception;
+            fatalInvariants.terminate(invariant);
+            throw invariant;
+        }
     }
 
     private StoredIntent load(UUID intentId, UUID token) {

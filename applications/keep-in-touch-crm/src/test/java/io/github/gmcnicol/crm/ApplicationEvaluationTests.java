@@ -231,6 +231,9 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 payload.type(), payload.version(), payload.values(), Optional.empty(), Optional.of(selfLinkedIntentId))))
                 .isInstanceOf(IntentRejectedException.class);
 
+        failRecordInteractionDeterministically();
+        assertThat(processUntil(intentId, Instant.now().plusSeconds(10)).status()).isEqualTo(IntentStatus.FAILED);
+        restoreRecordInteractionHandler();
         var trace = new W3cTraceContext(
                 "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "kernel=test");
         var linkedIntentId = UUID.randomUUID();
@@ -255,7 +258,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                             WHERE id = ? AND prior_intent_id = ? AND traceparent = ? AND tracestate = ?
                             """, Integer.class, linkedIntentId, intentId, trace.traceparent(), trace.tracestate()));
         });
-        assertThat(persisted).containsExactly(2, 2, 2, 1);
+        assertThat(persisted).containsExactly(2, 2, 4, 1);
     }
 
     @Test
@@ -341,8 +344,8 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                     FOR EACH ROW EXECUTE FUNCTION public.reject_success_audit();
                     """);
             try {
-                assertThat(kernel.processNext(processedAt)).hasValueSatisfying(retry ->
-                        assertThat(retry.status()).isEqualTo(IntentStatus.RETRY_WAIT));
+                assertThat(kernel.processNext(processedAt)).hasValueSatisfying(failed ->
+                        assertThat(failed.status()).isEqualTo(IntentStatus.FAILED));
             } finally {
                 statement.execute("""
                         DROP TRIGGER reject_success_audit ON kernel.intent_audit;
@@ -364,7 +367,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                             SELECT count(*) FROM kernel.reevaluation_request
                             WHERE subject_type = 'crm.Contact' AND subject_id = 'rollback-alex'
                             """, Integer.class),
-                    jdbc.queryForObject("SELECT count(*) FROM kernel.intent WHERE id = ? AND status = 'RETRY_WAIT'",
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.intent WHERE id = ? AND status = 'FAILED'",
                             Integer.class, intent.id()),
                     jdbc.queryForObject("SELECT count(*) FROM kernel.intent_audit WHERE intent_id = ?",
                             Integer.class, intent.id()));
@@ -434,7 +437,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
 
     @Test
     void retriesTransientWorkFailsDeterministicWorkAndLinksHumanRecovery() {
-        Instant base = Instant.parse("2029-01-01T00:00:00Z");
+        Instant base = Instant.now().plusSeconds(10);
         while (kernel.processNext(base).isPresent()) {
             // Drain Intent left by independent acceptance tests.
         }
@@ -444,7 +447,12 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         failRecordInteractionTransiently();
         var waiting = processUntil(transientIntent.id(), base);
         assertThat(waiting.status()).isEqualTo(IntentStatus.RETRY_WAIT);
-        assertThat(kernel.processNext(base.plusSeconds(59))).isEmpty();
+        assertThatThrownBy(() -> kernel.accept(
+                transientIntent.actionOfferId(), UUID.randomUUID(), new CandidatePayload(
+                        "io.github.gmcnicol.crm.RecordInteractionInput", 1, Map.of("note", "Invalid retry"),
+                        Optional.empty(), Optional.of(transientIntent.id()))))
+                .isInstanceOf(IntentRejectedException.class);
+        assertThat(kernel.processNext(base.plusSeconds(49))).isEmpty();
         restoreRecordInteractionHandler();
         assertThat(processUntil(transientIntent.id(), base.plusSeconds(60)).status())
                 .isEqualTo(IntentStatus.SUCCEEDED);
@@ -542,6 +550,48 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
     }
 
     @Test
+    void recoversHandlerCrashAndDoesNotRepeatCommittedWorkWhenAcknowledgementIsLost() throws Exception {
+        Instant processedAt = Instant.parse("2030-02-01T00:00:00Z");
+        while (kernel.processNext(processedAt).isPresent()) {
+            // Drain Intent left by independent acceptance tests.
+        }
+        var duringHandling = acceptedRecordInteraction(
+                "handler-crash", 135, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+        crashRecordInteractionHandler();
+        assertThatThrownBy(() -> kernel.processNext(processedAt)).isInstanceOf(AssertionError.class);
+        restoreRecordInteractionHandler();
+        expireLease(duringHandling.id());
+        assertThat(processUntil(duringHandling.id(), processedAt).status()).isEqualTo(IntentStatus.SUCCEEDED);
+
+        var repeatedlyCrashed = acceptedRecordInteraction(
+                "repeated-handler-crash", 137, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+        crashRecordInteractionHandler();
+        for (int attempt = 0; attempt < 3; attempt++) {
+            assertThatThrownBy(() -> kernel.processNext(processedAt)).isInstanceOf(AssertionError.class);
+            expireLease(repeatedlyCrashed.id());
+        }
+        restoreRecordInteractionHandler();
+        assertThat(processUntil(repeatedlyCrashed.id(), processedAt)).satisfies(failed -> {
+            assertThat(failed.status()).isEqualTo(IntentStatus.FAILED);
+            assertThat(failed.failureReason()).contains(IntentFailureReason.TRANSIENT_ATTEMPTS_EXHAUSTED);
+        });
+
+        var afterCommit = acceptedRecordInteraction(
+                "lost-acknowledgement", 136, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+        processUntil(afterCommit.id(), processedAt); // Simulate the caller losing the successful acknowledgement.
+        assertThat(kernel.processNext(processedAt)).isEmpty();
+        var committed = new TransactionTemplate(transactionManager).execute(status -> {
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            return java.util.List.of(
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.event WHERE intent_id = ?", Integer.class,
+                            duringHandling.id()),
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.event WHERE intent_id = ?", Integer.class,
+                            afterCommit.id()));
+        });
+        assertThat(committed).containsExactly(1, 1);
+    }
+
+    @Test
     void isolatesOneFailedIntentFromUnrelatedDueWorkInTheSameBatch() {
         Instant processedAt = Instant.parse("2031-01-01T00:00:00Z");
         while (kernel.processNext(processedAt).isPresent()) {
@@ -614,5 +664,15 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
             }
         }
         throw new AssertionError("Intent was not processed");
+    }
+
+    private void expireLease(UUID intentId) throws Exception {
+        try (var admin = DriverManager.getConnection(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+                var statement = admin.prepareStatement("UPDATE kernel.intent SET lease_until = ? WHERE id = ?")) {
+            statement.setTimestamp(1, java.sql.Timestamp.from(Instant.EPOCH));
+            statement.setObject(2, intentId);
+            assertThat(statement.executeUpdate()).isEqualTo(1);
+        }
     }
 }

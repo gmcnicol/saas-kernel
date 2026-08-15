@@ -44,6 +44,11 @@ public abstract class CurrentExecutionBasisTest {
                 .when(recordInteractionHandler).handle(any(), any(), any());
     }
 
+    protected final void crashRecordInteractionHandler() {
+        org.mockito.Mockito.doThrow(new AssertionError("simulated process crash"))
+                .when(recordInteractionHandler).handle(any(), any(), any());
+    }
+
     protected final void restoreRecordInteractionHandler() {
         reset(recordInteractionHandler);
     }
