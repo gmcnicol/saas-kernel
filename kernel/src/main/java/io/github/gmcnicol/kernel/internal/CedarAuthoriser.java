@@ -37,6 +37,9 @@ final class CedarAuthoriser {
     }
 
     boolean allows(Principal principal, Subject subject, String operation) {
+        if (!model.subjectType().equals(subject.type())) {
+            return false;
+        }
         try {
             Entity principalEntity = entity(principal.type(), principal.id());
             Entity resourceEntity = entity(model.resourceType(), subject.id());

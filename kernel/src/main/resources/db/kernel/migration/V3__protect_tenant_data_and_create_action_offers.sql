@@ -14,7 +14,8 @@ CREATE TABLE kernel.action_offer (
     authorisation_bundle_checksum char(64) NOT NULL,
     authorised_at timestamptz NOT NULL,
     decision_correlation uuid NOT NULL,
-    UNIQUE (tenant_id, evaluation_snapshot_id, principal_type, principal_id, action_id, authorised_at),
+    UNIQUE (tenant_id, evaluation_snapshot_id, principal_type, principal_id, action_id,
+            authorisation_bundle_id, authorisation_bundle_checksum, authorised_at),
     FOREIGN KEY (evaluation_snapshot_id, tenant_id)
         REFERENCES kernel.evaluation_snapshot(id, tenant_id)
 );
@@ -30,7 +31,9 @@ BEGIN
 END $$;
 
 GRANT USAGE ON SCHEMA kernel TO kernel_runtime, kernel_worker;
-GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA kernel TO kernel_runtime, kernel_worker;
+GRANT SELECT, INSERT ON kernel.projected_state_version, kernel.projected_state_value,
+    kernel.evaluation_snapshot, kernel.evaluation_fact, kernel.evaluation_fact_value,
+    kernel.evaluation_applicable_action, kernel.action_offer TO kernel_runtime, kernel_worker;
 
 ALTER TABLE kernel.projected_state_version ENABLE ROW LEVEL SECURITY;
 ALTER TABLE kernel.projected_state_version FORCE ROW LEVEL SECURITY;

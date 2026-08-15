@@ -34,6 +34,7 @@ public class LedgerlingApplication {
     @Bean
     AuthorisationModel ledgerlingAuthorisationModel() {
         return new AuthorisationModel() {
+            @Override public String subjectType() { return "ledgerling.Filing"; }
             @Override public String resourceType() { return "Filing"; }
             @Override public Map<String, String> fields() {
                 return Map.of(

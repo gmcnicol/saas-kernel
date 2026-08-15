@@ -33,6 +33,7 @@ public class KeepInTouchCrmApplication {
     @Bean
     AuthorisationModel crmAuthorisationModel() {
         return new AuthorisationModel() {
+            @Override public String subjectType() { return "crm.Contact"; }
             @Override public String resourceType() { return "Contact"; }
             @Override public Map<String, String> fields() {
                 return Map.of("io.github.gmcnicol.crm.Contact.displayName", "displayName");

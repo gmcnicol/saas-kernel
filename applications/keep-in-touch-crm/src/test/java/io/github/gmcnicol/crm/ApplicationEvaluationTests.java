@@ -12,7 +12,8 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -26,8 +27,18 @@ import org.testcontainers.utility.DockerImageName;
 class ApplicationEvaluationTests {
 
     @Container
-    @ServiceConnection
-    static final PostgreSQLContainer postgres = new PostgreSQLContainer(DockerImageName.parse("postgres:18-alpine"));
+    static final PostgreSQLContainer postgres = new PostgreSQLContainer(DockerImageName.parse("postgres:18-alpine"))
+            .withInitScript("postgres-init.sql");
+
+    @DynamicPropertySource
+    static void databaseProperties(DynamicPropertyRegistry properties) {
+        properties.add("spring.datasource.url", postgres::getJdbcUrl);
+        properties.add("spring.datasource.username", () -> "kernel_test_login");
+        properties.add("spring.datasource.password", () -> "kernel-test");
+        properties.add("spring.flyway.url", postgres::getJdbcUrl);
+        properties.add("spring.flyway.user", postgres::getUsername);
+        properties.add("spring.flyway.password", postgres::getPassword);
+    }
 
     @Autowired Kernel kernel;
     @Autowired JdbcTemplate jdbc;
@@ -121,16 +132,20 @@ class ApplicationEvaluationTests {
                 "io.github.gmcnicol.crm.CrmActions.recordInteraction",
                 "io.github.gmcnicol.crm.CrmActions.snoozeFollowUp",
                 "io.github.gmcnicol.crm.CrmActions.completeFollowUp");
-        assertThat(jdbc.queryForObject("""
-                SELECT count(*) FROM kernel.action_offer
-                WHERE tenant_id = ? AND evaluation_snapshot_id = ? AND principal_type = ? AND principal_id = ?
-                  AND subject_type = ? AND subject_id = ? AND state_version = ?
-                  AND semantic_pack_id = ? AND semantic_pack_checksum = ?
-                  AND authorisation_bundle_id = ? AND length(authorisation_bundle_checksum) = 64
-                  AND authorised_at = ? AND decision_correlation IS NOT NULL
-                """, Integer.class, "tenant-one", snapshot.id(), "Owner", "gareth", "crm.Contact", "alex", 10,
-                snapshot.semanticPackVersion().id(), snapshot.semanticPackVersion().checksum(),
-                "io.github.gmcnicol.crm.authorisation", java.sql.Timestamp.from(authorisedAt))).isEqualTo(3);
+        Integer evidence = new TransactionTemplate(transactionManager).execute(status -> {
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            return jdbc.queryForObject("""
+                    SELECT count(*) FROM kernel.action_offer
+                    WHERE tenant_id = ? AND evaluation_snapshot_id = ? AND principal_type = ? AND principal_id = ?
+                      AND subject_type = ? AND subject_id = ? AND state_version = ?
+                      AND semantic_pack_id = ? AND semantic_pack_checksum = ?
+                      AND authorisation_bundle_id = ? AND length(authorisation_bundle_checksum) = 64
+                      AND authorised_at = ? AND decision_correlation IS NOT NULL
+                    """, Integer.class, "tenant-one", snapshot.id(), "Owner", "gareth", "crm.Contact", "alex", 10,
+                    snapshot.semanticPackVersion().id(), snapshot.semanticPackVersion().checksum(),
+                    "io.github.gmcnicol.crm.authorisation", java.sql.Timestamp.from(authorisedAt));
+        });
+        assertThat(evidence).isEqualTo(3);
         assertThat(viewer.fields()).containsOnlyKeys("io.github.gmcnicol.crm.Contact.displayName");
         assertThat(viewer.facts()).extracting(fact -> fact.type())
                 .containsExactly("io.github.gmcnicol.crm.FollowUpDue");
@@ -157,7 +172,6 @@ class ApplicationEvaluationTests {
                 .isInstanceOf(IllegalArgumentException.class);
 
         Integer visible = new TransactionTemplate(transactionManager).execute(status -> {
-            jdbc.execute("SET LOCAL ROLE kernel_runtime");
             return jdbc.queryForObject("SELECT count(*) FROM kernel.evaluation_snapshot", Integer.class);
         });
         assertThat(visible).isZero();

@@ -2,7 +2,7 @@ package io.github.gmcnicol.kernel.internal;
 
 import io.github.gmcnicol.kernel.application.ApplicableAction;
 import io.github.gmcnicol.kernel.application.ApplicationVersion;
-import io.github.gmcnicol.kernel.application.AuthorisedEvaluation;
+import io.github.gmcnicol.kernel.application.AuthorisationEnvelope;
 import io.github.gmcnicol.kernel.application.EvaluationSnapshot;
 import io.github.gmcnicol.kernel.application.Fact;
 import io.github.gmcnicol.kernel.application.Kernel;
@@ -64,7 +64,7 @@ final class DefaultKernel implements Kernel {
     }
 
     @Override
-    public AuthorisedEvaluation authorise(
+    public AuthorisationEnvelope authorise(
             String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt) {
         return authorisation.authorise(tenantId, snapshotId, principal, authorisedAt);
     }

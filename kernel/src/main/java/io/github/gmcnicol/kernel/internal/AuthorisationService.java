@@ -3,7 +3,7 @@ package io.github.gmcnicol.kernel.internal;
 import io.github.gmcnicol.kernel.application.ActionOffer;
 import io.github.gmcnicol.kernel.application.ApplicableAction;
 import io.github.gmcnicol.kernel.application.AuthorisationDeniedException;
-import io.github.gmcnicol.kernel.application.AuthorisedEvaluation;
+import io.github.gmcnicol.kernel.application.AuthorisationEnvelope;
 import io.github.gmcnicol.kernel.application.Fact;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
@@ -30,24 +30,31 @@ final class AuthorisationService {
         this.cedar = cedar;
     }
 
-    AuthorisedEvaluation authorise(
+    AuthorisationEnvelope authorise(
             String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt) {
         if (snapshotId == null || principal == null || authorisedAt == null) {
             throw new AuthorisationDeniedException();
         }
-        return transactions.execute(status -> authoriseInTransaction(tenantId, snapshotId, principal, authorisedAt));
+        try {
+            return transactions.execute(status -> authoriseInTransaction(tenantId, snapshotId, principal, authorisedAt));
+        } catch (AuthorisationDeniedException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            throw new AuthorisationDeniedException();
+        }
     }
 
-    private AuthorisedEvaluation authoriseInTransaction(
+    private AuthorisationEnvelope authoriseInTransaction(
             String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt) {
         try {
             TenantContext.use(jdbc, tenantId);
         } catch (IllegalArgumentException exception) {
             throw new AuthorisationDeniedException();
         }
+        Map<String, String> fieldMappings = cedar.fields();
         StoredEvaluation evaluation = load(tenantId, snapshotId);
         Map<String, String> fields = new LinkedHashMap<>();
-        cedar.fields().entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
+        fieldMappings.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
             String value = evaluation.state().get(entry.getValue());
             if (value != null && cedar.allows(principal, evaluation.subject(), entry.getKey())) {
                 fields.put(entry.getKey(), value);
@@ -61,7 +68,7 @@ final class AuthorisationService {
                 .filter(action -> cedar.allows(principal, evaluation.subject(), action.actionId()))
                 .map(action -> persistOffer(tenantId, evaluation, principal, action, authorisedAt, correlation))
                 .toList();
-        return new AuthorisedEvaluation(snapshotId, fields, facts, offers);
+        return new AuthorisationEnvelope(snapshotId, fields, facts, offers);
     }
 
     private StoredEvaluation load(String tenantId, UUID snapshotId) {
@@ -138,9 +145,11 @@ final class AuthorisationService {
             id = jdbc.queryForObject("""
                     SELECT id FROM kernel.action_offer
                     WHERE tenant_id = ? AND evaluation_snapshot_id = ? AND principal_type = ?
-                      AND principal_id = ? AND action_id = ? AND authorised_at = ?
+                      AND principal_id = ? AND action_id = ?
+                      AND authorisation_bundle_id = ? AND authorisation_bundle_checksum = ?
+                      AND authorised_at = ?
                     """, UUID.class, tenantId, evaluation.id(), principal.type(), principal.id(), action.actionId(),
-                    Timestamp.from(authorisedAt));
+                    cedar.bundleId(), cedar.bundleChecksum(), Timestamp.from(authorisedAt));
         }
         return new ActionOffer(id, action.actionId());
     }

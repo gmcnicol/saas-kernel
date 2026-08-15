@@ -8,5 +8,5 @@ public interface Kernel {
 
     EvaluationSnapshot evaluate(ProjectedState state, Instant evaluatedAt);
 
-    AuthorisedEvaluation authorise(String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt);
+    AuthorisationEnvelope authorise(String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt);
 }

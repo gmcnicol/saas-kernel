@@ -26,7 +26,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class EvaluationAutoConfiguration {
 
     @Bean
-    @DependsOn("applicationValidator")
+    @DependsOn({"applicationValidator", "runtimeRoleValidator"})
     Kernel kernel(
             JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager,
@@ -59,7 +59,7 @@ public class EvaluationAutoConfiguration {
     }
 
     @Bean
-    @DependsOn("applicationValidator")
+    @DependsOn({"applicationValidator", "runtimeRoleValidator"})
     AuthorisationService authorisationService(
             JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager,
