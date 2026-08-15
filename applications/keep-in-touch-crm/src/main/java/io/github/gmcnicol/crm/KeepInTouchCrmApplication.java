@@ -42,7 +42,7 @@ public class KeepInTouchCrmApplication {
                     return evaluatedAt.isBefore(dueAt)
                             ? FactDerivation.Derivation.later(dueAt)
                             : FactDerivation.Derivation.fact(Map.of(
-                                    "contactId", state.subject().substring(state.subject().lastIndexOf(':') + 1)));
+                                    "contactId", state.subject().id()));
                 });
     }
 

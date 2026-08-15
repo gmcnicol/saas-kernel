@@ -1,7 +1,8 @@
 package io.github.gmcnicol.kernel.internal;
 
-import io.github.gmcnicol.kernel.application.Application;
-import io.github.gmcnicol.kernel.application.SemanticPackIdentity;
+import io.github.gmcnicol.kernel.application.Kernel;
+import io.github.gmcnicol.kernel.application.ApplicationVersion;
+import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
@@ -22,10 +23,11 @@ public class EvaluationAutoConfiguration {
 
     @Bean
     @DependsOn("applicationValidator")
-    Application application(
+    Kernel kernel(
             JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager,
             @Value("${spring.application.name}") String applicationId,
+            @Value("${spring.application.version}") String applicationVersion,
             List<SemanticPack> semanticPacks,
             List<FactDerivation> derivations,
             List<ApplicabilityPolicy> policies,
@@ -40,13 +42,19 @@ public class EvaluationAutoConfiguration {
         } catch (IOException exception) {
             throw new IllegalStateException("Cannot read Semantic Pack checksum", exception);
         }
-        return new KernelApplication(
+        return new DefaultKernel(
                 jdbc,
                 new TransactionTemplate(transactionManager),
-                applicationId,
-                new SemanticPackIdentity(manifest.getProperty("id"), checksum),
+                new ApplicationVersion(applicationId, applicationVersion),
+                kernelVersion(),
+                new SemanticPackVersion(manifest.getProperty("id"), checksum),
                 derivations,
                 policies);
+    }
+
+    private static String kernelVersion() {
+        String version = EvaluationAutoConfiguration.class.getPackage().getImplementationVersion();
+        return version == null ? "0.1.0-SNAPSHOT" : version;
     }
 
     private static Properties load(ResourceLoader resources, String path) {

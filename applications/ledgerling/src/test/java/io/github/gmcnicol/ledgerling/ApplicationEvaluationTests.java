@@ -2,8 +2,9 @@ package io.github.gmcnicol.ledgerling;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.gmcnicol.kernel.application.Application;
+import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.ProjectedState;
+import io.github.gmcnicol.kernel.application.Subject;
 import java.time.Instant;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -23,19 +24,22 @@ class ApplicationEvaluationTests {
     @ServiceConnection
     static final PostgreSQLContainer postgres = new PostgreSQLContainer(DockerImageName.parse("postgres:18-alpine"));
 
-    @Autowired Application application;
+    @Autowired Kernel kernel;
 
     @Test
     void derivesFilingAndRecordsFactsFromContrastingState() {
         var evaluatedAt = Instant.parse("2026-08-15T10:00:00Z");
-        var outstanding = application.evaluate(new ProjectedState(
-                "tenant-one", "ledgerling.Filing:acme-2026", 3, Map.of(
+        var outstanding = kernel.evaluate(new ProjectedState(
+                "tenant-one", new Subject("ledgerling.Filing", "acme-2026"), 3, Map.of(
                         "filingDueAt", "2026-08-20T09:00:00Z",
                         "recordsOutstanding", "true",
                         "documentRequestId", "request-42")), evaluatedAt);
 
-        assertThat(outstanding.applicationId()).isEqualTo("io.github.gmcnicol.ledgerling");
-        assertThat(outstanding.semanticPack().id()).isEqualTo("io.github.gmcnicol.ledgerling.semantic");
+        assertThat(outstanding.tenantId()).isEqualTo("tenant-one");
+        assertThat(outstanding.applicationVersion().id()).isEqualTo("io.github.gmcnicol.ledgerling");
+        assertThat(outstanding.applicationVersion().version()).isEqualTo("0.1.0-SNAPSHOT");
+        assertThat(outstanding.kernelVersion()).isEqualTo("0.1.0-SNAPSHOT");
+        assertThat(outstanding.semanticPackVersion().id()).isEqualTo("io.github.gmcnicol.ledgerling.semantic");
         assertThat(outstanding.facts()).extracting(fact -> fact.type()).containsExactly(
                 "io.github.gmcnicol.ledgerling.FilingDueSoon",
                 "io.github.gmcnicol.ledgerling.RecordsOutstanding");
@@ -45,8 +49,8 @@ class ApplicationEvaluationTests {
             assertThat(action.policyId()).isEqualTo("io.github.gmcnicol.ledgerling.recordsOutstanding");
         });
 
-        var ready = application.evaluate(new ProjectedState(
-                "tenant-one", "ledgerling.Filing:acme-2026", 4, Map.of(
+        var ready = kernel.evaluate(new ProjectedState(
+                "tenant-one", new Subject("ledgerling.Filing", "acme-2026"), 4, Map.of(
                         "filingDueAt", "2026-08-20T09:00:00Z",
                         "recordsOutstanding", "false",
                         "preparationStarted", "false")), evaluatedAt);

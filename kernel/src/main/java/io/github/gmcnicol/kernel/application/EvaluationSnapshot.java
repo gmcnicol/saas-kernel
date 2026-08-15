@@ -7,11 +7,14 @@ import java.util.UUID;
 
 public record EvaluationSnapshot(
         UUID id,
-        String subject,
+        String tenantId,
+        Subject subject,
         long projectedStateVersion,
+        String projectedStateChecksum,
         Instant evaluatedAt,
-        String applicationId,
-        SemanticPackIdentity semanticPack,
+        ApplicationVersion applicationVersion,
+        String kernelVersion,
+        SemanticPackVersion semanticPackVersion,
         List<Fact> facts,
         List<ApplicableAction> applicableActions,
         Optional<Instant> reevaluateAt) {
