@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.ProjectedState;
+import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.Subject;
 import java.time.Instant;
 import java.util.Map;
@@ -12,6 +13,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -26,6 +30,8 @@ class ApplicationEvaluationTests {
     static final PostgreSQLContainer postgres = new PostgreSQLContainer(DockerImageName.parse("postgres:18-alpine"));
 
     @Autowired Kernel kernel;
+    @Autowired JdbcTemplate jdbc;
+    @Autowired PlatformTransactionManager transactionManager;
 
     @Test
     void derivesDueFollowUpAndThreeApplicableActionsReproducibly() {
@@ -90,5 +96,70 @@ class ApplicationEvaluationTests {
                 "followUpDueAt", "2026-08-21T09:00:00Z")), evaluatedAt))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("Projected State version already exists with different content");
+    }
+
+    @Test
+    void authorisesOwnerFieldsFactsAndActionsButHidesThemFromViewer() {
+        var snapshot = kernel.evaluate(new ProjectedState(
+                "tenant-one", new Subject("crm.Contact", "alex"), 10, Map.of(
+                        "displayName", "Alex Morgan",
+                        "privateNote", "Do not disclose",
+                        "followUpDueAt", "2026-08-15T09:00:00Z",
+                        "followUpCompleted", "false")), Instant.parse("2026-08-15T10:00:00Z"));
+        var authorisedAt = Instant.parse("2026-08-15T10:01:00Z");
+
+        var owner = kernel.authorise(
+                "tenant-one", snapshot.id(), new Principal("Owner", "gareth"), authorisedAt);
+        var viewer = kernel.authorise(
+                "tenant-one", snapshot.id(), new Principal("Viewer", "guest"), authorisedAt);
+
+        assertThat(owner.fields()).containsEntry("io.github.gmcnicol.crm.Contact.displayName", "Alex Morgan")
+                .doesNotContainValue("Do not disclose");
+        assertThat(owner.facts()).extracting(fact -> fact.type())
+                .containsExactly("io.github.gmcnicol.crm.FollowUpDue");
+        assertThat(owner.actionOffers()).extracting(offer -> offer.actionId()).containsExactlyInAnyOrder(
+                "io.github.gmcnicol.crm.CrmActions.recordInteraction",
+                "io.github.gmcnicol.crm.CrmActions.snoozeFollowUp",
+                "io.github.gmcnicol.crm.CrmActions.completeFollowUp");
+        assertThat(jdbc.queryForObject("""
+                SELECT count(*) FROM kernel.action_offer
+                WHERE tenant_id = ? AND evaluation_snapshot_id = ? AND principal_type = ? AND principal_id = ?
+                  AND subject_type = ? AND subject_id = ? AND state_version = ?
+                  AND semantic_pack_id = ? AND semantic_pack_checksum = ?
+                  AND authorisation_bundle_id = ? AND length(authorisation_bundle_checksum) = 64
+                  AND authorised_at = ? AND decision_correlation IS NOT NULL
+                """, Integer.class, "tenant-one", snapshot.id(), "Owner", "gareth", "crm.Contact", "alex", 10,
+                snapshot.semanticPackVersion().id(), snapshot.semanticPackVersion().checksum(),
+                "io.github.gmcnicol.crm.authorisation", java.sql.Timestamp.from(authorisedAt))).isEqualTo(3);
+        assertThat(viewer.fields()).containsOnlyKeys("io.github.gmcnicol.crm.Contact.displayName");
+        assertThat(viewer.facts()).extracting(fact -> fact.type())
+                .containsExactly("io.github.gmcnicol.crm.FollowUpDue");
+        assertThat(viewer.actionOffers()).isEmpty();
+    }
+
+    @Test
+    void deniesCrossTenantSnapshotAccess() {
+        var snapshot = kernel.evaluate(new ProjectedState(
+                "tenant-one", new Subject("crm.Contact", "alex"), 11, Map.of(
+                        "followUpDueAt", "2026-08-15T09:00:00Z")), Instant.parse("2026-08-15T10:00:00Z"));
+
+        assertThatThrownBy(() -> kernel.authorise(
+                "tenant-two", snapshot.id(), new Principal("Owner", "gareth"),
+                Instant.parse("2026-08-15T10:01:00Z")))
+                .isInstanceOf(io.github.gmcnicol.kernel.application.AuthorisationDeniedException.class);
+    }
+
+    @Test
+    void deniesMalformedAndMissingTenantContext() {
+        assertThatThrownBy(() -> kernel.evaluate(new ProjectedState(
+                "bad tenant", new Subject("crm.Contact", "alex"), 12, Map.of()),
+                Instant.parse("2026-08-15T10:00:00Z")))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        Integer visible = new TransactionTemplate(transactionManager).execute(status -> {
+            jdbc.execute("SET LOCAL ROLE kernel_runtime");
+            return jdbc.queryForObject("SELECT count(*) FROM kernel.evaluation_snapshot", Integer.class);
+        });
+        assertThat(visible).isZero();
     }
 }

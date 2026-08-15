@@ -2,10 +2,12 @@ package io.github.gmcnicol.kernel.internal;
 
 import io.github.gmcnicol.kernel.application.ApplicableAction;
 import io.github.gmcnicol.kernel.application.ApplicationVersion;
+import io.github.gmcnicol.kernel.application.AuthorisedEvaluation;
 import io.github.gmcnicol.kernel.application.EvaluationSnapshot;
 import io.github.gmcnicol.kernel.application.Fact;
 import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.ProjectedState;
+import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
@@ -26,6 +28,7 @@ final class DefaultKernel implements Kernel {
 
     private final JdbcTemplate jdbc;
     private final TransactionOperations transactions;
+    private final AuthorisationService authorisation;
     private final ApplicationVersion applicationVersion;
     private final String kernelVersion;
     private final SemanticPackVersion semanticPackVersion;
@@ -35,6 +38,7 @@ final class DefaultKernel implements Kernel {
     DefaultKernel(
             JdbcTemplate jdbc,
             TransactionOperations transactions,
+            AuthorisationService authorisation,
             ApplicationVersion applicationVersion,
             String kernelVersion,
             SemanticPackVersion semanticPackVersion,
@@ -42,6 +46,7 @@ final class DefaultKernel implements Kernel {
             List<ApplicabilityPolicy> policies) {
         this.jdbc = jdbc;
         this.transactions = transactions;
+        this.authorisation = authorisation;
         this.applicationVersion = applicationVersion;
         this.kernelVersion = kernelVersion;
         this.semanticPackVersion = semanticPackVersion;
@@ -58,10 +63,17 @@ final class DefaultKernel implements Kernel {
         return transactions.execute(status -> evaluateInTransaction(state, evaluatedAt));
     }
 
+    @Override
+    public AuthorisedEvaluation authorise(
+            String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt) {
+        return authorisation.authorise(tenantId, snapshotId, principal, authorisedAt);
+    }
+
     private EvaluationSnapshot evaluateInTransaction(ProjectedState state, Instant evaluatedAt) {
         if (evaluatedAt == null) {
             throw new IllegalArgumentException("Evaluation time must be explicit");
         }
+        TenantContext.use(jdbc, state.tenantId());
         String stateChecksum = persistProjectedState(state);
         List<FactDerivation.Derivation> results = derivations.stream()
                 .map(derivation -> derivation.derive(state, evaluatedAt))

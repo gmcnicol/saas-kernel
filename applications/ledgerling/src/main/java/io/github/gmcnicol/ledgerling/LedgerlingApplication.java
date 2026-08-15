@@ -1,6 +1,7 @@
 package io.github.gmcnicol.ledgerling;
 
 import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
+import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
@@ -28,6 +29,18 @@ public class LedgerlingApplication {
     @Bean
     AuthorisationBundle ledgerlingAuthorisationBundle() {
         return () -> "authorisation/manifest.properties";
+    }
+
+    @Bean
+    AuthorisationModel ledgerlingAuthorisationModel() {
+        return new AuthorisationModel() {
+            @Override public String resourceType() { return "Filing"; }
+            @Override public Map<String, String> fields() {
+                return Map.of(
+                        "io.github.gmcnicol.ledgerling.Filing.status", "status",
+                        "io.github.gmcnicol.ledgerling.Filing.staffNote", "staffNote");
+            }
+        };
     }
 
     @Bean

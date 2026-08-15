@@ -1,9 +1,12 @@
 package io.github.gmcnicol.kernel.application;
 
 import java.time.Instant;
+import java.util.UUID;
 
 /** Stable entry point for Application-owned state and Kernel workflow mechanics. */
 public interface Kernel {
 
     EvaluationSnapshot evaluate(ProjectedState state, Instant evaluatedAt);
+
+    AuthorisedEvaluation authorise(String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt);
 }

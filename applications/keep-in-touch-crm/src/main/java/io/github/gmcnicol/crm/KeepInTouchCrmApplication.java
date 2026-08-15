@@ -1,6 +1,7 @@
 package io.github.gmcnicol.crm;
 
 import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
+import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
@@ -27,6 +28,16 @@ public class KeepInTouchCrmApplication {
     @Bean
     AuthorisationBundle crmAuthorisationBundle() {
         return () -> "authorisation/manifest.properties";
+    }
+
+    @Bean
+    AuthorisationModel crmAuthorisationModel() {
+        return new AuthorisationModel() {
+            @Override public String resourceType() { return "Contact"; }
+            @Override public Map<String, String> fields() {
+                return Map.of("io.github.gmcnicol.crm.Contact.displayName", "displayName");
+            }
+        };
     }
 
     @Bean
