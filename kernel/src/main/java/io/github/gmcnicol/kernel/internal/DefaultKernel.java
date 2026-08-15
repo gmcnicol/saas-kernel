@@ -7,6 +7,9 @@ import io.github.gmcnicol.kernel.application.EvaluationSnapshot;
 import io.github.gmcnicol.kernel.application.Fact;
 import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.Intent;
+import io.github.gmcnicol.kernel.application.IntentAuditEntry;
+import io.github.gmcnicol.kernel.application.IntentQuery;
+import io.github.gmcnicol.kernel.application.IntentView;
 import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Principal;
@@ -33,6 +36,7 @@ final class DefaultKernel implements Kernel {
     private final AuthorisationService authorisation;
     private final IntentService intents;
     private final IntentExecutionService execution;
+    private final IntentQueryService intentQueries;
     private final ApplicationVersion applicationVersion;
     private final String kernelVersion;
     private final SemanticPackVersion semanticPackVersion;
@@ -45,6 +49,7 @@ final class DefaultKernel implements Kernel {
             AuthorisationService authorisation,
             IntentService intents,
             IntentExecutionService execution,
+            IntentQueryService intentQueries,
             ApplicationVersion applicationVersion,
             String kernelVersion,
             SemanticPackVersion semanticPackVersion,
@@ -55,6 +60,7 @@ final class DefaultKernel implements Kernel {
         this.authorisation = authorisation;
         this.intents = intents;
         this.execution = execution;
+        this.intentQueries = intentQueries;
         this.applicationVersion = applicationVersion;
         this.kernelVersion = kernelVersion;
         this.semanticPackVersion = semanticPackVersion;
@@ -85,6 +91,21 @@ final class DefaultKernel implements Kernel {
     @Override
     public Optional<Intent> processNext(Instant processedAt) {
         return execution.processNext(processedAt);
+    }
+
+    @Override
+    public List<Intent> processDue(Instant processedAt) {
+        return execution.processDue(processedAt);
+    }
+
+    @Override
+    public List<IntentView> findIntents(IntentQuery query) {
+        return intentQueries.intents(query);
+    }
+
+    @Override
+    public List<IntentAuditEntry> findIntentAudit(IntentQuery query) {
+        return intentQueries.audit(query);
     }
 
     private EvaluationSnapshot evaluateInTransaction(ProjectedState state, Instant evaluatedAt) {

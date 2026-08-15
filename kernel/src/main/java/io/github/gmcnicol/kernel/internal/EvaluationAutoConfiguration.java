@@ -22,13 +22,16 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.DependsOn;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 @AutoConfiguration(after = ApplicationValidationAutoConfiguration.class)
+@EnableConfigurationProperties(IntentWorkerProperties.class)
 public class EvaluationAutoConfiguration {
 
     @Bean
@@ -39,6 +42,7 @@ public class EvaluationAutoConfiguration {
             AuthorisationService authorisation,
             IntentService intents,
             IntentExecutionService execution,
+            IntentQueryService intentQueries,
             SemanticPackVersion semanticPackVersion,
             @Value("${spring.application.name}") String applicationId,
             @Value("${spring.application.version}") String applicationVersion,
@@ -50,6 +54,7 @@ public class EvaluationAutoConfiguration {
                 authorisation,
                 intents,
                 execution,
+                intentQueries,
                 new ApplicationVersion(applicationId, applicationVersion),
                 kernelVersion(),
                 semanticPackVersion,
@@ -70,6 +75,26 @@ public class EvaluationAutoConfiguration {
     @Bean
     EvaluationStore evaluationStore(JdbcTemplate jdbc) {
         return new EvaluationStore(jdbc);
+    }
+
+    @Bean
+    IntentQueryService intentQueryService(JdbcTemplate jdbc, PlatformTransactionManager transactionManager) {
+        return new IntentQueryService(jdbc, new TransactionTemplate(transactionManager));
+    }
+
+    @Bean
+    IntentInvariantValidator intentInvariantValidator() {
+        return new IntentInvariantValidator();
+    }
+
+    @Bean
+    FatalInvariantHandler fatalInvariantHandler(ConfigurableApplicationContext context) {
+        return new FatalInvariantHandler(context);
+    }
+
+    @Bean
+    IntentWorker intentWorker(IntentExecutionService execution, IntentWorkerProperties policy, Clock clock) {
+        return new IntentWorker(execution, policy, clock);
     }
 
     @Bean
@@ -157,10 +182,13 @@ public class EvaluationAutoConfiguration {
             List<ApplicabilityPolicy> policies,
             List<FactDerivation> derivations,
             CedarAuthoriser cedar,
+            IntentWorkerProperties worker,
+            IntentInvariantValidator invariants,
+            FatalInvariantHandler fatalInvariants,
             Clock clock) {
         return new IntentExecutionService(
                 jdbc, new TransactionTemplate(transactionManager), handlers, payloads,
-                semanticPackVersion, policies, derivations, cedar, clock);
+                semanticPackVersion, policies, derivations, cedar, worker, invariants, fatalInvariants, clock);
     }
 
     @Bean

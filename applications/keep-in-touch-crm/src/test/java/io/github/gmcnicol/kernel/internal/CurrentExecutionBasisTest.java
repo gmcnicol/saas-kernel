@@ -6,6 +6,8 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.reset;
 
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
+import io.github.gmcnicol.kernel.application.RetryableIntentException;
+import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
 import org.junit.jupiter.api.AfterEach;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
@@ -16,6 +18,9 @@ public abstract class CurrentExecutionBasisTest {
 
     @MockitoSpyBean
     private SemanticPackVersion semanticPack;
+
+    @MockitoSpyBean("recordInteractionHandler")
+    private IntentHandler recordInteractionHandler;
 
     protected final void changeCurrentSemanticPack() {
         doReturn("0".repeat(64)).when(semanticPack).checksum();
@@ -29,8 +34,22 @@ public abstract class CurrentExecutionBasisTest {
         doReturn(false).when(cedar).allows(any(), any(), anyString());
     }
 
+    protected final void failRecordInteractionTransiently() {
+        org.mockito.Mockito.doThrow(new RetryableIntentException("temporary outage"))
+                .when(recordInteractionHandler).handle(any(), any(), any());
+    }
+
+    protected final void failRecordInteractionDeterministically() {
+        org.mockito.Mockito.doThrow(new IllegalArgumentException("invalid deterministic work"))
+                .when(recordInteractionHandler).handle(any(), any(), any());
+    }
+
+    protected final void restoreRecordInteractionHandler() {
+        reset(recordInteractionHandler);
+    }
+
     @AfterEach
     void restoreCurrentExecutionBasis() {
-        reset(cedar, semanticPack);
+        reset(cedar, semanticPack, recordInteractionHandler);
     }
 }

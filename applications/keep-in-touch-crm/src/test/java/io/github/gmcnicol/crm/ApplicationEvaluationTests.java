@@ -7,6 +7,7 @@ import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.IntentConflictException;
 import io.github.gmcnicol.kernel.application.IntentFailureReason;
+import io.github.gmcnicol.kernel.application.IntentQuery;
 import io.github.gmcnicol.kernel.application.IntentRejectedException;
 import io.github.gmcnicol.kernel.application.IntentStatus;
 import io.github.gmcnicol.kernel.application.W3cTraceContext;
@@ -49,6 +50,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         properties.add("spring.flyway.url", postgres::getJdbcUrl);
         properties.add("spring.flyway.user", postgres::getUsername);
         properties.add("spring.flyway.password", postgres::getPassword);
+        properties.add("kernel.intent-worker.enabled", () -> "false");
     }
 
     @Autowired Kernel kernel;
@@ -339,8 +341,8 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                     FOR EACH ROW EXECUTE FUNCTION public.reject_success_audit();
                     """);
             try {
-                assertThatThrownBy(() -> kernel.processNext(processedAt))
-                        .hasMessageContaining("injected completion failure");
+                assertThat(kernel.processNext(processedAt)).hasValueSatisfying(retry ->
+                        assertThat(retry.status()).isEqualTo(IntentStatus.RETRY_WAIT));
             } finally {
                 statement.execute("""
                         DROP TRIGGER reject_success_audit ON kernel.intent_audit;
@@ -362,12 +364,12 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                             SELECT count(*) FROM kernel.reevaluation_request
                             WHERE subject_type = 'crm.Contact' AND subject_id = 'rollback-alex'
                             """, Integer.class),
-                    jdbc.queryForObject("SELECT count(*) FROM kernel.intent WHERE id = ? AND status = 'CLAIMED'",
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.intent WHERE id = ? AND status = 'RETRY_WAIT'",
                             Integer.class, intent.id()),
                     jdbc.queryForObject("SELECT count(*) FROM kernel.intent_audit WHERE intent_id = ?",
                             Integer.class, intent.id()));
         });
-        assertThat(persisted).containsExactly(0, 0, 0, 1, 2);
+        assertThat(persisted).containsExactly(0, 0, 0, 1, 3);
     }
 
     @Test
@@ -428,6 +430,149 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                             """, Integer.class, inapplicable.id(), denied.id()));
         });
         assertThat(evidence).containsExactly(0, 4, 2);
+    }
+
+    @Test
+    void retriesTransientWorkFailsDeterministicWorkAndLinksHumanRecovery() {
+        Instant base = Instant.parse("2029-01-01T00:00:00Z");
+        while (kernel.processNext(base).isPresent()) {
+            // Drain Intent left by independent acceptance tests.
+        }
+
+        var transientIntent = acceptedRecordInteraction(
+                "transient-recovery", 100, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+        failRecordInteractionTransiently();
+        var waiting = processUntil(transientIntent.id(), base);
+        assertThat(waiting.status()).isEqualTo(IntentStatus.RETRY_WAIT);
+        assertThat(kernel.processNext(base.plusSeconds(59))).isEmpty();
+        restoreRecordInteractionHandler();
+        assertThat(processUntil(transientIntent.id(), base.plusSeconds(60)).status())
+                .isEqualTo(IntentStatus.SUCCEEDED);
+
+        var deterministic = acceptedRecordInteraction(
+                "human-recovery", 110, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+        failRecordInteractionDeterministically();
+        var failed = processUntil(deterministic.id(), base.plusSeconds(120));
+        assertThat(failed.status()).isEqualTo(IntentStatus.FAILED);
+        assertThat(failed.failureReason()).contains(IntentFailureReason.DETERMINISTIC_FAILURE);
+        restoreRecordInteractionHandler();
+
+        var exhausted = acceptedRecordInteraction(
+                "exhausted-recovery", 120, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+        failRecordInteractionTransiently();
+        assertThat(processUntil(exhausted.id(), base.plusSeconds(180)).status())
+                .isEqualTo(IntentStatus.RETRY_WAIT);
+        assertThat(processUntil(exhausted.id(), base.plusSeconds(240)).status())
+                .isEqualTo(IntentStatus.RETRY_WAIT);
+        var exhaustedResult = processUntil(exhausted.id(), base.plusSeconds(300));
+        assertThat(exhaustedResult.status()).isEqualTo(IntentStatus.FAILED);
+        assertThat(exhaustedResult.failureReason()).contains(IntentFailureReason.TRANSIENT_ATTEMPTS_EXHAUSTED);
+        restoreRecordInteractionHandler();
+
+        var retrySnapshot = kernel.evaluate(new ProjectedState(
+                "tenant-one", new Subject("crm.Contact", "human-recovery"), 110,
+                Map.of("followUpDueAt", "2026-08-15T09:00:00Z", "followUpCompleted", "false")),
+                Instant.parse("2026-08-15T10:05:00Z"));
+        var retryOffer = kernel.authorise(
+                        "tenant-one", retrySnapshot.id(), new Principal("Owner", "gareth"),
+                        Instant.parse("2026-08-15T10:06:00Z"))
+                .actionOffers().stream()
+                .filter(candidate -> candidate.actionId().endsWith("recordInteraction"))
+                .findFirst().orElseThrow();
+        var retryId = UUID.randomUUID();
+        var linkedPayload = new CandidatePayload(
+                "io.github.gmcnicol.crm.RecordInteractionInput", 1, Map.of("note", "Try again"),
+                Optional.empty(), Optional.of(deterministic.id()));
+        var retry = kernel.accept(retryOffer.id(), retryId, linkedPayload);
+        assertThat(processUntil(retry.id(), base.plusSeconds(360)).status()).isEqualTo(IntentStatus.SUCCEEDED);
+
+        var failedQuery = new IntentQuery(
+                "tenant-one", Optional.of(IntentStatus.FAILED),
+                Optional.of(new Subject("crm.Contact", "exhausted-recovery")),
+                Optional.of(exhausted.id()), Optional.of(base.plusSeconds(1)));
+        assertThat(kernel.findIntents(failedQuery)).singleElement().satisfies(view -> {
+            assertThat(view.attemptCount()).isEqualTo(3);
+            assertThat(view.failureReason()).contains(IntentFailureReason.TRANSIENT_ATTEMPTS_EXHAUSTED);
+        });
+        assertThat(kernel.findIntentAudit(failedQuery)).extracting(entry -> entry.toStatus())
+                .containsExactly(
+                        IntentStatus.PENDING, IntentStatus.CLAIMED, IntentStatus.RETRY_WAIT,
+                        IntentStatus.CLAIMED, IntentStatus.RETRY_WAIT, IntentStatus.CLAIMED, IntentStatus.FAILED);
+        assertThat(kernel.findIntents(new IntentQuery(
+                "tenant-one", Optional.empty(), Optional.of(new Subject("crm.Contact", "human-recovery")),
+                Optional.of(retryId), Optional.empty())))
+                .singleElement().satisfies(view -> assertThat(view.priorIntentId()).contains(deterministic.id()));
+    }
+
+    @Test
+    void keepsLiveLeaseExclusiveAndReclaimsItAfterAClaimedWorkerCrashes() throws Exception {
+        Instant processedAt = Instant.parse("2030-01-01T00:00:00Z");
+        while (kernel.processNext(processedAt).isPresent()) {
+            // Drain Intent left by independent acceptance tests.
+        }
+        var intent = acceptedRecordInteraction(
+                "crashed-worker", 130, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+        UUID abandonedToken = UUID.randomUUID();
+        try (var admin = DriverManager.getConnection(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+                var claim = admin.prepareStatement("SELECT intent_id FROM kernel.claim_due_intent(?, ?, ?, ?, ?, ?)");
+                var expire = admin.prepareStatement("UPDATE kernel.intent SET lease_until = ? WHERE id = ?")) {
+            Instant claimedAt = Instant.now();
+            claim.setObject(1, abandonedToken);
+            claim.setTimestamp(2, java.sql.Timestamp.from(processedAt));
+            claim.setTimestamp(3, java.sql.Timestamp.from(claimedAt));
+            claim.setTimestamp(4, java.sql.Timestamp.from(claimedAt.plusSeconds(60)));
+            claim.setObject(5, UUID.randomUUID());
+            claim.setObject(6, UUID.randomUUID());
+            assertThat(claim.executeQuery()).satisfies(result -> assertThat(result.next()).isTrue());
+
+            assertThat(kernel.processNext(processedAt)).isEmpty();
+            expire.setTimestamp(1, java.sql.Timestamp.from(claimedAt.minusSeconds(1)));
+            expire.setObject(2, intent.id());
+            assertThat(expire.executeUpdate()).isEqualTo(1);
+        }
+
+        assertThat(processUntil(intent.id(), processedAt).status()).isEqualTo(IntentStatus.SUCCEEDED);
+        assertThat(kernel.processNext(processedAt)).isEmpty();
+        var query = new IntentQuery("tenant-one", Optional.empty(), Optional.empty(),
+                Optional.of(intent.id()), Optional.empty());
+        assertThat(kernel.findIntentAudit(query)).extracting(entry -> entry.toStatus())
+                .containsExactly(IntentStatus.PENDING, IntentStatus.CLAIMED, IntentStatus.CLAIMED,
+                        IntentStatus.SUCCEEDED);
+    }
+
+    @Test
+    void isolatesOneFailedIntentFromUnrelatedDueWorkInTheSameBatch() {
+        Instant processedAt = Instant.parse("2031-01-01T00:00:00Z");
+        while (kernel.processNext(processedAt).isPresent()) {
+            // Drain Intent left by independent acceptance tests.
+        }
+        var failedIntent = acceptedRecordInteraction(
+                "isolated-failure", 140, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+        var successfulSnapshot = kernel.evaluate(new ProjectedState(
+                "tenant-one", new Subject("crm.Contact", "isolated-success"), 150,
+                Map.of("followUpDueAt", "2026-08-15T09:00:00Z", "followUpCompleted", "false")),
+                Instant.parse("2026-08-15T10:00:00Z"));
+        var snoozeOffer = kernel.authorise(
+                        "tenant-one", successfulSnapshot.id(), new Principal("Owner", "gareth"),
+                        Instant.parse("2026-08-15T10:01:00Z"))
+                .actionOffers().stream()
+                .filter(candidate -> candidate.actionId().endsWith("snoozeFollowUp"))
+                .findFirst().orElseThrow();
+        var successfulIntent = kernel.accept(snoozeOffer.id(), UUID.randomUUID(), new CandidatePayload(
+                "io.github.gmcnicol.crm.SnoozeFollowUpInput", 1,
+                Map.of("until", "2032-01-01T00:00:00Z")));
+
+        failRecordInteractionDeterministically();
+        assertThat(kernel.processDue(processedAt)).extracting(result -> result.status())
+                .containsExactlyInAnyOrder(IntentStatus.FAILED, IntentStatus.SUCCEEDED);
+        restoreRecordInteractionHandler();
+        assertThat(kernel.findIntents(new IntentQuery(
+                "tenant-one", Optional.empty(), Optional.empty(), Optional.of(failedIntent.id()), Optional.empty())))
+                .singleElement().satisfies(view -> assertThat(view.status()).isEqualTo(IntentStatus.FAILED));
+        assertThat(kernel.findIntents(new IntentQuery(
+                "tenant-one", Optional.empty(), Optional.empty(), Optional.of(successfulIntent.id()), Optional.empty())))
+                .singleElement().satisfies(view -> assertThat(view.status()).isEqualTo(IntentStatus.SUCCEEDED));
     }
 
     private io.github.gmcnicol.kernel.application.Intent acceptedRecordInteraction(

@@ -8,6 +8,7 @@ import io.github.gmcnicol.kernel.application.IntentFailureReason;
 import io.github.gmcnicol.kernel.application.IntentStatus;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.ProjectedState;
+import io.github.gmcnicol.kernel.application.RetryableIntentException;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.application.Subject;
 import io.github.gmcnicol.kernel.application.W3cTraceContext;
@@ -16,7 +17,6 @@ import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import java.sql.Timestamp;
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -24,12 +24,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.dao.DataAccessException;
 import org.springframework.transaction.support.TransactionOperations;
 
 final class IntentExecutionService {
-
-    // ponytail: fixed first-release lease; #40 adds validated worker policy.
-    private static final Duration LEASE = Duration.ofSeconds(30);
 
     private final JdbcTemplate jdbc;
     private final TransactionOperations transactions;
@@ -39,6 +37,9 @@ final class IntentExecutionService {
     private final List<ApplicabilityPolicy> policies;
     private final List<FactDerivation> derivations;
     private final CedarAuthoriser cedar;
+    private final IntentWorkerProperties worker;
+    private final IntentInvariantValidator invariants;
+    private final FatalInvariantHandler fatalInvariants;
     private final Clock clock;
 
     IntentExecutionService(
@@ -50,6 +51,9 @@ final class IntentExecutionService {
             List<ApplicabilityPolicy> policies,
             List<FactDerivation> derivations,
             CedarAuthoriser cedar,
+            IntentWorkerProperties worker,
+            IntentInvariantValidator invariants,
+            FatalInvariantHandler fatalInvariants,
             Clock clock) {
         this.jdbc = jdbc;
         this.transactions = transactions;
@@ -60,6 +64,9 @@ final class IntentExecutionService {
         this.policies = List.copyOf(policies);
         this.derivations = List.copyOf(derivations);
         this.cedar = cedar;
+        this.worker = worker;
+        this.invariants = invariants;
+        this.fatalInvariants = fatalInvariants;
         this.clock = clock;
     }
 
@@ -69,22 +76,55 @@ final class IntentExecutionService {
         }
         UUID token = UUID.randomUUID();
         Instant claimedAt = clock.instant();
-        Claim claim = transactions.execute(status -> claim(token, processedAt, claimedAt));
+        Claim claim;
+        try {
+            claim = transactions.execute(status -> claim(token, processedAt, claimedAt));
+        } catch (FatalInvariantError error) {
+            fatalInvariants.terminate(error);
+            throw error;
+        }
         if (claim == null) {
             return Optional.empty();
         }
-        return Optional.of(transactions.execute(status -> complete(claim, token, processedAt)));
+        try {
+            return Optional.of(transactions.execute(status -> complete(claim, token, processedAt)));
+        } catch (FatalInvariantError error) {
+            fatalInvariants.terminate(error);
+            throw error;
+        } catch (RuntimeException exception) {
+            FatalInvariantError invariant = databaseInvariant(exception);
+            if (invariant != null) {
+                fatalInvariants.terminate(invariant);
+                throw invariant;
+            }
+            return Optional.of(transactions.execute(status -> failAttempt(claim, token, processedAt, exception)));
+        }
+    }
+
+    List<Intent> processDue(Instant processedAt) {
+        java.util.ArrayList<Intent> processed = new java.util.ArrayList<>();
+        while (processed.size() < worker.claimBatchSize()) {
+            Optional<Intent> next = processNext(processedAt);
+            if (next.isEmpty()) break;
+            processed.add(next.get());
+        }
+        return List.copyOf(processed);
     }
 
     private Claim claim(UUID token, Instant dueAt, Instant claimedAt) {
         TenantContext.assumeWorkerRole(jdbc);
         List<Claim> claims = jdbc.query("""
-                SELECT intent_id, tenant_id FROM kernel.claim_due_intent(?, ?, ?, ?, ?)
+                SELECT intent_id, tenant_id, previous_status FROM kernel.claim_due_intent(?, ?, ?, ?, ?, ?)
                 """, (result, row) -> new Claim(
-                        result.getObject("intent_id", UUID.class), result.getString("tenant_id")),
-                token, Timestamp.from(dueAt), Timestamp.from(claimedAt.plus(LEASE)),
+                        result.getObject("intent_id", UUID.class), result.getString("tenant_id"),
+                        IntentStatus.valueOf(result.getString("previous_status"))),
+                token, Timestamp.from(dueAt), Timestamp.from(claimedAt),
+                Timestamp.from(claimedAt.plus(worker.leaseDuration())),
                 UUID.randomUUID(), UUID.randomUUID());
-        return claims.isEmpty() ? null : claims.getFirst();
+        if (claims.isEmpty()) return null;
+        Claim claim = claims.getFirst();
+        invariants.transition(claim.previousStatus(), IntentStatus.CLAIMED);
+        return claim;
     }
 
     private Intent complete(Claim claim, UUID token, Instant processedAt) {
@@ -101,24 +141,13 @@ final class IntentExecutionService {
             return reject(claim, stored, token, processedAt, state, null, null, null,
                     IntentStatus.STALE, IntentFailureReason.STATE_OR_SEMANTIC_STALE);
         }
-        List<Fact> facts = derivations.stream()
-                .map(derivation -> java.util.Map.entry(derivation, derivation.derive(state, processedAt)))
-                .flatMap(result -> result.getValue().values().stream()
-                        .map(values -> new Fact(result.getKey().target(), result.getKey().id(), values)))
-                .toList();
-        ApplicabilityPolicy policy = policies.stream()
-                .filter(candidate -> candidate.target().equals(stored.actionId())
-                        && candidate.id().equals(stored.policyId()))
-                .findFirst()
-                .orElse(null);
-        boolean applicable = policy != null && policy.isApplicable(state, facts);
-        boolean authorised = cedar.allows(stored.principal(), stored.subject(), stored.actionId());
-        if (!applicable) {
-            return reject(claim, stored, token, processedAt, state, policy, false, authorised,
+        ExecutionEvidence evidence = evidence(stored, state, processedAt);
+        if (!evidence.applicable()) {
+            return reject(claim, stored, token, processedAt, state, evidence.policy(), false, evidence.authorised(),
                     IntentStatus.FAILED, IntentFailureReason.NOT_APPLICABLE);
         }
-        if (!authorised) {
-            return reject(claim, stored, token, processedAt, state, policy, true, false,
+        if (!evidence.authorised()) {
+            return reject(claim, stored, token, processedAt, state, evidence.policy(), true, false,
                     IntentStatus.FAILED, IntentFailureReason.AUTHORISATION_DENIED);
         }
         IntentHandler handler = Optional.ofNullable(handlers.get(stored.actionId()))
@@ -127,6 +156,7 @@ final class IntentExecutionService {
         if (events.isEmpty()) {
             throw new IllegalStateException("Successful Intent handling must emit at least one Event");
         }
+        invariants.eventSequence(java.util.stream.IntStream.rangeClosed(1, events.size()).boxed().toList());
 
         long version = state.version();
         for (int index = 0; index < events.size(); index++) {
@@ -149,6 +179,7 @@ final class IntentExecutionService {
                 """, claim.tenantId(), stored.subject().type(), stored.subject().id(), version,
                 stored.semanticPackId(), stored.semanticPackChecksum(), Timestamp.from(processedAt));
         Instant completionTime = clock.instant();
+        invariants.transition(IntentStatus.CLAIMED, IntentStatus.SUCCEEDED);
         int completed = jdbc.update("""
                 UPDATE kernel.intent SET status = 'SUCCEEDED', lease_token = NULL, lease_until = NULL,
                     completed_at = ?
@@ -160,8 +191,9 @@ final class IntentExecutionService {
         jdbc.update("""
                 INSERT INTO kernel.intent_audit
                     (id, tenant_id, intent_id, sequence, from_status, to_status, occurred_at, reason, correlation)
-                VALUES (?, ?, ?, 2, 'CLAIMED', 'SUCCEEDED', ?, ?, ?)
-                """, UUID.randomUUID(), claim.tenantId(), stored.id(), Timestamp.from(processedAt),
+                VALUES (?, ?, ?, ?, 'CLAIMED', 'SUCCEEDED', ?, ?, ?)
+                """, UUID.randomUUID(), claim.tenantId(), stored.id(), nextAuditSequence(stored.id()),
+                Timestamp.from(processedAt),
                 events.size() + " Event(s) committed", UUID.randomUUID());
         return new Intent(stored.id(), stored.actionOfferId(), IntentStatus.SUCCEEDED, stored.acceptedAt());
     }
@@ -177,6 +209,7 @@ final class IntentExecutionService {
             Boolean authorised,
             IntentStatus status,
             IntentFailureReason reason) {
+        invariants.transition(IntentStatus.CLAIMED, status);
         int updated = jdbc.update("""
                 UPDATE kernel.intent SET status = ?, failure_reason = ?, lease_token = NULL, lease_until = NULL,
                     completed_at = ?
@@ -193,12 +226,86 @@ final class IntentExecutionService {
                      semantic_pack_id, semantic_pack_checksum, applicability_policy_id, applicability_result,
                      authorisation_bundle_id, authorisation_bundle_checksum,
                      authorisation_allowed, authorisation_correlation)
-                VALUES (?, ?, ?, 2, 'CLAIMED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, UUID.randomUUID(), claim.tenantId(), stored.id(), status.name(), Timestamp.from(processedAt),
+                VALUES (?, ?, ?, ?, 'CLAIMED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, UUID.randomUUID(), claim.tenantId(), stored.id(), nextAuditSequence(stored.id()),
+                status.name(), Timestamp.from(processedAt),
                 reason.name(), UUID.randomUUID(), reason.name(), state.version(), DefaultKernel.stateChecksum(state),
                 semanticPack.id(), semanticPack.checksum(), policy == null ? null : policy.id(), applicable,
                 cedar.bundleId(), cedar.bundleChecksum(), authorised, UUID.randomUUID());
         return new Intent(stored.id(), stored.actionOfferId(), status, stored.acceptedAt(), Optional.of(reason));
+    }
+
+    private Intent failAttempt(
+            Claim claim, UUID token, Instant processedAt, RuntimeException exception) {
+        TenantContext.assumeWorkerRole(jdbc);
+        TenantContext.useAfterRole(jdbc, claim.tenantId());
+        StoredIntent stored = load(claim.intentId(), token);
+        boolean retryable = exception instanceof RetryableIntentException || exception instanceof DataAccessException;
+        if (retryable && stored.attemptCount() < worker.maximumAttempts()) {
+            invariants.transition(IntentStatus.CLAIMED, IntentStatus.RETRY_WAIT);
+            int updated = jdbc.update("""
+                    UPDATE kernel.intent SET status = 'RETRY_WAIT', lease_token = NULL, lease_until = NULL,
+                        next_attempt_at = ?
+                    WHERE tenant_id = ? AND id = ? AND status = 'CLAIMED' AND lease_token = ?
+                    """, Timestamp.from(processedAt.plus(worker.retryBackoff())), claim.tenantId(), stored.id(), token);
+            if (updated != 1) {
+                throw new IllegalStateException("Intent lease is no longer owned");
+            }
+            jdbc.update("""
+                    INSERT INTO kernel.intent_audit
+                        (id, tenant_id, intent_id, sequence, from_status, to_status,
+                         occurred_at, reason, correlation)
+                    VALUES (?, ?, ?, ?, 'CLAIMED', 'RETRY_WAIT', ?, 'transient failure', ?)
+                    """, UUID.randomUUID(), claim.tenantId(), stored.id(), nextAuditSequence(stored.id()),
+                    Timestamp.from(processedAt), UUID.randomUUID());
+            return new Intent(stored.id(), stored.actionOfferId(), IntentStatus.RETRY_WAIT, stored.acceptedAt());
+        }
+        TenantContext.lockSubject(jdbc, claim.tenantId(), stored.subject());
+        ProjectedState state = currentState(claim.tenantId(), stored.subject());
+        ExecutionEvidence evidence;
+        try {
+            evidence = evidence(stored, state, processedAt);
+        } catch (RuntimeException ignored) {
+            evidence = new ExecutionEvidence(null, null, null);
+        }
+        IntentFailureReason reason = retryable
+                ? IntentFailureReason.TRANSIENT_ATTEMPTS_EXHAUSTED
+                : IntentFailureReason.DETERMINISTIC_FAILURE;
+        return reject(claim, stored, token, processedAt, state, evidence.policy(),
+                evidence.applicable(), evidence.authorised(), IntentStatus.FAILED, reason);
+    }
+
+    private ExecutionEvidence evidence(StoredIntent stored, ProjectedState state, Instant processedAt) {
+        List<Fact> facts = derivations.stream()
+                .map(derivation -> java.util.Map.entry(derivation, derivation.derive(state, processedAt)))
+                .flatMap(result -> result.getValue().values().stream()
+                        .map(values -> new Fact(result.getKey().target(), result.getKey().id(), values)))
+                .toList();
+        ApplicabilityPolicy policy = policies.stream()
+                .filter(candidate -> candidate.target().equals(stored.actionId())
+                        && candidate.id().equals(stored.policyId()))
+                .findFirst()
+                .orElse(null);
+        return new ExecutionEvidence(
+                policy, policy != null && policy.isApplicable(state, facts),
+                cedar.allows(stored.principal(), stored.subject(), stored.actionId()));
+    }
+
+    private int nextAuditSequence(UUID intentId) {
+        return jdbc.queryForObject(
+                "SELECT COALESCE(MAX(sequence), -1) + 1 FROM kernel.intent_audit WHERE intent_id = ?",
+                Integer.class, intentId);
+    }
+
+    private static FatalInvariantError databaseInvariant(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            String message = cause.getMessage();
+            if (message != null && (message.contains("invalid Intent transition")
+                    || message.contains("invalid Event sequence"))) {
+                return new FatalInvariantError(message);
+            }
+        }
+        return null;
     }
 
     private StoredIntent load(UUID intentId, UUID token) {
@@ -207,7 +314,7 @@ final class IntentExecutionService {
                        expected_state_version, expected_state_checksum,
                        semantic_pack_id, semantic_pack_checksum, accepted_at,
                        applicability_policy_id, principal_type, principal_id,
-                       authorisation_bundle_id, authorisation_bundle_checksum,
+                       authorisation_bundle_id, authorisation_bundle_checksum, attempt_count,
                        traceparent, tracestate, prior_intent_id
                 FROM kernel.intent
                 WHERE id = ? AND status = 'CLAIMED' AND lease_token = ?
@@ -224,6 +331,7 @@ final class IntentExecutionService {
                         new Principal(result.getString("principal_type"), result.getString("principal_id")),
                         result.getString("authorisation_bundle_id"),
                         result.getString("authorisation_bundle_checksum"),
+                        result.getInt("attempt_count"),
                         result.getString("traceparent"), result.getString("tracestate"),
                         result.getObject("prior_intent_id", UUID.class)), intentId, token);
         if (intents.isEmpty()) {
@@ -288,7 +396,9 @@ final class IntentExecutionService {
                 entry.getKey(), entry.getValue()));
     }
 
-    private record Claim(UUID intentId, String tenantId) {}
+    private record Claim(UUID intentId, String tenantId, IntentStatus previousStatus) {}
+
+    private record ExecutionEvidence(ApplicabilityPolicy policy, Boolean applicable, Boolean authorised) {}
 
     private record StoredIntent(
             UUID id,
@@ -306,6 +416,7 @@ final class IntentExecutionService {
             Principal principal,
             String bundleId,
             String bundleChecksum,
+            int attemptCount,
             String traceparent,
             String tracestate,
             UUID priorIntentId,
@@ -327,19 +438,20 @@ final class IntentExecutionService {
                 Principal principal,
                 String bundleId,
                 String bundleChecksum,
+                int attemptCount,
                 String traceparent,
                 String tracestate,
                 UUID priorIntentId) {
             this(id, actionOfferId, subject, actionId, payloadType, payloadVersion,
                     expectedStateVersion, expectedStateChecksum, semanticPackId, semanticPackChecksum,
-                    acceptedAt, policyId, principal, bundleId, bundleChecksum,
+                    acceptedAt, policyId, principal, bundleId, bundleChecksum, attemptCount,
                     traceparent, tracestate, priorIntentId, null);
         }
 
         StoredIntent withPayload(CandidatePayload replacement) {
             return new StoredIntent(id, actionOfferId, subject, actionId, payloadType, payloadVersion,
                     expectedStateVersion, expectedStateChecksum, semanticPackId, semanticPackChecksum,
-                    acceptedAt, policyId, principal, bundleId, bundleChecksum,
+                    acceptedAt, policyId, principal, bundleId, bundleChecksum, attemptCount,
                     traceparent, tracestate, priorIntentId, replacement);
         }
     }

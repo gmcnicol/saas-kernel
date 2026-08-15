@@ -2,6 +2,7 @@ package io.github.gmcnicol.kernel.application;
 
 import java.time.Instant;
 import java.util.Optional;
+import java.util.List;
 import java.util.UUID;
 
 /** Stable entry point for Application-owned state and Kernel workflow mechanics. */
@@ -14,4 +15,10 @@ public interface Kernel {
     Intent accept(UUID actionOfferId, UUID intentId, CandidatePayload payload);
 
     Optional<Intent> processNext(Instant processedAt);
+
+    List<Intent> processDue(Instant processedAt);
+
+    List<IntentView> findIntents(IntentQuery query);
+
+    List<IntentAuditEntry> findIntentAudit(IntentQuery query);
 }

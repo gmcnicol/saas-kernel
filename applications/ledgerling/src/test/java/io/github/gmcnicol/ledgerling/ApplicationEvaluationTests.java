@@ -38,6 +38,7 @@ class ApplicationEvaluationTests {
         properties.add("spring.flyway.url", postgres::getJdbcUrl);
         properties.add("spring.flyway.user", postgres::getUsername);
         properties.add("spring.flyway.password", postgres::getPassword);
+        properties.add("kernel.intent-worker.enabled", () -> "false");
     }
 
     @Autowired Kernel kernel;
