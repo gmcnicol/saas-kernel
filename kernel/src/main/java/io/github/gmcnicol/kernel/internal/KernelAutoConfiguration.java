@@ -38,9 +38,11 @@ public class KernelAutoConfiguration {
         var access = jdbc.queryForMap("""
                 SELECT current_user AS username, rolsuper, rolbypassrls,
                   pg_has_role(current_user, 'kernel_runtime', 'SET') AS runtime_set,
+                  pg_has_role(current_user, 'kernel_worker', 'SET') AS worker_set,
                   NOT EXISTS (
                       SELECT 1 FROM pg_roles protected_role
-                      WHERE protected_role.rolname IN ('kernel_runtime', 'kernel_worker', 'kernel_offer_resolver')
+                      WHERE protected_role.rolname IN (
+                          'kernel_runtime', 'kernel_worker', 'kernel_offer_resolver', 'kernel_intent_claimer')
                         AND (protected_role.rolsuper OR protected_role.rolbypassrls OR protected_role.rolcanlogin)
                   ) AS protected_roles_safe,
                   EXISTS (
@@ -54,6 +56,7 @@ public class KernelAutoConfiguration {
         if (Boolean.TRUE.equals(access.get("rolsuper"))
                 || Boolean.TRUE.equals(access.get("rolbypassrls"))
                 || !Boolean.TRUE.equals(access.get("runtime_set"))
+                || !Boolean.TRUE.equals(access.get("worker_set"))
                 || !Boolean.TRUE.equals(access.get("protected_roles_safe"))
                 || Boolean.TRUE.equals(access.get("owns_kernel_tables"))) {
             throw new IllegalStateException("Kernel datasource must use a non-owner, non-bypass runtime role: " + access);

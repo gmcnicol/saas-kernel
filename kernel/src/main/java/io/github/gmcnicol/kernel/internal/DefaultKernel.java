@@ -32,6 +32,7 @@ final class DefaultKernel implements Kernel {
     private final TransactionOperations transactions;
     private final AuthorisationService authorisation;
     private final IntentService intents;
+    private final IntentExecutionService execution;
     private final ApplicationVersion applicationVersion;
     private final String kernelVersion;
     private final SemanticPackVersion semanticPackVersion;
@@ -43,6 +44,7 @@ final class DefaultKernel implements Kernel {
             TransactionOperations transactions,
             AuthorisationService authorisation,
             IntentService intents,
+            IntentExecutionService execution,
             ApplicationVersion applicationVersion,
             String kernelVersion,
             SemanticPackVersion semanticPackVersion,
@@ -52,6 +54,7 @@ final class DefaultKernel implements Kernel {
         this.transactions = transactions;
         this.authorisation = authorisation;
         this.intents = intents;
+        this.execution = execution;
         this.applicationVersion = applicationVersion;
         this.kernelVersion = kernelVersion;
         this.semanticPackVersion = semanticPackVersion;
@@ -77,6 +80,11 @@ final class DefaultKernel implements Kernel {
     @Override
     public Intent accept(UUID actionOfferId, UUID intentId, CandidatePayload payload) {
         return intents.accept(actionOfferId, intentId, payload);
+    }
+
+    @Override
+    public Optional<Intent> processNext(Instant processedAt) {
+        return execution.processNext(processedAt);
     }
 
     private EvaluationSnapshot evaluateInTransaction(ProjectedState state, Instant evaluatedAt) {
@@ -188,7 +196,7 @@ final class DefaultKernel implements Kernel {
         return checksum;
     }
 
-    private static String stateChecksum(ProjectedState state) {
+    static String stateChecksum(ProjectedState state) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             update(digest, state.tenantId());

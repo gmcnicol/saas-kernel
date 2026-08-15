@@ -2,13 +2,16 @@ package io.github.gmcnicol.ledgerling;
 
 import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
 import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
+import io.github.gmcnicol.kernel.application.Event;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
-import io.github.gmcnicol.kernel.semanticpack.SemanticImplementation;
+import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -89,17 +92,26 @@ public class LedgerlingApplication {
     }
 
     @Bean
-    SemanticImplementation recordRecordsReceivedHandler() {
-        return SemanticImplementation.binding(
-                SemanticImplementation.Kind.HANDLER,
-                "io.github.gmcnicol.ledgerling.LedgerlingActions.recordRecordsReceived");
+    IntentHandler recordRecordsReceivedHandler() {
+        return IntentHandler.of(
+                "io.github.gmcnicol.ledgerling.LedgerlingActions.recordRecordsReceived", (intent, payload, state) -> {
+                    var resultingState = new HashMap<>(state.values());
+                    resultingState.put("recordsOutstanding", "false");
+                    resultingState.put("recordsReceivedAt", payload.values().get("receivedAt"));
+                    return List.of(new Event("io.github.gmcnicol.ledgerling.RecordsReceived", 1,
+                            Map.of("requestId", state.values().get("documentRequestId")), resultingState));
+                });
     }
 
     @Bean
-    SemanticImplementation startPreparationHandler() {
-        return SemanticImplementation.binding(
-                SemanticImplementation.Kind.HANDLER,
-                "io.github.gmcnicol.ledgerling.LedgerlingActions.startPreparation");
+    IntentHandler startPreparationHandler() {
+        return IntentHandler.of(
+                "io.github.gmcnicol.ledgerling.LedgerlingActions.startPreparation", (intent, payload, state) -> {
+                    var resultingState = new HashMap<>(state.values());
+                    resultingState.put("preparationStarted", "true");
+                    return List.of(new Event("io.github.gmcnicol.ledgerling.PreparationStarted", 1,
+                            Map.of("requestId", state.values().get("documentRequestId")), resultingState));
+                });
     }
 
     @Bean

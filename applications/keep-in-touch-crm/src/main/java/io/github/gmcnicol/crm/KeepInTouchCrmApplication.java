@@ -2,12 +2,15 @@ package io.github.gmcnicol.crm;
 
 import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
 import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
+import io.github.gmcnicol.kernel.application.Event;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
-import io.github.gmcnicol.kernel.semanticpack.SemanticImplementation;
+import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -74,21 +77,34 @@ public class KeepInTouchCrmApplication {
     }
 
     @Bean
-    SemanticImplementation recordInteractionHandler() {
-        return SemanticImplementation.binding(
-                SemanticImplementation.Kind.HANDLER, "io.github.gmcnicol.crm.CrmActions.recordInteraction");
+    IntentHandler recordInteractionHandler() {
+        return IntentHandler.of("io.github.gmcnicol.crm.CrmActions.recordInteraction", (intent, payload, state) -> {
+            var resultingState = new HashMap<>(state.values());
+            resultingState.put("followUpCompleted", "true");
+            resultingState.put("lastInteractionNote", payload.values().get("note"));
+            return List.of(new Event("io.github.gmcnicol.crm.InteractionRecorded", 1,
+                    Map.of("contactId", state.subject().id()), resultingState));
+        });
     }
 
     @Bean
-    SemanticImplementation snoozeFollowUpHandler() {
-        return SemanticImplementation.binding(
-                SemanticImplementation.Kind.HANDLER, "io.github.gmcnicol.crm.CrmActions.snoozeFollowUp");
+    IntentHandler snoozeFollowUpHandler() {
+        return IntentHandler.of("io.github.gmcnicol.crm.CrmActions.snoozeFollowUp", (intent, payload, state) -> {
+            var resultingState = new HashMap<>(state.values());
+            resultingState.put("followUpDueAt", payload.values().get("until"));
+            return List.of(new Event("io.github.gmcnicol.crm.FollowUpSnoozed", 1,
+                    Map.of("contactId", state.subject().id()), resultingState));
+        });
     }
 
     @Bean
-    SemanticImplementation completeFollowUpHandler() {
-        return SemanticImplementation.binding(
-                SemanticImplementation.Kind.HANDLER, "io.github.gmcnicol.crm.CrmActions.completeFollowUp");
+    IntentHandler completeFollowUpHandler() {
+        return IntentHandler.of("io.github.gmcnicol.crm.CrmActions.completeFollowUp", (intent, payload, state) -> {
+            var resultingState = new HashMap<>(state.values());
+            resultingState.put("followUpCompleted", "true");
+            return List.of(new Event("io.github.gmcnicol.crm.FollowUpCompleted", 1,
+                    Map.of("contactId", state.subject().id()), resultingState));
+        });
     }
 
     @Bean

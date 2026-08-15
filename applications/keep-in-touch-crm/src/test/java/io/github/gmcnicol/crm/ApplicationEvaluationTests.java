@@ -12,6 +12,7 @@ import io.github.gmcnicol.kernel.application.W3cTraceContext;
 import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.Subject;
+import java.sql.DriverManager;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
@@ -250,5 +251,128 @@ class ApplicationEvaluationTests {
                             """, Integer.class, linkedIntentId, intentId, trace.traceparent(), trace.tracestate()));
         });
         assertThat(persisted).containsExactly(2, 2, 2, 1);
+    }
+
+    @Test
+    void processesRecordInteractionAtomicallyAndRemovesFollowUpActions() {
+        var subject = new Subject("crm.Contact", "processed-alex");
+        var initial = new ProjectedState("tenant-one", subject, 40, Map.of(
+                "followUpDueAt", "2026-08-15T09:00:00Z",
+                "followUpCompleted", "false"));
+        var snapshot = kernel.evaluate(initial, Instant.parse("2026-08-15T10:00:00Z"));
+        var offer = kernel.authorise(
+                        "tenant-one", snapshot.id(), new Principal("Owner", "gareth"),
+                        Instant.parse("2026-08-15T10:01:00Z"))
+                .actionOffers().stream()
+                .filter(candidate -> candidate.actionId().endsWith("recordInteraction"))
+                .findFirst().orElseThrow();
+        var intent = kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
+                "io.github.gmcnicol.crm.RecordInteractionInput", 1, Map.of("note", "Spoke to Alex")));
+
+        var completed = processUntil(intent.id(), Instant.parse("2026-08-15T10:02:00Z"));
+
+        assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
+        var resultingState = new ProjectedState("tenant-one", subject, 41, Map.of(
+                "followUpDueAt", "2026-08-15T09:00:00Z",
+                "followUpCompleted", "true",
+                "lastInteractionNote", "Spoke to Alex"));
+        var reevaluated = kernel.evaluate(resultingState, Instant.parse("2026-08-15T10:03:00Z"));
+        assertThat(reevaluated.applicableActions()).isEmpty();
+
+        var persisted = new TransactionTemplate(transactionManager).execute(status -> {
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            return java.util.List.of(
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.event WHERE intent_id = ?", Integer.class,
+                            intent.id()),
+                    jdbc.queryForObject("""
+                            SELECT count(*) FROM kernel.event event_record
+                            JOIN kernel.event_payload_value payload ON payload.event_id = event_record.id
+                            WHERE event_record.intent_id = ? AND event_record.sequence = 1
+                              AND event_record.event_type = 'io.github.gmcnicol.crm.InteractionRecorded'
+                              AND event_record.resulting_state_version = 41
+                              AND payload.name = 'contactId' AND payload.value = 'processed-alex'
+                            """, Integer.class, intent.id()),
+                    jdbc.queryForObject("""
+                            SELECT count(*) FROM kernel.reevaluation_request
+                            WHERE subject_type = 'crm.Contact' AND subject_id = 'processed-alex'
+                              AND expected_state_version = 41
+                            """, Integer.class));
+        });
+        assertThat(persisted).containsExactly(1, 1, 1);
+    }
+
+    @Test
+    void rollsBackEveryCompletionEffectWhenAuditInsertionFails() throws Exception {
+        var processedAt = Instant.parse("2026-08-15T11:00:00Z");
+        while (kernel.processNext(processedAt).isPresent()) {
+            // Drain Intent left by other independent acceptance tests.
+        }
+        var subject = new Subject("crm.Contact", "rollback-alex");
+        var snapshot = kernel.evaluate(new ProjectedState("tenant-one", subject, 50, Map.of(
+                "followUpDueAt", "2026-08-15T09:00:00Z",
+                "followUpCompleted", "false")), Instant.parse("2026-08-15T10:00:00Z"));
+        var offer = kernel.authorise(
+                        "tenant-one", snapshot.id(), new Principal("Owner", "gareth"),
+                        Instant.parse("2026-08-15T10:01:00Z"))
+                .actionOffers().stream()
+                .filter(candidate -> candidate.actionId().endsWith("recordInteraction"))
+                .findFirst().orElseThrow();
+        var intent = kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
+                "io.github.gmcnicol.crm.RecordInteractionInput", 1, Map.of("note", "Must roll back")));
+
+        try (var admin = DriverManager.getConnection(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+                var statement = admin.createStatement()) {
+            statement.execute("""
+                    CREATE FUNCTION public.reject_success_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+                    BEGIN
+                        IF NEW.to_status = 'SUCCEEDED' THEN
+                            RAISE EXCEPTION 'injected completion failure';
+                        END IF;
+                        RETURN NEW;
+                    END $$;
+                    CREATE TRIGGER reject_success_audit BEFORE INSERT ON kernel.intent_audit
+                    FOR EACH ROW EXECUTE FUNCTION public.reject_success_audit();
+                    """);
+            try {
+                assertThatThrownBy(() -> kernel.processNext(processedAt))
+                        .hasMessageContaining("injected completion failure");
+            } finally {
+                statement.execute("""
+                        DROP TRIGGER reject_success_audit ON kernel.intent_audit;
+                        DROP FUNCTION public.reject_success_audit();
+                        """);
+            }
+        }
+
+        var persisted = new TransactionTemplate(transactionManager).execute(status -> {
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            return java.util.List.of(
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.event WHERE intent_id = ?", Integer.class,
+                            intent.id()),
+                    jdbc.queryForObject("""
+                            SELECT count(*) FROM kernel.projected_state_version
+                            WHERE subject_type = 'crm.Contact' AND subject_id = 'rollback-alex' AND version = 51
+                            """, Integer.class),
+                    jdbc.queryForObject("""
+                            SELECT count(*) FROM kernel.reevaluation_request
+                            WHERE subject_type = 'crm.Contact' AND subject_id = 'rollback-alex'
+                            """, Integer.class),
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.intent WHERE id = ? AND status = 'CLAIMED'",
+                            Integer.class, intent.id()),
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.intent_audit WHERE intent_id = ?",
+                            Integer.class, intent.id()));
+        });
+        assertThat(persisted).containsExactly(0, 0, 0, 1, 2);
+    }
+
+    private io.github.gmcnicol.kernel.application.Intent processUntil(UUID intentId, Instant processedAt) {
+        for (int attempt = 0; attempt < 10; attempt++) {
+            var processed = kernel.processNext(processedAt).orElseThrow();
+            if (processed.id().equals(intentId)) {
+                return processed;
+            }
+        }
+        throw new AssertionError("Intent was not processed");
     }
 }

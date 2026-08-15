@@ -38,6 +38,7 @@ public class EvaluationAutoConfiguration {
             PlatformTransactionManager transactionManager,
             AuthorisationService authorisation,
             IntentService intents,
+            IntentExecutionService execution,
             SemanticPackVersion semanticPackVersion,
             @Value("${spring.application.name}") String applicationId,
             @Value("${spring.application.version}") String applicationVersion,
@@ -48,6 +49,7 @@ public class EvaluationAutoConfiguration {
                 new TransactionTemplate(transactionManager),
                 authorisation,
                 intents,
+                execution,
                 new ApplicationVersion(applicationId, applicationVersion),
                 kernelVersion(),
                 semanticPackVersion,
@@ -113,8 +115,13 @@ public class EvaluationAutoConfiguration {
                 .filter(binding -> binding.startsWith("ACTION="))
                 .map(binding -> binding.substring("ACTION=".length()))
                 .collect(Collectors.toSet());
+        Set<String> events = java.util.Arrays.stream(manifest.getProperty("bindings").split(","))
+                .map(String::trim)
+                .filter(binding -> binding.startsWith("EVENT="))
+                .map(binding -> binding.substring("EVENT=".length()))
+                .collect(Collectors.toSet());
         return new TaxiPayloadValidator(
-                new Compiler(source, sources.getFirst(), List.of(), new CompilerConfig()).compile(), actions);
+                new Compiler(source, sources.getFirst(), List.of(), new CompilerConfig()).compile(), actions, events);
     }
 
     @Bean
@@ -138,6 +145,15 @@ public class EvaluationAutoConfiguration {
                 policies,
                 derivations,
                 clock);
+    }
+
+    @Bean
+    IntentExecutionService intentExecutionService(
+            JdbcTemplate jdbc,
+            PlatformTransactionManager transactionManager,
+            List<io.github.gmcnicol.kernel.semanticpack.IntentHandler> handlers,
+            TaxiPayloadValidator payloads) {
+        return new IntentExecutionService(jdbc, new TransactionTemplate(transactionManager), handlers, payloads);
     }
 
     @Bean

@@ -21,7 +21,7 @@ class TaxiPayloadValidatorTests {
                 service Actions { operation act(input: Input): Output }
                 """, "unsupported.taxi", List.of(), new CompilerConfig()).compile();
 
-        assertThatThrownBy(() -> new TaxiPayloadValidator(taxi, Set.of("example.Actions.act")))
+        assertThatThrownBy(() -> new TaxiPayloadValidator(taxi, Set.of("example.Actions.act"), Set.of()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("single flat models");
     }
@@ -39,7 +39,7 @@ class TaxiPayloadValidatorTests {
                 }
                 """, "supporting.taxi", List.of(), new CompilerConfig()).compile();
 
-        assertThatCode(() -> new TaxiPayloadValidator(taxi, Set.of("example.Actions.act")))
+        assertThatCode(() -> new TaxiPayloadValidator(taxi, Set.of("example.Actions.act"), Set.of()))
                 .doesNotThrowAnyException();
     }
 }

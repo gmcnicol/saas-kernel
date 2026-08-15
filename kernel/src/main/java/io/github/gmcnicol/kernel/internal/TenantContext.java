@@ -19,6 +19,10 @@ final class TenantContext {
         jdbc.execute("SET LOCAL ROLE kernel_runtime");
     }
 
+    static void assumeWorkerRole(JdbcTemplate jdbc) {
+        jdbc.execute("SET LOCAL ROLE kernel_worker");
+    }
+
     static void useAfterRole(JdbcTemplate jdbc, String tenantId) {
         if (tenantId == null || !VALID_TENANT.matcher(tenantId).matches()) {
             throw new IllegalArgumentException("Invalid tenant context");

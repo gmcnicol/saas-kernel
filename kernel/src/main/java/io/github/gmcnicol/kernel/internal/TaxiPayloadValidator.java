@@ -16,6 +16,7 @@ import lang.taxi.types.PrimitiveType;
 final class TaxiPayloadValidator {
 
     private final TaxiDocument taxi;
+    private final Set<String> events;
     private static final java.util.Set<PrimitiveType> SUPPORTED = EnumSet.of(
             PrimitiveType.BOOLEAN,
             PrimitiveType.STRING,
@@ -28,8 +29,9 @@ final class TaxiPayloadValidator {
             PrimitiveType.INSTANT,
             PrimitiveType.DOUBLE);
 
-    TaxiPayloadValidator(TaxiDocument taxi, Set<String> actions) {
+    TaxiPayloadValidator(TaxiDocument taxi, Set<String> actions, Set<String> events) {
         this.taxi = taxi;
+        this.events = Set.copyOf(events);
         actions.forEach(action -> {
             int separator = action.lastIndexOf('.');
             var operation = taxi.service(action.substring(0, separator)).operation(action.substring(separator + 1));
@@ -58,11 +60,22 @@ final class TaxiPayloadValidator {
                 || !operation.getParameterType(0).getQualifiedName().equals(payload.type())) {
             throw new IllegalArgumentException("Payload type does not match Action input");
         }
-        var model = taxi.objectType(payload.type());
+        validateModel(payload.type(), payload.values());
+    }
+
+    void validateEvent(String type, int version, java.util.Map<String, String> values) {
+        if (version != 1 || !events.contains(type)) {
+            throw new IllegalArgumentException("Unsupported Event type or version");
+        }
+        validateModel(type, values);
+    }
+
+    private void validateModel(String type, java.util.Map<String, String> values) {
+        var model = taxi.objectType(type);
         var expectedNames = new HashSet<String>();
         for (Field field : model.getAllFields()) {
             expectedNames.add(field.getName());
-            String value = payload.values().get(field.getName());
+            String value = values.get(field.getName());
             if (value == null) {
                 if (!field.getNullable()) {
                     throw new IllegalArgumentException("Missing payload field: " + field.getName());
@@ -71,7 +84,7 @@ final class TaxiPayloadValidator {
                 validatePrimitive(field.getType().getBasePrimitive(), value);
             }
         }
-        if (!expectedNames.containsAll(payload.values().keySet())) {
+        if (!expectedNames.containsAll(values.keySet())) {
             throw new IllegalArgumentException("Payload contains unknown fields");
         }
     }

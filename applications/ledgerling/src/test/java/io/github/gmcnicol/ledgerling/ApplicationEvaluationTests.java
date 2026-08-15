@@ -108,8 +108,9 @@ class ApplicationEvaluationTests {
 
     @Test
     void acceptsRecordsReceivedIntentThroughTheApplicationInterface() {
+        var subject = new Subject("ledgerling.Filing", "intent-acme");
         var snapshot = kernel.evaluate(new ProjectedState(
-                "tenant-one", new Subject("ledgerling.Filing", "intent-acme"), 30, Map.of(
+                "tenant-one", subject, 30, Map.of(
                         "filingDueAt", "2026-08-20T09:00:00Z",
                         "recordsOutstanding", "true",
                         "documentRequestId", "request-84")), Instant.parse("2026-08-15T10:00:00Z"));
@@ -125,5 +126,25 @@ class ApplicationEvaluationTests {
 
         assertThat(intent.actionOfferId()).isEqualTo(offer.id());
         assertThat(intent.status()).isEqualTo(IntentStatus.PENDING);
+
+        var completed = processUntil(intent.id(), Instant.parse("2026-08-15T10:03:00Z"));
+        assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
+        var reevaluated = kernel.evaluate(new ProjectedState("tenant-one", subject, 31, Map.of(
+                "filingDueAt", "2026-08-20T09:00:00Z",
+                "recordsOutstanding", "false",
+                "documentRequestId", "request-84",
+                "recordsReceivedAt", "2026-08-15T10:02:00Z")), Instant.parse("2026-08-15T10:04:00Z"));
+        assertThat(reevaluated.applicableActions()).singleElement().satisfies(action -> assertThat(action.actionId())
+                .isEqualTo("io.github.gmcnicol.ledgerling.LedgerlingActions.startPreparation"));
+    }
+
+    private io.github.gmcnicol.kernel.application.Intent processUntil(UUID intentId, Instant processedAt) {
+        for (int attempt = 0; attempt < 10; attempt++) {
+            var processed = kernel.processNext(processedAt).orElseThrow();
+            if (processed.id().equals(intentId)) {
+                return processed;
+            }
+        }
+        throw new AssertionError("Intent was not processed");
     }
 }
