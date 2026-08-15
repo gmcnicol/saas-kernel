@@ -40,7 +40,7 @@ public class KernelAutoConfiguration {
                   pg_has_role(current_user, 'kernel_runtime', 'SET') AS runtime_set,
                   NOT EXISTS (
                       SELECT 1 FROM pg_roles protected_role
-                      WHERE protected_role.rolname IN ('kernel_runtime', 'kernel_worker')
+                      WHERE protected_role.rolname IN ('kernel_runtime', 'kernel_worker', 'kernel_offer_resolver')
                         AND (protected_role.rolsuper OR protected_role.rolbypassrls OR protected_role.rolcanlogin)
                   ) AS protected_roles_safe,
                   EXISTS (

@@ -11,10 +11,15 @@ import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import java.io.IOException;
+import java.time.Clock;
 import java.util.List;
 import java.util.Properties;
+import java.util.stream.Collectors;
+import lang.taxi.Compiler;
+import lang.taxi.CompilerConfig;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.core.io.ResourceLoader;
@@ -31,29 +36,20 @@ public class EvaluationAutoConfiguration {
             JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager,
             AuthorisationService authorisation,
+            IntentService intents,
+            SemanticPackVersion semanticPackVersion,
             @Value("${spring.application.name}") String applicationId,
             @Value("${spring.application.version}") String applicationVersion,
-            List<SemanticPack> semanticPacks,
             List<FactDerivation> derivations,
-            List<ApplicabilityPolicy> policies,
-            ResourceLoader resources) {
-        Properties manifest = load(resources, semanticPacks.getFirst().manifestResource());
-        String checksumPath = manifest.getProperty("checksum");
-        String checksum;
-        try {
-            checksum = resources.getResource("classpath:" + checksumPath)
-                    .getContentAsString(java.nio.charset.StandardCharsets.UTF_8)
-                    .trim();
-        } catch (IOException exception) {
-            throw new IllegalStateException("Cannot read Semantic Pack checksum", exception);
-        }
+            List<ApplicabilityPolicy> policies) {
         return new DefaultKernel(
                 jdbc,
                 new TransactionTemplate(transactionManager),
                 authorisation,
+                intents,
                 new ApplicationVersion(applicationId, applicationVersion),
                 kernelVersion(),
-                new SemanticPackVersion(manifest.getProperty("id"), checksum),
+                semanticPackVersion,
                 derivations,
                 policies);
     }
@@ -63,6 +59,18 @@ public class EvaluationAutoConfiguration {
     AuthorisationService authorisationService(
             JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager,
+            CedarAuthoriser cedar,
+            EvaluationStore evaluations) {
+        return new AuthorisationService(jdbc, new TransactionTemplate(transactionManager), cedar, evaluations);
+    }
+
+    @Bean
+    EvaluationStore evaluationStore(JdbcTemplate jdbc) {
+        return new EvaluationStore(jdbc);
+    }
+
+    @Bean
+    CedarAuthoriser cedarAuthoriser(
             List<AuthorisationBundle> bundles,
             List<AuthorisationModel> models,
             ResourceLoader resources) {
@@ -74,16 +82,62 @@ public class EvaluationAutoConfiguration {
                 .collect(java.util.stream.Collectors.joining("\n"));
         String checksum = read(resources, manifest.getProperty("checksum")).trim();
         try {
-            var cedar = new CedarAuthoriser(
+            return new CedarAuthoriser(
                     Schema.parse(Schema.JsonOrCedar.Cedar, schema),
                     PolicySet.parsePolicies(policies),
                     models.getFirst(),
                     manifest.getProperty("id"),
                     checksum);
-            return new AuthorisationService(jdbc, new TransactionTemplate(transactionManager), cedar);
         } catch (Exception exception) {
             throw new IllegalStateException("Cannot initialise Authorisation Bundle", exception);
         }
+    }
+
+    @Bean
+    SemanticPackVersion semanticPackVersion(List<SemanticPack> semanticPacks, ResourceLoader resources) {
+        Properties manifest = load(resources, semanticPacks.getFirst().manifestResource());
+        return new SemanticPackVersion(
+                manifest.getProperty("id"), read(resources, manifest.getProperty("checksum")).trim());
+    }
+
+    @Bean
+    TaxiPayloadValidator taxiPayloadValidator(List<SemanticPack> semanticPacks, ResourceLoader resources) {
+        Properties manifest = load(resources, semanticPacks.getFirst().manifestResource());
+        List<String> sources = java.util.Arrays.stream(manifest.getProperty("taxi-sources").split(","))
+                .map(String::trim)
+                .toList();
+        String source = sources.stream().map(path -> read(resources, path)).collect(Collectors.joining("\n"));
+        return new TaxiPayloadValidator(
+                new Compiler(source, sources.getFirst(), List.of(), new CompilerConfig()).compile());
+    }
+
+    @Bean
+    IntentService intentService(
+            JdbcTemplate jdbc,
+            PlatformTransactionManager transactionManager,
+            EvaluationStore evaluations,
+            CedarAuthoriser cedar,
+            TaxiPayloadValidator payloads,
+            SemanticPackVersion semanticPackVersion,
+            List<ApplicabilityPolicy> policies,
+            List<FactDerivation> derivations,
+            Clock clock) {
+        return new IntentService(
+                jdbc,
+                new TransactionTemplate(transactionManager),
+                evaluations,
+                cedar,
+                payloads,
+                semanticPackVersion,
+                policies,
+                derivations,
+                clock);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    Clock kernelClock() {
+        return Clock.systemUTC();
     }
 
     private static String kernelVersion() {

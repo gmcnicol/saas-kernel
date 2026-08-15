@@ -4,11 +4,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.gmcnicol.kernel.application.Kernel;
+import io.github.gmcnicol.kernel.application.CandidatePayload;
+import io.github.gmcnicol.kernel.application.IntentConflictException;
+import io.github.gmcnicol.kernel.application.IntentRejectedException;
+import io.github.gmcnicol.kernel.application.IntentStatus;
 import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.Subject;
 import java.time.Instant;
 import java.util.Map;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -175,5 +180,58 @@ class ApplicationEvaluationTests {
             return jdbc.queryForObject("SELECT count(*) FROM kernel.evaluation_snapshot", Integer.class);
         });
         assertThat(visible).isZero();
+    }
+
+    @Test
+    void acceptsIntentIdempotentlyAndRejectsConflictForgeryInvalidPayloadAndStaleness() {
+        var state = new ProjectedState("tenant-one", new Subject("crm.Contact", "intent-alex"), 20, Map.of(
+                "followUpDueAt", "2026-08-15T09:00:00Z",
+                "followUpCompleted", "false"));
+        var evaluatedAt = Instant.parse("2026-08-15T10:00:00Z");
+        var snapshot = kernel.evaluate(state, evaluatedAt);
+        var offer = kernel.authorise(
+                        "tenant-one", snapshot.id(), new Principal("Owner", "gareth"),
+                        Instant.parse("2026-08-15T10:01:00Z"))
+                .actionOffers().stream()
+                .filter(candidate -> candidate.actionId().endsWith("recordInteraction"))
+                .findFirst().orElseThrow();
+        var intentId = UUID.randomUUID();
+        var payload = new CandidatePayload(
+                "io.github.gmcnicol.crm.RecordInteractionInput", 1, Map.of("note", "Spoke to Alex"));
+
+        var accepted = kernel.accept(offer.id(), intentId, payload);
+        var repeated = kernel.accept(offer.id(), intentId, payload);
+
+        assertThat(repeated).isEqualTo(accepted);
+        assertThat(accepted.id()).isEqualTo(intentId);
+        assertThat(accepted.actionOfferId()).isEqualTo(offer.id());
+        assertThat(accepted.status()).isEqualTo(IntentStatus.PENDING);
+        assertThat(kernel.evaluate(state, evaluatedAt)).isEqualTo(snapshot);
+        assertThatThrownBy(() -> kernel.accept(offer.id(), intentId, new CandidatePayload(
+                payload.type(), 1, Map.of("note", "Different"))))
+                .isInstanceOf(IntentConflictException.class);
+        assertThatThrownBy(() -> kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
+                payload.type(), 2, payload.values())))
+                .isInstanceOf(IntentRejectedException.class);
+        assertThatThrownBy(() -> kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
+                payload.type(), 1, Map.of("unexpected", "value"))))
+                .isInstanceOf(IntentRejectedException.class);
+        assertThatThrownBy(() -> kernel.accept(UUID.randomUUID(), UUID.randomUUID(), payload))
+                .isInstanceOf(IntentRejectedException.class);
+
+        kernel.evaluate(new ProjectedState("tenant-one", state.subject(), 21, Map.of(
+                "followUpDueAt", "2026-08-15T09:00:00Z",
+                "followUpCompleted", "true")), Instant.parse("2026-08-15T10:02:00Z"));
+        assertThatThrownBy(() -> kernel.accept(offer.id(), UUID.randomUUID(), payload))
+                .isInstanceOf(IntentRejectedException.class);
+
+        var persisted = new TransactionTemplate(transactionManager).execute(status -> {
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            return java.util.List.of(
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.intent", Integer.class),
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.intent_payload_value", Integer.class),
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.intent_audit", Integer.class));
+        });
+        assertThat(persisted).containsExactly(1, 1, 1);
     }
 }

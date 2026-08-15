@@ -9,4 +9,6 @@ public interface Kernel {
     EvaluationSnapshot evaluate(ProjectedState state, Instant evaluatedAt);
 
     AuthorisationEnvelope authorise(String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt);
+
+    Intent accept(UUID actionOfferId, UUID intentId, CandidatePayload payload);
 }

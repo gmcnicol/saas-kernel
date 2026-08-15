@@ -3,11 +3,14 @@ package io.github.gmcnicol.ledgerling;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.gmcnicol.kernel.application.Kernel;
+import io.github.gmcnicol.kernel.application.CandidatePayload;
+import io.github.gmcnicol.kernel.application.IntentStatus;
 import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.Subject;
 import java.time.Instant;
 import java.util.Map;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -101,5 +104,26 @@ class ApplicationEvaluationTests {
         assertThat(client.facts()).extracting(fact -> fact.type())
                 .containsExactly("io.github.gmcnicol.ledgerling.FilingDueSoon");
         assertThat(client.actionOffers()).isEmpty();
+    }
+
+    @Test
+    void acceptsRecordsReceivedIntentThroughTheApplicationInterface() {
+        var snapshot = kernel.evaluate(new ProjectedState(
+                "tenant-one", new Subject("ledgerling.Filing", "intent-acme"), 30, Map.of(
+                        "filingDueAt", "2026-08-20T09:00:00Z",
+                        "recordsOutstanding", "true",
+                        "documentRequestId", "request-84")), Instant.parse("2026-08-15T10:00:00Z"));
+        var offer = kernel.authorise(
+                        "tenant-one", snapshot.id(), new Principal("Staff", "accountant"),
+                        Instant.parse("2026-08-15T10:01:00Z"))
+                .actionOffers().getFirst();
+
+        var intent = kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
+                "io.github.gmcnicol.ledgerling.RecordRecordsReceivedInput",
+                1,
+                Map.of("receivedAt", "2026-08-15T10:02:00Z")));
+
+        assertThat(intent.actionOfferId()).isEqualTo(offer.id());
+        assertThat(intent.status()).isEqualTo(IntentStatus.PENDING);
     }
 }

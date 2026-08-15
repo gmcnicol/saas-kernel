@@ -7,6 +7,7 @@ CREATE TABLE kernel.action_offer (
     subject_type text NOT NULL,
     subject_id text NOT NULL,
     action_id text NOT NULL,
+    applicability_policy_id text NOT NULL,
     state_version bigint NOT NULL,
     semantic_pack_id text NOT NULL,
     semantic_pack_checksum char(64) NOT NULL,
@@ -14,6 +15,7 @@ CREATE TABLE kernel.action_offer (
     authorisation_bundle_checksum char(64) NOT NULL,
     authorised_at timestamptz NOT NULL,
     decision_correlation uuid NOT NULL,
+    UNIQUE (id, tenant_id),
     UNIQUE (tenant_id, evaluation_snapshot_id, principal_type, principal_id, action_id,
             authorisation_bundle_id, authorisation_bundle_checksum, authorised_at),
     FOREIGN KEY (evaluation_snapshot_id, tenant_id)

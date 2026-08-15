@@ -5,6 +5,8 @@ import io.github.gmcnicol.kernel.application.ApplicationVersion;
 import io.github.gmcnicol.kernel.application.AuthorisationEnvelope;
 import io.github.gmcnicol.kernel.application.EvaluationSnapshot;
 import io.github.gmcnicol.kernel.application.Fact;
+import io.github.gmcnicol.kernel.application.CandidatePayload;
+import io.github.gmcnicol.kernel.application.Intent;
 import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Principal;
@@ -29,6 +31,7 @@ final class DefaultKernel implements Kernel {
     private final JdbcTemplate jdbc;
     private final TransactionOperations transactions;
     private final AuthorisationService authorisation;
+    private final IntentService intents;
     private final ApplicationVersion applicationVersion;
     private final String kernelVersion;
     private final SemanticPackVersion semanticPackVersion;
@@ -39,6 +42,7 @@ final class DefaultKernel implements Kernel {
             JdbcTemplate jdbc,
             TransactionOperations transactions,
             AuthorisationService authorisation,
+            IntentService intents,
             ApplicationVersion applicationVersion,
             String kernelVersion,
             SemanticPackVersion semanticPackVersion,
@@ -47,6 +51,7 @@ final class DefaultKernel implements Kernel {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.authorisation = authorisation;
+        this.intents = intents;
         this.applicationVersion = applicationVersion;
         this.kernelVersion = kernelVersion;
         this.semanticPackVersion = semanticPackVersion;
@@ -67,6 +72,11 @@ final class DefaultKernel implements Kernel {
     public AuthorisationEnvelope authorise(
             String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt) {
         return authorisation.authorise(tenantId, snapshotId, principal, authorisedAt);
+    }
+
+    @Override
+    public Intent accept(UUID actionOfferId, UUID intentId, CandidatePayload payload) {
+        return intents.accept(actionOfferId, intentId, payload);
     }
 
     private EvaluationSnapshot evaluateInTransaction(ProjectedState state, Instant evaluatedAt) {
