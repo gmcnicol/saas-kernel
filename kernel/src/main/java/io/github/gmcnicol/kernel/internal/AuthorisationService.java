@@ -25,18 +25,21 @@ final class AuthorisationService {
     private final CedarAuthoriser cedar;
     private final EvaluationStore evaluations;
     private final TaxiPayloadValidator payloads;
+    private final KernelTelemetry telemetry;
 
     AuthorisationService(
             JdbcTemplate jdbc,
             TransactionOperations transactions,
             CedarAuthoriser cedar,
             EvaluationStore evaluations,
-            TaxiPayloadValidator payloads) {
+            TaxiPayloadValidator payloads,
+            KernelTelemetry telemetry) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.cedar = cedar;
         this.evaluations = evaluations;
         this.payloads = payloads;
+        this.telemetry = telemetry;
     }
 
     AuthorisationEnvelope authorise(
@@ -145,6 +148,7 @@ final class AuthorisationService {
                     """, UUID.class, tenantId, evaluation.id(), principal.type(), principal.id(), action.actionId(),
                     cedar.bundleId(), cedar.bundleChecksum(), Timestamp.from(authorisedAt));
         }
+        telemetry.actionOffer(tenantId, evaluation.subject(), evaluation.id(), id, correlation);
         return new ActionOffer(id, action.actionId());
     }
 

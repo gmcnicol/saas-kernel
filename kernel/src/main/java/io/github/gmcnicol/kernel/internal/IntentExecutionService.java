@@ -18,6 +18,7 @@ import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -42,6 +43,7 @@ final class IntentExecutionService {
     private final IntentInvariantValidator invariants;
     private final FatalInvariantHandler fatalInvariants;
     private final Clock clock;
+    private final KernelTelemetry telemetry;
 
     IntentExecutionService(
             JdbcTemplate jdbc,
@@ -55,7 +57,8 @@ final class IntentExecutionService {
             IntentWorkerProperties worker,
             IntentInvariantValidator invariants,
             FatalInvariantHandler fatalInvariants,
-            Clock clock) {
+            Clock clock,
+            KernelTelemetry telemetry) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.handlers = handlers.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(
@@ -69,6 +72,7 @@ final class IntentExecutionService {
         this.invariants = invariants;
         this.fatalInvariants = fatalInvariants;
         this.clock = clock;
+        this.telemetry = telemetry;
     }
 
     Optional<Intent> processNext(Instant processedAt) {
@@ -81,11 +85,19 @@ final class IntentExecutionService {
         if (claim == null) {
             return Optional.empty();
         }
-        try {
-            return Optional.of(inTransaction(status -> complete(claim, token, processedAt)));
-        } catch (RuntimeException exception) {
-            return Optional.of(inTransaction(status -> failAttempt(claim, token, processedAt, exception)));
-        }
+        return telemetry.observeLinked("kernel.intent.attempt", claim.traceparent(), () -> {
+            Intent result;
+            try {
+                result = inTransaction(status -> complete(claim, token, processedAt));
+            } catch (RuntimeException exception) {
+                result = inTransaction(status -> failAttempt(claim, token, processedAt, exception));
+            }
+            telemetry.outcome(result.status(), Duration.between(claim.acceptedAt(), clock.instant()));
+            telemetry.intent(
+                    claim.tenantId(), claim.subject(), claim.actionOfferId(), claim.intentId(), result.status(),
+                    KernelTelemetry.traceId(claim.traceparent(), claim.intentId()));
+            return Optional.of(result);
+        });
     }
 
     List<Intent> processDue(Instant processedAt) {
@@ -109,8 +121,19 @@ final class IntentExecutionService {
                 Timestamp.from(claimedAt.plus(worker.leaseDuration())),
                 UUID.randomUUID(), UUID.randomUUID());
         if (claims.isEmpty()) return null;
-        Claim claim = claims.getFirst();
+        Claim selected = claims.getFirst();
+        TenantContext.useAfterRole(jdbc, selected.tenantId());
+        Claim claim = jdbc.queryForObject("""
+                SELECT action_offer_id, subject_type, subject_id, accepted_at, traceparent
+                FROM kernel.intent WHERE tenant_id = ? AND id = ?
+                """, (result, row) -> selected.withTelemetry(
+                        result.getObject("action_offer_id", UUID.class),
+                        new Subject(result.getString("subject_type"), result.getString("subject_id")),
+                        result.getTimestamp("accepted_at").toInstant(), result.getString("traceparent")),
+                selected.tenantId(), selected.intentId());
         invariants.transition(claim.previousStatus(), IntentStatus.CLAIMED);
+        telemetry.lease(claim.previousStatus() == IntentStatus.CLAIMED);
+        telemetry.backlogAge(Duration.between(claim.acceptedAt(), dueAt));
         return claim;
     }
 
@@ -143,20 +166,16 @@ final class IntentExecutionService {
         }
         IntentHandler handler = Optional.ofNullable(handlers.get(stored.actionId()))
                 .orElseThrow(() -> new IllegalStateException("Missing Intent handler: " + stored.actionId()));
-        List<Event> events = List.copyOf(handler.handle(claimed, stored.payload(), state));
+        List<Event> events = telemetry.observe(
+                "kernel.intent.handler", () -> List.copyOf(handler.handle(claimed, stored.payload(), state)));
         if (events.isEmpty()) {
             throw new IllegalStateException("Successful Intent handling must emit at least one Event");
         }
         invariants.eventSequence(java.util.stream.IntStream.rangeClosed(1, events.size()).boxed().toList());
 
-        long version = state.version();
-        for (int index = 0; index < events.size(); index++) {
-            Event event = events.get(index);
-            payloads.validateEvent(stored.actionId(), event.type(), event.version(), event.payload());
-            version++;
-            persistEvent(claim, stored, event, index + 1, version, processedAt);
-            persistState(new ProjectedState(claim.tenantId(), stored.subject(), version, event.resultingState()));
-        }
+        long version = telemetry.observe(
+                "kernel.event.projection.commit",
+                () -> persistEventsAndState(claim, stored, state, events, processedAt));
         jdbc.update("""
                 INSERT INTO kernel.reevaluation_request
                     (tenant_id, subject_type, subject_id, expected_state_version,
@@ -179,6 +198,7 @@ final class IntentExecutionService {
                 WHERE tenant_id = ? AND id = ? AND status = 'CLAIMED' AND lease_token = ? AND lease_until >= ?
                 """, Timestamp.from(processedAt), claim.tenantId(), stored.id(), token, Timestamp.from(completionTime));
         if (completed != 1) {
+            telemetry.leaseLost();
             throw new IllegalStateException("Intent lease is no longer owned");
         }
         jdbc.update("""
@@ -189,6 +209,19 @@ final class IntentExecutionService {
                 Timestamp.from(processedAt),
                 events.size() + " Event(s) committed", UUID.randomUUID());
         return new Intent(stored.id(), stored.actionOfferId(), IntentStatus.SUCCEEDED, stored.acceptedAt());
+    }
+
+    private long persistEventsAndState(
+            Claim claim, StoredIntent stored, ProjectedState state, List<Event> events, Instant processedAt) {
+        long version = state.version();
+        for (int index = 0; index < events.size(); index++) {
+            Event event = events.get(index);
+            payloads.validateEvent(stored.actionId(), event.type(), event.version(), event.payload());
+            version++;
+            persistEvent(claim, stored, event, index + 1, version, processedAt);
+            persistState(new ProjectedState(claim.tenantId(), stored.subject(), version, event.resultingState()));
+        }
+        return version;
     }
 
     private Intent reject(
@@ -210,6 +243,7 @@ final class IntentExecutionService {
                 """, status.name(), reason.name(), Timestamp.from(processedAt), claim.tenantId(), stored.id(), token,
                 Timestamp.from(clock.instant()));
         if (updated != 1) {
+            telemetry.leaseLost();
             throw new IllegalStateException("Intent lease is no longer owned");
         }
         jdbc.update("""
@@ -245,6 +279,7 @@ final class IntentExecutionService {
                     """, Timestamp.from(failedAt.plus(worker.retryBackoff())), claim.tenantId(), stored.id(), token,
                     Timestamp.from(failedAt));
             if (updated != 1) {
+                telemetry.leaseLost();
                 throw new IllegalStateException("Intent lease is no longer owned");
             }
             jdbc.update("""
@@ -254,6 +289,7 @@ final class IntentExecutionService {
                     VALUES (?, ?, ?, ?, 'CLAIMED', 'RETRY_WAIT', ?, 'transient failure', ?)
                     """, UUID.randomUUID(), claim.tenantId(), stored.id(), nextAuditSequence(stored.id()),
                     Timestamp.from(failedAt), UUID.randomUUID());
+            telemetry.retry();
             return new Intent(stored.id(), stored.actionOfferId(), IntentStatus.RETRY_WAIT, stored.acceptedAt());
         }
         TenantContext.lockSubject(jdbc, claim.tenantId(), stored.subject());
@@ -388,6 +424,9 @@ final class IntentExecutionService {
                 """, eventId, claim.tenantId(), intent.id(), sequence, intent.subject().type(), intent.subject().id(),
                 event.type(), intent.semanticPackId(), intent.semanticPackChecksum(), event.version(),
                 Timestamp.from(processedAt), version);
+        telemetry.event(
+                claim.tenantId(), intent.subject(), intent.id(), eventId,
+                KernelTelemetry.traceId(intent.traceparent(), intent.id()));
         event.payload().entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> jdbc.update("""
                 INSERT INTO kernel.event_payload_value (event_id, tenant_id, name, value) VALUES (?, ?, ?, ?)
                 """, eventId, claim.tenantId(), entry.getKey(), entry.getValue()));
@@ -406,7 +445,24 @@ final class IntentExecutionService {
                 entry.getKey(), entry.getValue()));
     }
 
-    private record Claim(UUID intentId, String tenantId, IntentStatus previousStatus) {}
+    private record Claim(
+            UUID intentId,
+            String tenantId,
+            IntentStatus previousStatus,
+            UUID actionOfferId,
+            Subject subject,
+            Instant acceptedAt,
+            String traceparent) {
+
+        Claim(UUID intentId, String tenantId, IntentStatus previousStatus) {
+            this(intentId, tenantId, previousStatus, null, null, null, null);
+        }
+
+        Claim withTelemetry(UUID offerId, Subject replacementSubject, Instant replacementAcceptedAt, String trace) {
+            return new Claim(
+                    intentId, tenantId, previousStatus, offerId, replacementSubject, replacementAcceptedAt, trace);
+        }
+    }
 
     private record ExecutionEvidence(ApplicabilityPolicy policy, Boolean applicable, Boolean authorised) {}
 

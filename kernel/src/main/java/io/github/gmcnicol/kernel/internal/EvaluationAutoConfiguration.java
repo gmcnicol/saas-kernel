@@ -6,9 +6,13 @@ import io.github.gmcnicol.kernel.application.ApplicationVersion;
 import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
 import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
+import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
@@ -18,18 +22,26 @@ import java.util.stream.Collectors;
 import lang.taxi.Compiler;
 import lang.taxi.CompilerConfig;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.actuate.info.InfoContributor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.ConfigurableApplicationContext;
-import org.springframework.context.annotation.DependsOn;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-@AutoConfiguration(after = ApplicationValidationAutoConfiguration.class)
+@AutoConfiguration(
+        after = ApplicationValidationAutoConfiguration.class,
+        afterName = {
+            "org.springframework.boot.micrometer.metrics.autoconfigure.MetricsAutoConfiguration",
+            "org.springframework.boot.micrometer.metrics.autoconfigure.export.simple.SimpleMetricsExportAutoConfiguration",
+            "org.springframework.boot.micrometer.observation.autoconfigure.ObservationAutoConfiguration"
+        })
 @EnableConfigurationProperties(IntentWorkerProperties.class)
 public class EvaluationAutoConfiguration {
 
@@ -48,7 +60,8 @@ public class EvaluationAutoConfiguration {
             @Value("${spring.application.name}") String applicationId,
             @Value("${spring.application.version}") String applicationVersion,
             List<FactDerivation> derivations,
-            List<ApplicabilityPolicy> policies) {
+            List<ApplicabilityPolicy> policies,
+            KernelTelemetry telemetry) {
         return new DefaultKernel(
                 jdbc,
                 new TransactionTemplate(transactionManager),
@@ -62,7 +75,8 @@ public class EvaluationAutoConfiguration {
                 kernelVersion(),
                 semanticPackVersion,
                 derivations,
-                policies);
+                policies,
+                telemetry);
     }
 
     @Bean
@@ -72,9 +86,10 @@ public class EvaluationAutoConfiguration {
             PlatformTransactionManager transactionManager,
             CedarAuthoriser cedar,
             EvaluationStore evaluations,
-            TaxiPayloadValidator payloads) {
+            TaxiPayloadValidator payloads,
+            KernelTelemetry telemetry) {
         return new AuthorisationService(
-                jdbc, new TransactionTemplate(transactionManager), cedar, evaluations, payloads);
+                jdbc, new TransactionTemplate(transactionManager), cedar, evaluations, payloads, telemetry);
     }
 
     @Bean
@@ -93,8 +108,8 @@ public class EvaluationAutoConfiguration {
     }
 
     @Bean
-    FatalInvariantHandler fatalInvariantHandler(ConfigurableApplicationContext context) {
-        return new FatalInvariantHandler(context);
+    FatalInvariantHandler fatalInvariantHandler(ConfigurableApplicationContext context, KernelTelemetry telemetry) {
+        return new FatalInvariantHandler(context, telemetry);
     }
 
     @Bean
@@ -169,7 +184,8 @@ public class EvaluationAutoConfiguration {
             SemanticPackVersion semanticPackVersion,
             List<ApplicabilityPolicy> policies,
             List<FactDerivation> derivations,
-            Clock clock) {
+            Clock clock,
+            KernelTelemetry telemetry) {
         return new IntentService(
                 jdbc,
                 new TransactionTemplate(transactionManager),
@@ -179,7 +195,8 @@ public class EvaluationAutoConfiguration {
                 semanticPackVersion,
                 policies,
                 derivations,
-                clock);
+                clock,
+                telemetry);
     }
 
     @Bean
@@ -195,10 +212,58 @@ public class EvaluationAutoConfiguration {
             IntentWorkerProperties worker,
             IntentInvariantValidator invariants,
             FatalInvariantHandler fatalInvariants,
-            Clock clock) {
+            Clock clock,
+            KernelTelemetry telemetry) {
         return new IntentExecutionService(
                 jdbc, new TransactionTemplate(transactionManager), handlers, payloads,
-                semanticPackVersion, policies, derivations, cedar, worker, invariants, fatalInvariants, clock);
+                semanticPackVersion, policies, derivations, cedar, worker, invariants, fatalInvariants, clock,
+                telemetry);
+    }
+
+    @Bean
+    KernelTelemetry kernelTelemetry(
+            ObservationRegistry observations,
+            MeterRegistry meters,
+            @Value("${spring.application.name}") String applicationId,
+            @Value("${spring.application.version}") String applicationVersion) {
+        return new KernelTelemetry(
+                observations, meters, new ApplicationVersion(applicationId, applicationVersion), kernelVersion());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    ObservationRegistry kernelObservationRegistry() {
+        return ObservationRegistry.create();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    MeterRegistry kernelMeterRegistry() {
+        return new SimpleMeterRegistry();
+    }
+
+    @Bean
+    @ConditionalOnClass(InfoContributor.class)
+    InfoContributor kernelInfo(
+            SemanticPackVersion semanticPack,
+            CedarAuthoriser cedar,
+            List<PresentationPack> presentations,
+            ResourceLoader resources,
+            @Value("${spring.application.name}") String applicationId,
+            @Value("${spring.application.version}") String applicationVersion) {
+        return builder -> builder
+                .withDetail("application", java.util.Map.of("id", applicationId, "version", applicationVersion))
+                .withDetail("kernel", java.util.Map.of("version", kernelVersion()))
+                .withDetail("semanticPack", java.util.Map.of(
+                        "id", semanticPack.id(), "checksum", semanticPack.checksum()))
+                .withDetail("authorisationBundle", java.util.Map.of(
+                        "id", cedar.bundleId(), "checksum", cedar.bundleChecksum()))
+                .withDetail("presentationPacks", presentations.stream().map(pack -> {
+                    Properties manifest = load(resources, pack.manifestResource());
+                    return java.util.Map.of(
+                            "id", manifest.getProperty("id"),
+                            "checksum", read(resources, manifest.getProperty("checksum")).trim());
+                }).toList());
     }
 
     @Bean

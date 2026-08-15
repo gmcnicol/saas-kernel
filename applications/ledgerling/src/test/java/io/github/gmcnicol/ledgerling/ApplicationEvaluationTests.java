@@ -17,15 +17,25 @@ import java.sql.DriverManager;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationHandler;
+import io.micrometer.observation.ObservationRegistry;
 import io.github.gmcnicol.kernel.application.RetryableIntentException;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.availability.ApplicationAvailability;
+import org.springframework.boot.availability.ReadinessState;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
@@ -43,6 +53,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Testcontainers
 @SpringBootTest
 @AutoConfigureMockMvc
+@ExtendWith(OutputCaptureExtension.class)
 class ApplicationEvaluationTests {
 
     @Container
@@ -64,6 +75,9 @@ class ApplicationEvaluationTests {
     @Autowired Kernel kernel;
     @Autowired MockMvc mvc;
     @Autowired PresentationPack presentation;
+    @Autowired MeterRegistry meters;
+    @Autowired ObservationRegistry observations;
+    @Autowired ApplicationAvailability availability;
 
     @MockitoSpyBean("recordRecordsReceivedHandler")
     IntentHandler recordsHandler;
@@ -194,7 +208,7 @@ class ApplicationEvaluationTests {
     }
 
     @Test
-    void rendersLedgerlingSseAndInvokesOnlyOpaqueAuthorisedOffer() throws Exception {
+    void rendersLedgerlingSseAndInvokesOnlyOpaqueAuthorisedOffer(CapturedOutput output) throws Exception {
         var subject = new Subject("ledgerling.Filing", "presented-acme");
         var snapshot = kernel.evaluate(new ProjectedState("tenant-one", subject, 10, Map.of(
                 "status", "Waiting <for> records",
@@ -228,6 +242,23 @@ class ApplicationEvaluationTests {
         assertThat(kernel.findIntents(new IntentQuery(
                 "tenant-one", Optional.of(IntentStatus.PENDING), Optional.of(subject),
                 Optional.of(intentId), Optional.empty()))).singleElement();
+        assertThat(kernel.processNext(Instant.now().plusSeconds(30)).orElseThrow().status())
+                .isEqualTo(IntentStatus.SUCCEEDED);
+        assertThat(meters.find("kernel.evaluation").timer()).isNotNull();
+        assertThat(meters.find("kernel.authorisation").timer()).isNotNull();
+        assertThat(meters.find("kernel.intent.acceptance").timer()).isNotNull();
+        assertThat(meters.find("kernel.intent.attempt").timer()).isNotNull();
+        assertThat(meters.find("kernel.intent.handler").timer()).isNotNull();
+        assertThat(meters.find("kernel.event.projection.commit").timer()).isNotNull();
+        assertThat(meters.find("kernel.presentation.rendering").timer()).isNotNull();
+        assertThat(meters.find("kernel.intent.outcomes").tag("outcome", "succeeded").counter().count()).isPositive();
+        assertThat(output).contains(
+                        "\"tenant\":\"tenant-one\"",
+                        "\"evaluation_snapshot\":\"" + snapshot.id() + "\"",
+                        "\"action_offer\":\"" + offer.id() + "\"",
+                        "\"intent\":\"" + intentId + "\"",
+                        "\"event\":")
+                .doesNotContain("2026-08-15T10:02:00Z", "private filing note");
 
         mvc.perform(get("/presentation/ledgerling/events")
                         .header("X-Tenant-Id", "tenant-one")
@@ -249,6 +280,30 @@ class ApplicationEvaluationTests {
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("integrity=\"sha384-")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("data-on:submit")));
+    }
+
+    @Test
+    void telemetryExporterFailureDoesNotBlockWorkOrReadiness() {
+        var failing = new AtomicBoolean(true);
+        observations.observationConfig().observationHandler(new ObservationHandler<>() {
+            @Override public void onStart(Observation.Context context) {
+                if (failing.get() && context.getName().startsWith("kernel.")) {
+                    throw new IllegalStateException("exporter offline");
+                }
+            }
+            @Override public boolean supportsContext(Observation.Context context) { return true; }
+        });
+        try {
+            assertThat(kernel.evaluate(new ProjectedState(
+                    "tenant-one", new Subject("ledgerling.Filing", "telemetry-failure"), 1, Map.of(
+                            "filingDueAt", "2026-08-30T09:00:00Z",
+                            "recordsOutstanding", "false",
+                            "documentRequestId", "secret-request")),
+                    Instant.parse("2026-08-15T10:00:00Z"))).isNotNull();
+        } finally {
+            failing.set(false);
+        }
+        assertThat(availability.getReadinessState()).isEqualTo(ReadinessState.ACCEPTING_TRAFFIC);
     }
 
     @Test

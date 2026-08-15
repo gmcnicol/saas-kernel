@@ -31,7 +31,8 @@ class AuthorisationServiceTests {
         doThrow(new IllegalStateException("adapter failed")).when(cedar).fields();
 
         var service = new AuthorisationService(
-                jdbc, transactions, cedar, mock(EvaluationStore.class), mock(TaxiPayloadValidator.class));
+                jdbc, transactions, cedar, mock(EvaluationStore.class), mock(TaxiPayloadValidator.class),
+                mock(KernelTelemetry.class));
 
         assertThatThrownBy(() -> service.authorise(
                 "tenant-one", UUID.randomUUID(), new Principal("Owner", "gareth"), Instant.EPOCH))

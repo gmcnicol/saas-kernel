@@ -6,15 +6,16 @@ import org.springframework.context.ConfigurableApplicationContext;
 
 final class FatalInvariantHandler {
 
-    private static final System.Logger LOG = System.getLogger(FatalInvariantHandler.class.getName());
     private final ConfigurableApplicationContext context;
+    private final KernelTelemetry telemetry;
 
-    FatalInvariantHandler(ConfigurableApplicationContext context) {
+    FatalInvariantHandler(ConfigurableApplicationContext context, KernelTelemetry telemetry) {
         this.context = context;
+        this.telemetry = telemetry;
     }
 
     void terminate(FatalInvariantError error) {
-        LOG.log(System.Logger.Level.ERROR, "fatal_invariant detail={0}", error.getMessage());
+        telemetry.fatalInvariant();
         AvailabilityChangeEvent.publish(context, ReadinessState.REFUSING_TRAFFIC);
         context.close();
     }

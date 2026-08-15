@@ -39,6 +39,7 @@ final class IntentService {
     private final List<ApplicabilityPolicy> policies;
     private final List<FactDerivation> derivations;
     private final Clock clock;
+    private final KernelTelemetry telemetry;
 
     IntentService(
             JdbcTemplate jdbc,
@@ -49,7 +50,8 @@ final class IntentService {
             SemanticPackVersion semanticPack,
             List<ApplicabilityPolicy> policies,
             List<FactDerivation> derivations,
-            Clock clock) {
+            Clock clock,
+            KernelTelemetry telemetry) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.evaluations = evaluations;
@@ -59,6 +61,7 @@ final class IntentService {
         this.policies = policies;
         this.derivations = derivations;
         this.clock = clock;
+        this.telemetry = telemetry;
     }
 
     Intent accept(UUID actionOfferId, UUID intentId, CandidatePayload payload) {
@@ -168,6 +171,9 @@ final class IntentService {
                     (id, tenant_id, intent_id, sequence, from_status, to_status, occurred_at, reason, correlation)
                 VALUES (?, ?, ?, 0, NULL, 'PENDING', ?, 'accepted', ?)
                 """, UUID.randomUUID(), tenantId, intentId, Timestamp.from(acceptedAt), UUID.randomUUID());
+        telemetry.intent(
+                tenantId, offer.subject(), actionOfferId, intentId, IntentStatus.PENDING,
+                KernelTelemetry.traceId(traceparent, intentId));
         return new Intent(intentId, actionOfferId, IntentStatus.PENDING, acceptedAt);
     }
 

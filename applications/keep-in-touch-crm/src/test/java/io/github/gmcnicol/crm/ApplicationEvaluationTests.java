@@ -22,11 +22,21 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationHandler;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.availability.ApplicationAvailability;
+import org.springframework.boot.availability.ReadinessState;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -47,6 +57,7 @@ import org.testcontainers.utility.DockerImageName;
 @Testcontainers
 @SpringBootTest
 @AutoConfigureMockMvc
+@ExtendWith(OutputCaptureExtension.class)
 class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
 
     @Container
@@ -69,6 +80,9 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired PlatformTransactionManager transactionManager;
     @Autowired MockMvc mvc;
+    @Autowired MeterRegistry meters;
+    @Autowired ObservationRegistry observations;
+    @Autowired ApplicationAvailability availability;
     @Autowired @Qualifier("crmDesktopPresentationPack") PresentationPack desktopPresentation;
     @Autowired @Qualifier("crmMobilePresentationPack") PresentationPack mobilePresentation;
 
@@ -381,7 +395,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
     }
 
     @Test
-    void rendersDistinctAuthorisedCrmExperiencesAndInvokesOpaqueOffer() throws Exception {
+    void rendersDistinctAuthorisedCrmExperiencesAndInvokesOpaqueOffer(CapturedOutput output) throws Exception {
         var subject = new Subject("crm.Contact", "presented-alex");
         var evaluatedAt = Instant.parse("2026-08-15T10:00:00Z");
         var snapshot = kernel.evaluate(new ProjectedState("tenant-one", subject, 20, Map.of(
@@ -436,6 +450,23 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         assertThat(kernel.findIntents(new IntentQuery(
                 "tenant-one", Optional.of(IntentStatus.PENDING), Optional.of(subject),
                 Optional.of(intentId), Optional.empty()))).singleElement();
+        assertThat(kernel.processNext(Instant.now().plusSeconds(30)).orElseThrow().status())
+                .isEqualTo(IntentStatus.SUCCEEDED);
+        assertThat(meters.find("kernel.evaluation").timer()).isNotNull();
+        assertThat(meters.find("kernel.authorisation").timer()).isNotNull();
+        assertThat(meters.find("kernel.intent.acceptance").timer()).isNotNull();
+        assertThat(meters.find("kernel.intent.attempt").timer()).isNotNull();
+        assertThat(meters.find("kernel.intent.handler").timer()).isNotNull();
+        assertThat(meters.find("kernel.event.projection.commit").timer()).isNotNull();
+        assertThat(meters.find("kernel.presentation.rendering").timer()).isNotNull();
+        assertThat(meters.find("kernel.intent.outcomes").tag("outcome", "succeeded").counter().count()).isPositive();
+        assertThat(output).contains(
+                        "\"tenant\":\"tenant-one\"",
+                        "\"evaluation_snapshot\":\"" + snapshot.id() + "\"",
+                        "\"action_offer\":\"" + offer.id() + "\"",
+                        "\"intent\":\"" + intentId + "\"",
+                        "\"event\":")
+                .doesNotContain("Spoke through rendered control", "never render");
 
         mvc.perform(get("/presentation/crm/desktop/events")
                         .header("X-Tenant-Id", "tenant-one")
@@ -457,6 +488,28 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("integrity=\"sha384-")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("data-on:submit")));
+    }
+
+    @Test
+    void telemetryExporterFailureDoesNotBlockWorkOrReadiness() {
+        var failing = new AtomicBoolean(true);
+        observations.observationConfig().observationHandler(new ObservationHandler<>() {
+            @Override public void onStart(Observation.Context context) {
+                if (failing.get() && context.getName().startsWith("kernel.")) {
+                    throw new IllegalStateException("exporter offline");
+                }
+            }
+            @Override public boolean supportsContext(Observation.Context context) { return true; }
+        });
+        try {
+            assertThat(kernel.evaluate(new ProjectedState(
+                    "tenant-one", new Subject("crm.Contact", "telemetry-failure"), 1, Map.of(
+                            "followUpDueAt", "2026-08-15T09:00:00Z")),
+                    Instant.parse("2026-08-15T10:00:00Z"))).isNotNull();
+        } finally {
+            failing.set(false);
+        }
+        assertThat(availability.getReadinessState()).isEqualTo(ReadinessState.ACCEPTING_TRAFFIC);
     }
 
     @Test

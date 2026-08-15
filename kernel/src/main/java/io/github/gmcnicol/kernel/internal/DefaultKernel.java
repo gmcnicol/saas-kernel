@@ -46,6 +46,7 @@ final class DefaultKernel implements Kernel {
     private final SemanticPackVersion semanticPackVersion;
     private final List<FactDerivation> derivations;
     private final List<ApplicabilityPolicy> policies;
+    private final KernelTelemetry telemetry;
 
     DefaultKernel(
             JdbcTemplate jdbc,
@@ -60,7 +61,8 @@ final class DefaultKernel implements Kernel {
             String kernelVersion,
             SemanticPackVersion semanticPackVersion,
             List<FactDerivation> derivations,
-            List<ApplicabilityPolicy> policies) {
+            List<ApplicabilityPolicy> policies,
+            KernelTelemetry telemetry) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.authorisation = authorisation;
@@ -72,6 +74,7 @@ final class DefaultKernel implements Kernel {
         this.applicationVersion = applicationVersion;
         this.kernelVersion = kernelVersion;
         this.semanticPackVersion = semanticPackVersion;
+        this.telemetry = telemetry;
         this.derivations = derivations.stream()
                 .sorted(Comparator.comparing(FactDerivation::target).thenComparing(FactDerivation::id))
                 .toList();
@@ -82,24 +85,28 @@ final class DefaultKernel implements Kernel {
 
     @Override
     public EvaluationSnapshot evaluate(ProjectedState state, Instant evaluatedAt) {
-        return transactions.execute(status -> evaluateInTransaction(state, evaluatedAt));
+        return telemetry.observe(
+                "kernel.evaluation", () -> transactions.execute(status -> evaluateInTransaction(state, evaluatedAt)));
     }
 
     @Override
     public AuthorisationEnvelope authorise(
             String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt) {
-        return authorisation.authorise(tenantId, snapshotId, principal, authorisedAt);
+        return telemetry.observe(
+                "kernel.authorisation", () -> authorisation.authorise(tenantId, snapshotId, principal, authorisedAt));
     }
 
     @Override
     public PresentationEnvelope present(
             String tenantId, UUID snapshotId, Principal principal, Instant presentedAt) {
-        return authorisation.present(tenantId, snapshotId, principal, presentedAt);
+        return telemetry.observe(
+                "kernel.authorisation", () -> authorisation.present(tenantId, snapshotId, principal, presentedAt));
     }
 
     @Override
     public Intent accept(UUID actionOfferId, UUID intentId, CandidatePayload payload) {
-        return intents.accept(actionOfferId, intentId, payload);
+        return telemetry.observe(
+                "kernel.intent.acceptance", () -> intents.accept(actionOfferId, intentId, payload));
     }
 
     @Override
@@ -123,15 +130,25 @@ final class DefaultKernel implements Kernel {
 
     private ReevaluationOutcome processReevaluation(Instant evaluatedAt) {
         if (evaluatedAt == null) throw new IllegalArgumentException("Reevaluation time must be explicit");
+        return telemetry.observe("kernel.reevaluation", () -> processReevaluationObserved(evaluatedAt));
+    }
+
+    private ReevaluationOutcome processReevaluationObserved(Instant evaluatedAt) {
         UUID token = UUID.randomUUID();
         Instant claimedAt = clock.instant();
         ReevaluationClaim claim = transactions.execute(status -> claimReevaluation(
                 token, evaluatedAt, claimedAt, claimedAt.plus(worker.leaseDuration())));
-        if (claim == null) return new ReevaluationOutcome(false, null);
+        if (claim == null) {
+            telemetry.reevaluation("empty", null);
+            return new ReevaluationOutcome(false, null);
+        }
+        telemetry.reevaluation("claimed", java.time.Duration.between(claim.dueAt(), evaluatedAt));
         try {
-            return new ReevaluationOutcome(
-                    true, transactions.execute(status -> reevaluate(claim, token, evaluatedAt)));
+            EvaluationSnapshot snapshot = transactions.execute(status -> reevaluate(claim, token, evaluatedAt));
+            telemetry.reevaluation(snapshot == null ? "stale" : "completed", null);
+            return new ReevaluationOutcome(true, snapshot);
         } catch (ReevaluationLeaseLostException ignored) {
+            telemetry.reevaluation("lease_lost", null);
             return new ReevaluationOutcome(true, null);
         }
     }
@@ -155,6 +172,7 @@ final class DefaultKernel implements Kernel {
         EvaluationSnapshot snapshot = evaluateSnapshot(state, evaluatedAt);
         EvaluationSnapshot persisted = persist(snapshot);
         scheduleReevaluation(persisted);
+        telemetry.evaluation(persisted);
         return persisted;
     }
 
@@ -206,7 +224,14 @@ final class DefaultKernel implements Kernel {
                         result.getLong("expected_state_version"), result.getString("semantic_pack_id"),
                         result.getString("semantic_pack_checksum")),
                 token, Timestamp.from(dueAt), Timestamp.from(claimedAt), Timestamp.from(claimUntil));
-        return claims.isEmpty() ? null : claims.getFirst();
+        if (claims.isEmpty()) return null;
+        ReevaluationClaim claim = claims.getFirst();
+        TenantContext.useAfterRole(jdbc, claim.tenantId());
+        Instant scheduledAt = jdbc.queryForObject("""
+                SELECT due_at FROM kernel.reevaluation_request
+                WHERE tenant_id = ? AND subject_type = ? AND subject_id = ? AND lease_token = ?
+                """, Timestamp.class, claim.tenantId(), claim.subject().type(), claim.subject().id(), token).toInstant();
+        return claim.withDueAt(scheduledAt);
     }
 
     private EvaluationSnapshot reevaluate(ReevaluationClaim claim, UUID token, Instant evaluatedAt) {
@@ -392,7 +417,23 @@ final class DefaultKernel implements Kernel {
             io.github.gmcnicol.kernel.application.Subject subject,
             long expectedStateVersion,
             String semanticPackId,
-            String semanticPackChecksum) {}
+            String semanticPackChecksum,
+            Instant dueAt) {
+
+        ReevaluationClaim(
+                String tenantId,
+                io.github.gmcnicol.kernel.application.Subject subject,
+                long expectedStateVersion,
+                String semanticPackId,
+                String semanticPackChecksum) {
+            this(tenantId, subject, expectedStateVersion, semanticPackId, semanticPackChecksum, null);
+        }
+
+        ReevaluationClaim withDueAt(Instant replacement) {
+            return new ReevaluationClaim(
+                    tenantId, subject, expectedStateVersion, semanticPackId, semanticPackChecksum, replacement);
+        }
+    }
 
     private record ReevaluationOutcome(boolean claimed, EvaluationSnapshot snapshot) {}
 

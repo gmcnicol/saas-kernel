@@ -15,6 +15,7 @@ import java.util.Map;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import io.micrometer.observation.ObservationRegistry;
 
 @SpringBootApplication
 public class KeepInTouchCrmApplication {
@@ -112,13 +113,13 @@ public class KeepInTouchCrmApplication {
     }
 
     @Bean
-    PresentationPack crmDesktopPresentationPack() {
-        return CrmPresentation.desktop();
+    PresentationPack crmDesktopPresentationPack(ObservationRegistry observations) {
+        return CrmPresentation.desktop().observed(observations);
     }
 
     @Bean
-    PresentationPack crmMobilePresentationPack() {
-        return CrmPresentation.mobile();
+    PresentationPack crmMobilePresentationPack(ObservationRegistry observations) {
+        return CrmPresentation.mobile().observed(observations);
     }
 
     private static ApplicabilityPolicy followUpPolicy(String action) {

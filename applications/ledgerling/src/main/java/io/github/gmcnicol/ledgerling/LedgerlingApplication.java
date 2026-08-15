@@ -16,6 +16,7 @@ import java.util.Map;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import io.micrometer.observation.ObservationRegistry;
 
 @SpringBootApplication
 public class LedgerlingApplication {
@@ -115,7 +116,7 @@ public class LedgerlingApplication {
     }
 
     @Bean
-    PresentationPack ledgerlingPresentationPack() {
-        return LedgerlingPresentation.defaultPack();
+    PresentationPack ledgerlingPresentationPack(ObservationRegistry observations) {
+        return LedgerlingPresentation.defaultPack().observed(observations);
     }
 }
