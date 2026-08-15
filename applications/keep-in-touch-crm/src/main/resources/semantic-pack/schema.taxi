@@ -14,6 +14,24 @@ model InteractionRecorded {
     contactId: ContactId
 }
 
+model SnoozeFollowUpInput {
+    until: Instant
+}
+
+model FollowUpSnoozed {
+    contactId: ContactId
+}
+
+model CompleteFollowUpInput {
+    note: String
+}
+
+model FollowUpCompleted {
+    contactId: ContactId
+}
+
 service CrmActions {
     operation recordInteraction(input: RecordInteractionInput): InteractionRecorded
+    operation snoozeFollowUp(input: SnoozeFollowUpInput): FollowUpSnoozed
+    operation completeFollowUp(input: CompleteFollowUpInput): FollowUpCompleted
 }

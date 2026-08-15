@@ -107,11 +107,11 @@ class ApplicationValidationTests {
                 .withBean(SemanticPack.class, () -> () -> "assembly/semantic.properties")
                 .withBean(AuthorisationBundle.class, () -> () -> "assembly/authorisation.properties")
                 .withBean("derivation", SemanticImplementation.class,
-                        () -> new SemanticImplementation(SemanticImplementation.Kind.DERIVATION, "test.SampleFact"))
+                        () -> SemanticImplementation.binding(SemanticImplementation.Kind.DERIVATION, "test.SampleFact"))
                 .withBean("applicability", SemanticImplementation.class,
-                        () -> new SemanticImplementation(SemanticImplementation.Kind.APPLICABILITY, "test.Actions.act"))
+                        () -> SemanticImplementation.binding(SemanticImplementation.Kind.APPLICABILITY, "test.Actions.act"))
                 .withBean("handler", SemanticImplementation.class,
-                        () -> new SemanticImplementation(SemanticImplementation.Kind.HANDLER, "test.Actions.act"))
+                        () -> SemanticImplementation.binding(SemanticImplementation.Kind.HANDLER, "test.Actions.act"))
                 .run(context -> assertThat(context).hasNotFailed());
     }
 
@@ -128,11 +128,11 @@ class ApplicationValidationTests {
                 .withBean(SemanticPack.class, () -> () -> semantic)
                 .withBean(AuthorisationBundle.class, () -> () -> authorisation)
                 .withBean("derivation", SemanticImplementation.class,
-                        () -> new SemanticImplementation(SemanticImplementation.Kind.DERIVATION, "test.SampleFact"))
+                        () -> SemanticImplementation.binding(SemanticImplementation.Kind.DERIVATION, "test.SampleFact"))
                 .withBean("applicability", SemanticImplementation.class,
-                        () -> new SemanticImplementation(SemanticImplementation.Kind.APPLICABILITY, "test.Actions.act"))
+                        () -> SemanticImplementation.binding(SemanticImplementation.Kind.APPLICABILITY, "test.Actions.act"))
                 .withBean("handler", SemanticImplementation.class,
-                        () -> new SemanticImplementation(SemanticImplementation.Kind.HANDLER, "test.Actions.act"))
+                        () -> SemanticImplementation.binding(SemanticImplementation.Kind.HANDLER, "test.Actions.act"))
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure()).hasStackTraceContaining(messagePrefix);

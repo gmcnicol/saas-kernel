@@ -2,6 +2,10 @@ namespace io.github.gmcnicol.ledgerling
 
 type DocumentRequestId inherits String
 
+model FilingDueSoon {
+    filingDueAt: Instant
+}
+
 model RecordsOutstanding {
     requestId: DocumentRequestId
 }
@@ -14,6 +18,15 @@ model RecordsReceived {
     requestId: DocumentRequestId
 }
 
+model StartPreparationInput {
+    confirmed: Boolean
+}
+
+model PreparationStarted {
+    requestId: DocumentRequestId
+}
+
 service LedgerlingActions {
     operation recordRecordsReceived(input: RecordRecordsReceivedInput): RecordsReceived
+    operation startPreparation(input: StartPreparationInput): PreparationStarted
 }

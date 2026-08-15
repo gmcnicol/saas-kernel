@@ -1,20 +1,28 @@
 package io.github.gmcnicol.kernel.semanticpack;
 
-import java.util.Objects;
-
 /** One Application-owned implementation bound to a qualified Taxi target. */
-public record SemanticImplementation(Kind kind, String target) {
+public interface SemanticImplementation {
 
-    public SemanticImplementation {
-        Objects.requireNonNull(kind, "kind");
-        if (target == null || target.isBlank()) {
-            throw new IllegalArgumentException("target must not be blank");
-        }
+    Kind kind();
+
+    String target();
+
+    static SemanticImplementation binding(Kind kind, String target) {
+        return new Binding(kind, target);
     }
 
     public enum Kind {
         DERIVATION,
         APPLICABILITY,
         HANDLER
+    }
+
+    record Binding(Kind kind, String target) implements SemanticImplementation {
+
+        public Binding {
+            if (kind == null || target == null || target.isBlank()) {
+                throw new IllegalArgumentException("Semantic implementation requires kind and target");
+            }
+        }
     }
 }
