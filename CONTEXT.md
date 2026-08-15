@@ -54,6 +54,10 @@ _Avoid_: Applicable Action, permission
 A durable, accepted request to perform an Action against a known state version.
 _Avoid_: Intention, command, job
 
+**Candidate Payload**:
+The versioned Action input submitted with an Action Offer for Taxi validation before Intent acceptance.
+_Avoid_: Intent, unvalidated Intent
+
 **Stale Intent**:
 An Intent whose expected state version no longer matches current Projected State, so it cannot be handled as originally accepted.
 _Avoid_: Failed Intent, obsolete command

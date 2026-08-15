@@ -10,6 +10,7 @@ import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Fact;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.application.Subject;
+import io.github.gmcnicol.kernel.application.W3cTraceContext;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import java.nio.charset.StandardCharsets;
@@ -72,12 +73,13 @@ final class IntentService {
     }
 
     private Intent acceptInTransaction(UUID actionOfferId, UUID intentId, CandidatePayload payload) {
+        TenantContext.assumeRuntimeRole(jdbc);
         String tenantId = jdbc.queryForObject(
                 "SELECT kernel.resolve_action_offer_tenant(?)", String.class, actionOfferId);
         if (tenantId == null) {
             throw new IntentRejectedException();
         }
-        TenantContext.use(jdbc, tenantId);
+        TenantContext.useAfterRole(jdbc, tenantId);
         String requestChecksum = checksum(canonicalRequest(actionOfferId, payload));
         Intent existing = existing(tenantId, intentId, requestChecksum);
         if (existing != null) {
@@ -85,9 +87,12 @@ final class IntentService {
         }
 
         Offer offer = loadOffer(tenantId, actionOfferId);
+        TenantContext.lockSubject(jdbc, tenantId, offer.subject());
         StoredEvaluation evaluation = evaluations.load(tenantId, offer.evaluationSnapshotId());
         Instant acceptedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
         validateCurrent(tenantId, offer, evaluation, payload, acceptedAt);
+        String traceparent = payload.traceContext().map(W3cTraceContext::traceparent).orElse(null);
+        String tracestate = payload.traceContext().map(W3cTraceContext::tracestate).orElse(null);
         String envelopeChecksum = checksum(canonicalStrings(
                 requestChecksum,
                 offer.evaluationSnapshotId().toString(),
@@ -108,6 +113,9 @@ final class IntentService {
                 offer.bundleChecksum(),
                 offer.authorisedAt().toString(),
                 offer.correlation().toString(),
+                traceparent == null ? "" : traceparent,
+                tracestate == null ? "" : tracestate,
+                payload.priorIntentId().map(UUID::toString).orElse(""),
                 acceptedAt.toString()));
         int inserted = jdbc.update("""
                 INSERT INTO kernel.intent
@@ -120,7 +128,7 @@ final class IntentService {
                      authorised_at, authorisation_correlation,
                      payload_type, payload_version, request_checksum, envelope_checksum,
                      accepted_at, traceparent, tracestate, prior_intent_id, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'PENDING')
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')
                 ON CONFLICT DO NOTHING
                 """, intentId, tenantId, actionOfferId, offer.evaluationSnapshotId(),
                 offer.subject().type(), offer.subject().id(), offer.actionId(),
@@ -129,7 +137,10 @@ final class IntentService {
                 evaluation.applicationId(), evaluation.applicationVersion(), evaluation.kernelVersion(),
                 offer.semanticPackId(), offer.semanticPackChecksum(),
                 offer.bundleId(), offer.bundleChecksum(), Timestamp.from(offer.authorisedAt()), offer.correlation(),
-                payload.type(), payload.version(), requestChecksum, envelopeChecksum, Timestamp.from(acceptedAt));
+                payload.type(), payload.version(), requestChecksum, envelopeChecksum, Timestamp.from(acceptedAt),
+                traceparent,
+                tracestate,
+                payload.priorIntentId().orElse(null));
         if (inserted == 0) {
             Intent raced = existing(tenantId, intentId, requestChecksum);
             if (raced != null) {
@@ -245,6 +256,9 @@ final class IntentService {
         append(value, actionOfferId.toString());
         append(value, payload.type());
         append(value, Integer.toString(payload.version()));
+        append(value, payload.traceContext().map(W3cTraceContext::traceparent).orElse(""));
+        append(value, payload.traceContext().map(W3cTraceContext::tracestate).orElse(""));
+        append(value, payload.priorIntentId().map(UUID::toString).orElse(""));
         payload.values().entrySet().stream().sorted(java.util.Map.Entry.comparingByKey())
                 .forEach(entry -> {
                     append(value, entry.getKey());

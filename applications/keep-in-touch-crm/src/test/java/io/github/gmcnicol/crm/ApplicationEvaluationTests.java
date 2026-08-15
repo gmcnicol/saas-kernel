@@ -8,11 +8,13 @@ import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.IntentConflictException;
 import io.github.gmcnicol.kernel.application.IntentRejectedException;
 import io.github.gmcnicol.kernel.application.IntentStatus;
+import io.github.gmcnicol.kernel.application.W3cTraceContext;
 import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.Subject;
 import java.time.Instant;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -219,6 +221,13 @@ class ApplicationEvaluationTests {
         assertThatThrownBy(() -> kernel.accept(UUID.randomUUID(), UUID.randomUUID(), payload))
                 .isInstanceOf(IntentRejectedException.class);
 
+        var trace = new W3cTraceContext(
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "kernel=test");
+        var linkedIntentId = UUID.randomUUID();
+        var linked = kernel.accept(offer.id(), linkedIntentId, new CandidatePayload(
+                payload.type(), payload.version(), payload.values(), Optional.of(trace), Optional.of(intentId)));
+        assertThat(linked.id()).isEqualTo(linkedIntentId);
+
         kernel.evaluate(new ProjectedState("tenant-one", state.subject(), 21, Map.of(
                 "followUpDueAt", "2026-08-15T09:00:00Z",
                 "followUpCompleted", "true")), Instant.parse("2026-08-15T10:02:00Z"));
@@ -230,8 +239,12 @@ class ApplicationEvaluationTests {
             return java.util.List.of(
                     jdbc.queryForObject("SELECT count(*) FROM kernel.intent", Integer.class),
                     jdbc.queryForObject("SELECT count(*) FROM kernel.intent_payload_value", Integer.class),
-                    jdbc.queryForObject("SELECT count(*) FROM kernel.intent_audit", Integer.class));
+                    jdbc.queryForObject("SELECT count(*) FROM kernel.intent_audit", Integer.class),
+                    jdbc.queryForObject("""
+                            SELECT count(*) FROM kernel.intent
+                            WHERE id = ? AND prior_intent_id = ? AND traceparent = ? AND tracestate = ?
+                            """, Integer.class, linkedIntentId, intentId, trace.traceparent(), trace.tracestate()));
         });
-        assertThat(persisted).containsExactly(1, 1, 1);
+        assertThat(persisted).containsExactly(2, 2, 2, 1);
     }
 }

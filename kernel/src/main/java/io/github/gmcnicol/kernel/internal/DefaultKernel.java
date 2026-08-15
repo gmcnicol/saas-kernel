@@ -84,6 +84,7 @@ final class DefaultKernel implements Kernel {
             throw new IllegalArgumentException("Evaluation time must be explicit");
         }
         TenantContext.use(jdbc, state.tenantId());
+        TenantContext.lockSubject(jdbc, state.tenantId(), state.subject());
         String stateChecksum = persistProjectedState(state);
         List<FactDerivation.Derivation> results = derivations.stream()
                 .map(derivation -> derivation.derive(state, evaluatedAt))

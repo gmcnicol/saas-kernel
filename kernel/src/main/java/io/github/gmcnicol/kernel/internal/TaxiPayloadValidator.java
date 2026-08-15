@@ -7,6 +7,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.HashSet;
+import java.util.EnumSet;
 import lang.taxi.TaxiDocument;
 import lang.taxi.types.Field;
 import lang.taxi.types.PrimitiveType;
@@ -14,9 +15,31 @@ import lang.taxi.types.PrimitiveType;
 final class TaxiPayloadValidator {
 
     private final TaxiDocument taxi;
+    private static final java.util.Set<PrimitiveType> SUPPORTED = EnumSet.of(
+            PrimitiveType.BOOLEAN,
+            PrimitiveType.STRING,
+            PrimitiveType.INTEGER,
+            PrimitiveType.LONG,
+            PrimitiveType.DECIMAL,
+            PrimitiveType.LOCAL_DATE,
+            PrimitiveType.TIME,
+            PrimitiveType.DATE_TIME,
+            PrimitiveType.INSTANT,
+            PrimitiveType.DOUBLE);
 
     TaxiPayloadValidator(TaxiDocument taxi) {
         this.taxi = taxi;
+        taxi.getServices().stream().flatMap(service -> service.getOperations().stream()).forEach(operation -> {
+            if (operation.getParameters().size() != 1
+                    || !(operation.getParameterType(0) instanceof lang.taxi.types.ObjectType input)
+                    || input.getAllFields().stream().anyMatch(field ->
+                            !field.getType().getInheritsFromPrimitive()
+                                    || !SUPPORTED.contains(field.getType().getBasePrimitive()))) {
+                throw new IllegalStateException(
+                        "Action payloads must be single flat models of supported Taxi primitive fields: "
+                                + operation.getQualifiedName());
+            }
+        });
     }
 
     void validate(String actionId, CandidatePayload payload) {
