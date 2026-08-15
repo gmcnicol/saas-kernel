@@ -116,6 +116,6 @@ public class LedgerlingApplication {
 
     @Bean
     PresentationPack ledgerlingPresentationPack() {
-        return () -> "ledgerling-default";
+        return LedgerlingPresentation.defaultPack();
     }
 }

@@ -71,8 +71,10 @@ public class EvaluationAutoConfiguration {
             JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager,
             CedarAuthoriser cedar,
-            EvaluationStore evaluations) {
-        return new AuthorisationService(jdbc, new TransactionTemplate(transactionManager), cedar, evaluations);
+            EvaluationStore evaluations,
+            TaxiPayloadValidator payloads) {
+        return new AuthorisationService(
+                jdbc, new TransactionTemplate(transactionManager), cedar, evaluations, payloads);
     }
 
     @Bean

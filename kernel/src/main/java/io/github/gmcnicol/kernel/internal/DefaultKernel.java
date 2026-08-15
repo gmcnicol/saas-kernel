@@ -13,6 +13,7 @@ import io.github.gmcnicol.kernel.application.IntentView;
 import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Principal;
+import io.github.gmcnicol.kernel.application.PresentationEnvelope;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
@@ -88,6 +89,12 @@ final class DefaultKernel implements Kernel {
     public AuthorisationEnvelope authorise(
             String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt) {
         return authorisation.authorise(tenantId, snapshotId, principal, authorisedAt);
+    }
+
+    @Override
+    public PresentationEnvelope present(
+            String tenantId, UUID snapshotId, Principal principal, Instant presentedAt) {
+        return authorisation.present(tenantId, snapshotId, principal, presentedAt);
     }
 
     @Override

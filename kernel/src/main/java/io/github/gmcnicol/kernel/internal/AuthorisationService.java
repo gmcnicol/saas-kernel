@@ -6,6 +6,9 @@ import io.github.gmcnicol.kernel.application.AuthorisationDeniedException;
 import io.github.gmcnicol.kernel.application.AuthorisationEnvelope;
 import io.github.gmcnicol.kernel.application.Fact;
 import io.github.gmcnicol.kernel.application.Principal;
+import io.github.gmcnicol.kernel.application.PresentationActionOffer;
+import io.github.gmcnicol.kernel.application.PresentationEnvelope;
+import io.github.gmcnicol.kernel.application.PresentationFact;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -21,16 +24,19 @@ final class AuthorisationService {
     private final TransactionOperations transactions;
     private final CedarAuthoriser cedar;
     private final EvaluationStore evaluations;
+    private final TaxiPayloadValidator payloads;
 
     AuthorisationService(
             JdbcTemplate jdbc,
             TransactionOperations transactions,
             CedarAuthoriser cedar,
-            EvaluationStore evaluations) {
+            EvaluationStore evaluations,
+            TaxiPayloadValidator payloads) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.cedar = cedar;
         this.evaluations = evaluations;
+        this.payloads = payloads;
     }
 
     AuthorisationEnvelope authorise(
@@ -39,7 +45,8 @@ final class AuthorisationService {
             throw new AuthorisationDeniedException();
         }
         try {
-            return transactions.execute(status -> authoriseInTransaction(tenantId, snapshotId, principal, authorisedAt));
+            return transactions.execute(
+                    status -> authoriseInTransaction(tenantId, snapshotId, principal, authorisedAt).envelope());
         } catch (AuthorisationDeniedException exception) {
             throw exception;
         } catch (RuntimeException exception) {
@@ -47,7 +54,38 @@ final class AuthorisationService {
         }
     }
 
-    private AuthorisationEnvelope authoriseInTransaction(
+    PresentationEnvelope present(String tenantId, UUID snapshotId, Principal principal, Instant presentedAt) {
+        if (snapshotId == null || principal == null || presentedAt == null) {
+            throw new AuthorisationDeniedException();
+        }
+        try {
+            return transactions.execute(status -> {
+                Authorised authorised = authoriseInTransaction(tenantId, snapshotId, principal, presentedAt);
+                StoredEvaluation evaluation = authorised.evaluation();
+                AuthorisationEnvelope envelope = authorised.envelope();
+                return new PresentationEnvelope(
+                        1,
+                        evaluation.subject(),
+                        evaluation.id(),
+                        evaluation.evaluatedAt(),
+                        evaluation.semanticPack().id(),
+                        envelope.fields(),
+                        envelope.facts().stream()
+                                .map(fact -> new PresentationFact(fact.type(), fact.values()))
+                                .toList(),
+                        envelope.actionOffers().stream()
+                                .map(offer -> new PresentationActionOffer(
+                                        offer.id(), offer.actionId(), payloads.inputType(offer.actionId())))
+                                .toList());
+            });
+        } catch (AuthorisationDeniedException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            throw new AuthorisationDeniedException();
+        }
+    }
+
+    private Authorised authoriseInTransaction(
             String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt) {
         try {
             TenantContext.use(jdbc, tenantId);
@@ -71,7 +109,7 @@ final class AuthorisationService {
                 .filter(action -> cedar.allows(principal, evaluation.subject(), action.actionId()))
                 .map(action -> persistOffer(tenantId, evaluation, principal, action, authorisedAt, correlation))
                 .toList();
-        return new AuthorisationEnvelope(snapshotId, fields, facts, offers);
+        return new Authorised(evaluation, new AuthorisationEnvelope(snapshotId, fields, facts, offers));
     }
 
     private ActionOffer persistOffer(
@@ -109,5 +147,7 @@ final class AuthorisationService {
         }
         return new ActionOffer(id, action.actionId());
     }
+
+    private record Authorised(StoredEvaluation evaluation, AuthorisationEnvelope envelope) {}
 
 }

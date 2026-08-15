@@ -22,7 +22,7 @@ final class EvaluationStore {
 
     StoredEvaluation load(String tenantId, UUID snapshotId) {
         List<StoredEvaluation> matches = jdbc.query("""
-                SELECT subject_type, subject_id, state_version, state_checksum,
+                SELECT subject_type, subject_id, state_version, state_checksum, evaluated_at,
                        application_id, application_version, kernel_version,
                        semantic_pack_id, semantic_pack_checksum
                 FROM kernel.evaluation_snapshot WHERE tenant_id = ? AND id = ?
@@ -31,6 +31,7 @@ final class EvaluationStore {
                         new Subject(result.getString("subject_type"), result.getString("subject_id")),
                         result.getLong("state_version"),
                         result.getString("state_checksum"),
+                        result.getTimestamp("evaluated_at").toInstant(),
                         result.getString("application_id"),
                         result.getString("application_version"),
                         result.getString("kernel_version"),

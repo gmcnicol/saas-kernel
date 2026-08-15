@@ -63,6 +63,14 @@ final class TaxiPayloadValidator {
         validateModel(payload.type(), payload.values());
     }
 
+    String inputType(String actionId) {
+        int separator = actionId.lastIndexOf('.');
+        return taxi.service(actionId.substring(0, separator))
+                .operation(actionId.substring(separator + 1))
+                .getParameterType(0)
+                .getQualifiedName();
+    }
+
     void validateEvent(String actionId, String type, int version, java.util.Map<String, String> values) {
         int separator = actionId.lastIndexOf('.');
         var operation = taxi.service(actionId.substring(0, separator)).operation(actionId.substring(separator + 1));

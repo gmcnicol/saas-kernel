@@ -3,7 +3,10 @@ package io.github.gmcnicol;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
+import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
 import io.github.gmcnicol.kernel.internal.ApplicationValidationAutoConfiguration;
+import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
+import io.github.gmcnicol.kernel.presentationpack.PresentationResult;
 import io.github.gmcnicol.kernel.semanticpack.SemanticImplementation;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import org.junit.jupiter.api.Test;
@@ -121,6 +124,104 @@ class ApplicationValidationTests {
                 .withBean(SemanticPack.class, () -> () -> "assembly/sparse-semantic.properties")
                 .withBean(AuthorisationBundle.class, () -> () -> "assembly/authorisation.properties")
                 .run(context -> assertThat(context).hasNotFailed());
+    }
+
+    @Test
+    void acceptsCompatiblePresentationPack() {
+        validApplication("assembly/presentation.properties")
+                .run(context -> assertThat(context).hasNotFailed());
+    }
+
+    @Test
+    void rejectsPresentationFieldOutsideAuthorisationModel() {
+        validApplication("assembly/leaked-presentation.properties")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("Presentation Pack references unauthorised field: test.Entity.secret");
+                });
+    }
+
+    @Test
+    void rejectsPresentationPackWithoutPromisedOfferInput() {
+        validApplication("assembly/omitted-offer-presentation.properties")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("Presentation Pack omits promised Action Offer input: test.SampleInput");
+                });
+    }
+
+    @Test
+    void rejectsIncompatiblePresentationEnvelopeVersion() {
+        validApplication("assembly/incompatible-presentation.properties")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("Presentation Pack manifest has unsupported envelope-version: 2");
+                });
+    }
+
+    @Test
+    void rejectsUnknownPresentationSemanticReference() {
+        validApplication("assembly/unknown-presentation.properties")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("Presentation Pack references unknown Fact: test.MissingFact");
+                });
+    }
+
+    @Test
+    void rejectsDuplicatePresentationActionOffers() {
+        validApplication("assembly/duplicate-offer-presentation.properties")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining("Duplicate Presentation Pack Action Offer: test.Actions.act");
+                });
+    }
+
+    @Test
+    void rejectsRendererThatOmitsPromisedActionOffer() {
+        validApplication("assembly/presentation.properties", false)
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasStackTraceContaining(
+                                    "Presentation Pack renderer omits or forges promised Action Offers");
+                });
+    }
+
+    private ApplicationContextRunner validApplication(String presentationManifest) {
+        return validApplication(presentationManifest, true);
+    }
+
+    private ApplicationContextRunner validApplication(String presentationManifest, boolean renderOffers) {
+        return contextRunner
+                .withBean(SemanticPack.class, () -> () -> "assembly/semantic.properties")
+                .withBean(AuthorisationBundle.class, () -> () -> "assembly/authorisation.properties")
+                .withBean(AuthorisationModel.class, () -> new AuthorisationModel() {
+                    @Override public String subjectType() { return "test.Entity"; }
+                    @Override public String resourceType() { return "Entity"; }
+                    @Override public java.util.Map<String, String> fields() {
+                        return java.util.Map.of("test.Entity.name", "name");
+                    }
+                })
+                .withBean(PresentationPack.class, () -> PresentationPack.of(
+                        presentationManifest, envelope -> new PresentationResult(
+                                "", "", renderOffers
+                                        ? envelope.actionOffers().stream()
+                                                .map(offer -> offer.id())
+                                                .collect(java.util.stream.Collectors.toSet())
+                                        : java.util.Set.of())))
+                .withBean("derivation", SemanticImplementation.class,
+                        () -> SemanticImplementation.binding(SemanticImplementation.Kind.DERIVATION, "test.SampleFact"))
+                .withBean("applicability", SemanticImplementation.class,
+                        () -> SemanticImplementation.binding(
+                                SemanticImplementation.Kind.APPLICABILITY, "test.Actions.act"))
+                .withBean("handler", SemanticImplementation.class,
+                        () -> SemanticImplementation.binding(SemanticImplementation.Kind.HANDLER, "test.Actions.act"));
     }
 
     private void runInvalid(String semantic, String authorisation, String messagePrefix) {

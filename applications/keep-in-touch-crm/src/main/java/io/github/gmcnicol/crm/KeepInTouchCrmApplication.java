@@ -112,8 +112,13 @@ public class KeepInTouchCrmApplication {
     }
 
     @Bean
-    PresentationPack crmPresentationPack() {
-        return () -> "keep-in-touch-crm-default";
+    PresentationPack crmDesktopPresentationPack() {
+        return CrmPresentation.desktop();
+    }
+
+    @Bean
+    PresentationPack crmMobilePresentationPack() {
+        return CrmPresentation.mobile();
     }
 
     private static ApplicabilityPolicy followUpPolicy(String action) {

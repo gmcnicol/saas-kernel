@@ -5,12 +5,19 @@ import com.cedarpolicy.model.ValidationRequest;
 import com.cedarpolicy.model.policy.PolicySet;
 import com.cedarpolicy.model.schema.Schema;
 import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
+import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
+import io.github.gmcnicol.kernel.application.PresentationActionOffer;
+import io.github.gmcnicol.kernel.application.PresentationEnvelope;
+import io.github.gmcnicol.kernel.application.PresentationFact;
+import io.github.gmcnicol.kernel.application.Subject;
+import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.semanticpack.SemanticImplementation;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.HashSet;
@@ -18,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import lang.taxi.Compiler;
@@ -33,17 +41,23 @@ final class ApplicationValidator {
     private static final String SUPPORTED_FORMAT = "1";
 
     private final List<SemanticPack> semanticPacks;
+    private final List<PresentationPack> presentationPacks;
     private final List<AuthorisationBundle> authorisationBundles;
+    private final List<AuthorisationModel> authorisationModels;
     private final List<SemanticImplementation> semanticImplementations;
     private final ResourceLoader resourceLoader;
 
     ApplicationValidator(
             List<SemanticPack> semanticPacks,
+            List<PresentationPack> presentationPacks,
             List<AuthorisationBundle> authorisationBundles,
+            List<AuthorisationModel> authorisationModels,
             List<SemanticImplementation> semanticImplementations,
             ResourceLoader resourceLoader) {
         this.semanticPacks = semanticPacks;
+        this.presentationPacks = presentationPacks;
         this.authorisationBundles = authorisationBundles;
+        this.authorisationModels = authorisationModels;
         this.semanticImplementations = semanticImplementations;
         this.resourceLoader = resourceLoader;
     }
@@ -78,6 +92,134 @@ final class ApplicationValidator {
                 concat(concat(List.of(schemaPath), policies), optionalListProperty(authorisation, "compiled-content")),
                 requireProperty(authorisation, "Authorisation Bundle", "checksum"));
         validateCedar(schemaPath, policies);
+        validatePresentationPacks(semantic, semanticId, taxi);
+    }
+
+    private void validatePresentationPacks(Properties semantic, String semanticId, TaxiDocument taxi) {
+        Set<String> ids = new HashSet<>();
+        Set<String> authorisedFields = authorisationModels.stream()
+                .flatMap(model -> model.fields().keySet().stream())
+                .collect(Collectors.toSet());
+        Set<String> facts = bindingNames(semantic, BindingKind.FACT);
+        Set<String> actions = bindingNames(semantic, BindingKind.ACTION);
+        Set<String> payloads = bindingNames(semantic, BindingKind.PAYLOAD);
+        String semanticCompatibility = requireProperty(semantic, "Semantic Pack", "taxi-coordinate").split(":")[2];
+        for (PresentationPack pack : presentationPacks) {
+            String path = pack.manifestResource();
+            Properties manifest = loadProperties(path);
+            String id = qualified(manifest, "Presentation Pack", "id");
+            if (!ids.add(id)) {
+                throw new IllegalStateException("Duplicate Presentation Pack identity: " + id);
+            }
+            requireValue(manifest, "Presentation Pack", "format-version", SUPPORTED_FORMAT);
+            requireValue(manifest, "Presentation Pack", "envelope-version", SUPPORTED_FORMAT);
+            requireValue(manifest, "Presentation Pack", "semantic-pack", semanticId);
+            requireValue(manifest, "Presentation Pack", "semantic-pack-compatibility", semanticCompatibility);
+            verifyChecksum(path, optionalListProperty(manifest, "content"),
+                    requireProperty(manifest, "Presentation Pack", "checksum"));
+
+            Set<String> referencedActions = new HashSet<>();
+            Set<String> referencedInputs = new HashSet<>();
+            Set<String> referencedFields = new HashSet<>();
+            Set<String> referencedFacts = new HashSet<>();
+            Set<String> references = new HashSet<>();
+            for (String declaration : listProperty(manifest, "Presentation Pack", "references")) {
+                if (!references.add(declaration)) {
+                    throw new IllegalStateException("Duplicate Presentation Pack reference: " + declaration);
+                }
+                String[] parts = declaration.split("=", 2);
+                if (parts.length != 2) {
+                    throw new IllegalStateException("Malformed Presentation Pack reference: " + declaration);
+                }
+                switch (parts[0]) {
+                    case "FIELD" -> {
+                        requireReference(authorisedFields.contains(parts[1]),
+                                "Presentation Pack references unauthorised field", parts[1]);
+                        referencedFields.add(parts[1]);
+                    }
+                    case "FACT" -> {
+                        requireReference(facts.contains(parts[1]),
+                                "Presentation Pack references unknown Fact", parts[1]);
+                        referencedFacts.add(parts[1]);
+                    }
+                    case "ACTION" -> {
+                        requireReference(actions.contains(parts[1]), "Presentation Pack references unknown Action", parts[1]);
+                        referencedActions.add(parts[1]);
+                    }
+                    case "INPUT" -> {
+                        requireReference(payloads.contains(parts[1]), "Presentation Pack references unknown input", parts[1]);
+                        referencedInputs.add(parts[1]);
+                    }
+                    default -> throw new IllegalStateException(
+                            "Unknown Presentation Pack reference kind: " + parts[0]);
+                }
+            }
+            Set<String> coverage = new HashSet<>();
+            for (String action : listProperty(manifest, "Presentation Pack", "offer-coverage")) {
+                if (!coverage.add(action)) {
+                    throw new IllegalStateException("Duplicate Presentation Pack Action Offer: " + action);
+                }
+                requireReference(actions.contains(action), "Presentation Pack promises unknown Action Offer", action);
+                requireReference(referencedActions.contains(action), "Presentation Pack omits promised Action Offer", action);
+                String input = taxiInput(taxi, action);
+                requireReference(referencedInputs.contains(input),
+                        "Presentation Pack omits promised Action Offer input", input);
+            }
+            validateRenderedCoverage(pack, semanticId, coverage, referencedFields, referencedFacts, taxi);
+        }
+    }
+
+    private void validateRenderedCoverage(
+            PresentationPack pack,
+            String semanticId,
+            Set<String> coverage,
+            Set<String> fields,
+            Set<String> facts,
+            TaxiDocument taxi) {
+        List<PresentationActionOffer> offers = coverage.stream().sorted()
+                .map(action -> new PresentationActionOffer(
+                        UUID.nameUUIDFromBytes(action.getBytes(StandardCharsets.UTF_8)), action, taxiInput(taxi, action)))
+                .toList();
+        PresentationEnvelope envelope = new PresentationEnvelope(
+                1,
+                new Subject(authorisationModels.isEmpty() ? "validation.Subject"
+                        : authorisationModels.getFirst().subjectType(), "validation"),
+                new UUID(0, 0),
+                Instant.EPOCH,
+                semanticId,
+                fields.stream().collect(Collectors.toMap(field -> field, field -> "")),
+                facts.stream().sorted().map(fact -> new PresentationFact(fact, Map.of())).toList(),
+                offers);
+        try {
+            Set<UUID> expected = offers.stream().map(PresentationActionOffer::id).collect(Collectors.toSet());
+            if (!pack.render(envelope).renderedActionOffers().equals(expected)) {
+                throw new IllegalStateException("Presentation Pack renderer omits or forges promised Action Offers");
+            }
+        } catch (IllegalStateException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            throw new IllegalStateException("Presentation Pack renderer rejected its declared references", exception);
+        }
+    }
+
+    private static Set<String> bindingNames(Properties semantic, BindingKind kind) {
+        return listProperty(semantic, "Semantic Pack", "bindings").stream()
+                .map(binding -> binding.split("=", 2))
+                .filter(parts -> parts.length == 2 && parts[0].equals(kind.name()))
+                .map(parts -> parts[1])
+                .collect(Collectors.toSet());
+    }
+
+    private static String taxiInput(TaxiDocument taxi, String action) {
+        int separator = action.lastIndexOf('.');
+        return taxi.service(action.substring(0, separator))
+                .operation(action.substring(separator + 1))
+                .getParameterType(0)
+                .getQualifiedName();
+    }
+
+    private static void requireReference(boolean valid, String message, String reference) {
+        if (!valid) throw new IllegalStateException(message + ": " + reference);
     }
 
     private TaxiDocument compileTaxi(List<String> sources) {

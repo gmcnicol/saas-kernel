@@ -14,6 +14,7 @@ import io.github.gmcnicol.kernel.application.W3cTraceContext;
 import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.Subject;
+import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.internal.CurrentExecutionBasisTest;
 import java.sql.DriverManager;
 import java.nio.charset.StandardCharsets;
@@ -23,6 +24,8 @@ import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -30,6 +33,11 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.test.web.servlet.MockMvc;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -37,6 +45,7 @@ import org.testcontainers.utility.DockerImageName;
 
 @Testcontainers
 @SpringBootTest
+@AutoConfigureMockMvc
 class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
 
     @Container
@@ -57,6 +66,9 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
     @Autowired Kernel kernel;
     @Autowired JdbcTemplate jdbc;
     @Autowired PlatformTransactionManager transactionManager;
+    @Autowired MockMvc mvc;
+    @Autowired @Qualifier("crmDesktopPresentationPack") PresentationPack desktopPresentation;
+    @Autowired @Qualifier("crmMobilePresentationPack") PresentationPack mobilePresentation;
 
     @Test
     void derivesDueFollowUpAndThreeApplicableActionsReproducibly() {
@@ -145,7 +157,12 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         var correction = kernel.accept(snoozeOffer.id(), UUID.randomUUID(), new CandidatePayload(
                 "io.github.gmcnicol.crm.SnoozeFollowUpInput", 1, Map.of("until", correctedDue.toString())));
         assertThat(processUntil(correction.id(), firstDue.plusSeconds(1)).status()).isEqualTo(IntentStatus.SUCCEEDED);
-        assertThat(kernel.processNextReevaluation(firstDue.plusSeconds(1)))
+        var correctedSnapshot = java.util.stream.IntStream.range(0, 100)
+                .mapToObj(ignored -> kernel.processNextReevaluation(firstDue.plusSeconds(1)))
+                .flatMap(Optional::stream)
+                .filter(snapshot -> snapshot.subject().equals(subject))
+                .findFirst();
+        assertThat(correctedSnapshot)
                 .hasValueSatisfying(snapshot -> {
                     assertThat(snapshot.projectedStateVersion()).isEqualTo(201);
                     assertThat(snapshot.facts()).isEmpty();
@@ -359,6 +376,73 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         assertThat(viewer.facts()).extracting(fact -> fact.type())
                 .containsExactly("io.github.gmcnicol.crm.FollowUpDue");
         assertThat(viewer.actionOffers()).isEmpty();
+    }
+
+    @Test
+    void rendersDistinctAuthorisedCrmExperiencesAndInvokesOpaqueOffer() throws Exception {
+        var subject = new Subject("crm.Contact", "presented-alex");
+        var evaluatedAt = Instant.parse("2026-08-15T10:00:00Z");
+        var snapshot = kernel.evaluate(new ProjectedState("tenant-one", subject, 20, Map.of(
+                "displayName", "Alex <Morgan>",
+                "privateNote", "never render",
+                "followUpDueAt", "2026-08-15T09:00:00Z",
+                "followUpCompleted", "false")), evaluatedAt);
+        var presentedAt = Instant.parse("2026-08-15T10:01:00Z");
+        var envelope = kernel.present(
+                "tenant-one", snapshot.id(), new Principal("Owner", "gareth"), presentedAt);
+
+        assertThat(envelope.version()).isEqualTo(1);
+        assertThat(envelope.subject()).isEqualTo(subject);
+        assertThat(envelope.evaluationId()).isEqualTo(snapshot.id());
+        assertThat(envelope.evaluatedAt()).isEqualTo(evaluatedAt);
+        assertThat(envelope.semanticPackId()).isEqualTo("io.github.gmcnicol.crm.semantic");
+        assertThat(envelope.fields()).containsOnlyKeys("io.github.gmcnicol.crm.Contact.displayName")
+                .doesNotContainValue("never render");
+        assertThat(envelope.actionOffers()).extracting(offer -> offer.inputType()).containsExactlyInAnyOrder(
+                "io.github.gmcnicol.crm.RecordInteractionInput",
+                "io.github.gmcnicol.crm.SnoozeFollowUpInput",
+                "io.github.gmcnicol.crm.CompleteFollowUpInput");
+
+        var desktop = desktopPresentation.render(envelope);
+        var mobile = mobilePresentation.render(envelope);
+        assertThat(desktop.html()).contains("Relationship workspace", "Alex &lt;Morgan&gt;")
+                .doesNotContain("never render");
+        assertThat(mobile.html()).contains("Next relationship").doesNotContain("Relationship workspace");
+        assertThat(desktop.eventStream()).startsWith("event: datastar-patch-elements\n");
+        assertThat(desktop.renderedActionOffers()).containsExactlyInAnyOrderElementsOf(
+                envelope.actionOffers().stream().map(offer -> offer.id()).toList());
+
+        var viewerEnvelope = kernel.present(
+                "tenant-one", snapshot.id(), new Principal("Viewer", "guest"), presentedAt);
+        assertThat(viewerEnvelope.actionOffers()).isEmpty();
+        assertThat(mobilePresentation.render(viewerEnvelope).html()).doesNotContain("<form");
+
+        var offer = envelope.actionOffers().stream()
+                .filter(candidate -> candidate.actionId().endsWith("recordInteraction"))
+                .findFirst().orElseThrow();
+        var intentId = UUID.randomUUID();
+        mvc.perform(post("/presentation/intents/{offerId}", offer.id())
+                        .contentType("application/x-www-form-urlencoded")
+                        .param("intentId", intentId.toString())
+                        .param("payloadType", offer.inputType())
+                        .param("payloadVersion", "1")
+                        .param("note", "Spoke through rendered control"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith("text/event-stream"))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("datastar-patch-elements")));
+        assertThat(kernel.findIntents(new IntentQuery(
+                "tenant-one", Optional.of(IntentStatus.PENDING), Optional.of(subject),
+                Optional.of(intentId), Optional.empty()))).singleElement();
+
+        mvc.perform(get("/presentation/crm/desktop/events")
+                        .header("X-Tenant-Id", "tenant-one")
+                        .header("X-Principal-Type", "Owner")
+                        .header("X-Principal-Id", "gareth")
+                        .param("snapshotId", snapshot.id().toString())
+                        .param("at", presentedAt.toString()))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith("text/event-stream"))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("Relationship workspace")));
     }
 
     @Test

@@ -12,6 +12,8 @@ public interface Kernel {
 
     AuthorisationEnvelope authorise(String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt);
 
+    PresentationEnvelope present(String tenantId, UUID snapshotId, Principal principal, Instant presentedAt);
+
     Intent accept(UUID actionOfferId, UUID intentId, CandidatePayload payload);
 
     Optional<Intent> processNext(Instant processedAt);

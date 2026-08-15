@@ -20,9 +20,11 @@ import java.util.UUID;
 import io.github.gmcnicol.kernel.application.RetryableIntentException;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
+import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -31,9 +33,15 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
+import org.springframework.test.web.servlet.MockMvc;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @Testcontainers
 @SpringBootTest
+@AutoConfigureMockMvc
 class ApplicationEvaluationTests {
 
     @Container
@@ -52,6 +60,8 @@ class ApplicationEvaluationTests {
     }
 
     @Autowired Kernel kernel;
+    @Autowired MockMvc mvc;
+    @Autowired PresentationPack presentation;
 
     @MockitoSpyBean("recordRecordsReceivedHandler")
     IntentHandler recordsHandler;
@@ -179,6 +189,52 @@ class ApplicationEvaluationTests {
         assertThat(client.facts()).extracting(fact -> fact.type())
                 .containsExactly("io.github.gmcnicol.ledgerling.FilingDueSoon");
         assertThat(client.actionOffers()).isEmpty();
+    }
+
+    @Test
+    void rendersLedgerlingSseAndInvokesOnlyOpaqueAuthorisedOffer() throws Exception {
+        var subject = new Subject("ledgerling.Filing", "presented-acme");
+        var snapshot = kernel.evaluate(new ProjectedState("tenant-one", subject, 10, Map.of(
+                "status", "Waiting <for> records",
+                "staffNote", "private filing note",
+                "filingDueAt", "2026-08-20T09:00:00Z",
+                "recordsOutstanding", "true",
+                "documentRequestId", "request-presented")), Instant.parse("2026-08-15T10:00:00Z"));
+        var presentedAt = Instant.parse("2026-08-15T10:01:00Z");
+        var staff = kernel.present(
+                "tenant-one", snapshot.id(), new Principal("Staff", "accountant"), presentedAt);
+        var client = kernel.present(
+                "tenant-one", snapshot.id(), new Principal("Client", "acme"), presentedAt);
+
+        var rendered = presentation.render(staff);
+        assertThat(rendered.html()).contains("Filing operations", "Waiting &lt;for&gt; records")
+                .doesNotContain("principal", "semanticPackChecksum", "stateVersion");
+        assertThat(rendered.eventStream()).startsWith("event: datastar-patch-elements\n");
+        assertThat(presentation.render(client).html()).doesNotContain("<form");
+
+        var offer = staff.actionOffers().getFirst();
+        var intentId = UUID.randomUUID();
+        mvc.perform(post("/presentation/intents/{offerId}", offer.id())
+                        .contentType("application/x-www-form-urlencoded")
+                        .param("intentId", intentId.toString())
+                        .param("payloadType", offer.inputType())
+                        .param("payloadVersion", "1")
+                        .param("receivedAt", "2026-08-15T10:02:00Z"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith("text/event-stream"));
+        assertThat(kernel.findIntents(new IntentQuery(
+                "tenant-one", Optional.of(IntentStatus.PENDING), Optional.of(subject),
+                Optional.of(intentId), Optional.empty()))).singleElement();
+
+        mvc.perform(get("/presentation/ledgerling/events")
+                        .header("X-Tenant-Id", "tenant-one")
+                        .header("X-Principal-Type", "Staff")
+                        .header("X-Principal-Id", "accountant")
+                        .param("snapshotId", snapshot.id().toString())
+                        .param("at", presentedAt.toString()))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith("text/event-stream"))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("Filing operations")));
     }
 
     @Test
