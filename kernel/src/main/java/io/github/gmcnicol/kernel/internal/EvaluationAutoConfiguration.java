@@ -2,7 +2,6 @@ package io.github.gmcnicol.kernel.internal;
 
 import com.cedarpolicy.model.policy.PolicySet;
 import com.cedarpolicy.model.schema.Schema;
-import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.ApplicationVersion;
 import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
 import io.github.gmcnicol.kernel.authorisation.AuthorisationModel;
@@ -36,13 +35,15 @@ public class EvaluationAutoConfiguration {
 
     @Bean
     @DependsOn({"applicationValidator", "runtimeRoleValidator"})
-    Kernel kernel(
+    DefaultKernel kernel(
             JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager,
             AuthorisationService authorisation,
             IntentService intents,
             IntentExecutionService execution,
             IntentQueryService intentQueries,
+            IntentWorkerProperties worker,
+            Clock clock,
             SemanticPackVersion semanticPackVersion,
             @Value("${spring.application.name}") String applicationId,
             @Value("${spring.application.version}") String applicationVersion,
@@ -55,6 +56,8 @@ public class EvaluationAutoConfiguration {
                 intents,
                 execution,
                 intentQueries,
+                worker,
+                clock,
                 new ApplicationVersion(applicationId, applicationVersion),
                 kernelVersion(),
                 semanticPackVersion,
@@ -95,6 +98,11 @@ public class EvaluationAutoConfiguration {
     @Bean
     IntentWorker intentWorker(IntentExecutionService execution, IntentWorkerProperties policy, Clock clock) {
         return new IntentWorker(execution, policy, clock);
+    }
+
+    @Bean
+    ReevaluationWorker reevaluationWorker(DefaultKernel kernel, IntentWorkerProperties policy, Clock clock) {
+        return new ReevaluationWorker(kernel, policy, clock);
     }
 
     @Bean

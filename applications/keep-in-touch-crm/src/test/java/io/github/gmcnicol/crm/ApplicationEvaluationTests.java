@@ -107,6 +107,110 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         assertThat(snapshot.facts()).isEmpty();
         assertThat(snapshot.applicableActions()).isEmpty();
         assertThat(snapshot.reevaluateAt()).contains(dueAt);
+        Integer scheduled = new TransactionTemplate(transactionManager).execute(status -> {
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+            return jdbc.queryForObject("""
+                    SELECT count(*) FROM kernel.reevaluation_request
+                    WHERE subject_type = 'crm.Contact' AND subject_id = 'alex'
+                      AND expected_state_version = 8 AND semantic_pack_id = ?
+                      AND semantic_pack_checksum = ? AND due_at = ?
+                    """, Integer.class, snapshot.semanticPackVersion().id(),
+                    snapshot.semanticPackVersion().checksum(), java.sql.Timestamp.from(dueAt));
+        });
+        assertThat(scheduled).isEqualTo(1);
+    }
+
+    @Test
+    void reevaluatesTimeOnlyChangeAndSupersedesCorrectedWork() {
+        var subject = new Subject("crm.Contact", "temporal-alex");
+        var firstDue = Instant.parse("2035-08-15T11:00:00Z");
+        for (int request = 0; request < 100; request++) {
+            kernel.processNextReevaluation(firstDue.minusSeconds(3_600));
+        }
+        var initial = kernel.evaluate(new ProjectedState("tenant-one", subject, 200, Map.of(
+                "followUpDueAt", firstDue.toString(), "followUpCompleted", "false")),
+                Instant.parse("2035-08-15T10:00:00Z"));
+        assertThat(initial.facts()).isEmpty();
+        assertThat(kernel.processNextReevaluation(firstDue.minusSeconds(1))).isEmpty();
+
+        var correctedDue = Instant.parse("2035-08-15T12:00:00Z");
+        kernel.evaluate(new ProjectedState("tenant-one", subject, 201, Map.of(
+                "followUpDueAt", correctedDue.toString(), "followUpCompleted", "false")),
+                Instant.parse("2035-08-15T10:05:00Z"));
+        assertThat(kernel.processNextReevaluation(firstDue)).isEmpty();
+        assertThat(kernel.processNextReevaluation(correctedDue.plusSeconds(3_600)))
+                .hasValueSatisfying(snapshot -> assertThat(snapshot.facts())
+                        .extracting(fact -> fact.type())
+                        .containsExactly("io.github.gmcnicol.crm.FollowUpDue"));
+        assertThat(kernel.processNextReevaluation(correctedDue.plusSeconds(3_600))).isEmpty();
+
+        var expiresAt = correctedDue.plusSeconds(7_200);
+        var expiring = kernel.evaluate(new ProjectedState("tenant-one", new Subject(
+                "crm.Contact", "expiring-alex"), 202, Map.of(
+                "followUpDueAt", correctedDue.toString(), "followUpExpiresAt", expiresAt.toString(),
+                "followUpCompleted", "false")), correctedDue.plusSeconds(1));
+        assertThat(expiring.reevaluateAt()).contains(expiresAt);
+
+        var concurrentDue = Instant.parse("2035-08-16T09:00:00Z");
+        kernel.evaluate(new ProjectedState("tenant-one", new Subject(
+                "crm.Contact", "concurrent-temporal-alex"), 203, Map.of(
+                "followUpDueAt", concurrentDue.toString(), "followUpCompleted", "false")),
+                concurrentDue.minusSeconds(3_600));
+        var first = java.util.concurrent.CompletableFuture.supplyAsync(
+                () -> kernel.processNextReevaluation(concurrentDue));
+        var second = java.util.concurrent.CompletableFuture.supplyAsync(
+                () -> kernel.processNextReevaluation(concurrentDue));
+        assertThat(java.util.stream.Stream.of(first.join(), second.join())
+                .flatMap(Optional::stream)
+                .filter(snapshot -> snapshot.subject().id().equals("concurrent-temporal-alex"))
+                .count())
+                .isEqualTo(1);
+
+        var staleDue = Instant.parse("2035-08-17T09:00:00Z");
+        kernel.evaluate(new ProjectedState("tenant-one", new Subject(
+                "crm.Contact", "stale-temporal-alex"), 204, Map.of(
+                "followUpDueAt", staleDue.toString(), "followUpCompleted", "false")),
+                staleDue.minusSeconds(3_600));
+        changeCurrentSemanticPack();
+        assertThat(kernel.processNextReevaluation(staleDue)).isEmpty();
+        restoreCurrentSemanticPack();
+        assertThat(kernel.processNextReevaluation(staleDue)).isEmpty();
+    }
+
+    @Test
+    void reclaimsExpiredReevaluationLease() throws Exception {
+        var dueAt = Instant.parse("2037-08-15T09:00:00Z");
+        for (int request = 0; request < 100; request++) {
+            kernel.processNextReevaluation(dueAt.minusSeconds(1));
+        }
+        var subject = new Subject("crm.Contact", "leased-temporal-alex");
+        kernel.evaluate(new ProjectedState("tenant-one", subject, 205, Map.of(
+                "followUpDueAt", dueAt.toString(), "followUpCompleted", "false")),
+                dueAt.minusSeconds(3_600));
+        Instant claimedAt = Instant.now();
+        try (var admin = DriverManager.getConnection(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+                var claim = admin.prepareStatement(
+                        "SELECT subject_id FROM kernel.claim_due_reevaluation(?, ?, ?, ?)");
+                var expire = admin.prepareStatement("""
+                        UPDATE kernel.reevaluation_request SET lease_until = ?
+                        WHERE subject_type = 'crm.Contact' AND subject_id = 'leased-temporal-alex'
+                        """)) {
+            claim.setObject(1, UUID.randomUUID());
+            claim.setTimestamp(2, java.sql.Timestamp.from(dueAt));
+            claim.setTimestamp(3, java.sql.Timestamp.from(claimedAt));
+            claim.setTimestamp(4, java.sql.Timestamp.from(claimedAt.plusSeconds(30)));
+            assertThat(claim.executeQuery()).satisfies(result -> {
+                assertThat(result.next()).isTrue();
+                assertThat(result.getString("subject_id")).isEqualTo(subject.id());
+            });
+            assertThat(kernel.processNextReevaluation(dueAt)).isEmpty();
+            expire.setTimestamp(1, java.sql.Timestamp.from(Instant.EPOCH));
+            assertThat(expire.executeUpdate()).isEqualTo(1);
+        }
+        assertThat(kernel.processNextReevaluation(dueAt))
+                .hasValueSatisfying(snapshot -> assertThat(snapshot.subject()).isEqualTo(subject));
+        assertThat(kernel.processNextReevaluation(dueAt)).isEmpty();
     }
 
     @Test
@@ -306,7 +410,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                               AND expected_state_version = 41
                             """, Integer.class));
         });
-        assertThat(persisted).containsExactly(1, 1, 1);
+        assertThat(persisted).containsExactly(1, 1, 0);
     }
 
     @Test

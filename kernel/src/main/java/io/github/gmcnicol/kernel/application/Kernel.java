@@ -18,6 +18,8 @@ public interface Kernel {
 
     List<Intent> processDue(Instant processedAt);
 
+    Optional<EvaluationSnapshot> processNextReevaluation(Instant evaluatedAt);
+
     List<IntentView> findIntents(IntentQuery query);
 
     List<IntentAuditEntry> findIntentAudit(IntentQuery query);

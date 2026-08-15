@@ -94,6 +94,33 @@ class ApplicationEvaluationTests {
     }
 
     @Test
+    void catchesUpDeadlineAndSupersedesCorrectionThroughApplicationSeam() {
+        var subject = new Subject("ledgerling.Filing", "temporal-acme");
+        var firstDue = Instant.parse("2036-09-01T09:00:00Z");
+        var firstChange = firstDue.minusSeconds(7 * 24 * 60 * 60);
+        for (int request = 0; request < 100; request++) {
+            kernel.processNextReevaluation(firstChange.minusSeconds(86_400));
+        }
+        var initial = kernel.evaluate(new ProjectedState("tenant-one", subject, 200, Map.of(
+                "filingDueAt", firstDue.toString(), "recordsOutstanding", "false",
+                "preparationStarted", "false")), Instant.parse("2036-08-01T09:00:00Z"));
+        assertThat(initial.reevaluateAt()).contains(firstChange);
+        assertThat(kernel.processNextReevaluation(firstChange.minusSeconds(1))).isEmpty();
+
+        var correctedDue = Instant.parse("2036-10-01T09:00:00Z");
+        var correctedChange = correctedDue.minusSeconds(7 * 24 * 60 * 60);
+        kernel.evaluate(new ProjectedState("tenant-one", subject, 201, Map.of(
+                "filingDueAt", correctedDue.toString(), "recordsOutstanding", "false",
+                "preparationStarted", "false")), Instant.parse("2036-08-02T09:00:00Z"));
+        assertThat(kernel.processNextReevaluation(firstChange)).isEmpty();
+        assertThat(kernel.processNextReevaluation(correctedChange.plusSeconds(86_400)))
+                .hasValueSatisfying(snapshot -> assertThat(snapshot.facts())
+                        .extracting(fact -> fact.type())
+                        .containsExactly("io.github.gmcnicol.ledgerling.FilingDueSoon"));
+        assertThat(kernel.processNextReevaluation(correctedChange.plusSeconds(86_400))).isEmpty();
+    }
+
+    @Test
     void authorisesStaffButGivesClientNoActionOffers() {
         var snapshot = kernel.evaluate(new ProjectedState(
                 "tenant-one", new Subject("ledgerling.Filing", "acme-2026"), 5, Map.of(
@@ -125,7 +152,7 @@ class ApplicationEvaluationTests {
         var subject = new Subject("ledgerling.Filing", "intent-acme");
         var snapshot = kernel.evaluate(new ProjectedState(
                 "tenant-one", subject, 30, Map.of(
-                        "filingDueAt", "2026-08-20T09:00:00Z",
+                        "filingDueAt", "2026-08-30T09:00:00Z",
                         "recordsOutstanding", "true",
                         "documentRequestId", "request-84")), Instant.parse("2026-08-15T10:00:00Z"));
         var offer = kernel.authorise(
@@ -143,13 +170,10 @@ class ApplicationEvaluationTests {
 
         var completed = processUntil(intent.id(), Instant.parse("2026-08-15T23:03:00Z"));
         assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
-        var reevaluated = kernel.evaluate(new ProjectedState("tenant-one", subject, 31, Map.of(
-                "filingDueAt", "2026-08-20T09:00:00Z",
-                "recordsOutstanding", "false",
-                "documentRequestId", "request-84",
-                "recordsReceivedAt", "2026-08-15T10:02:00Z")), Instant.parse("2026-08-15T10:04:00Z"));
+        var reevaluated = kernel.processNextReevaluation(Instant.parse("2026-08-15T23:04:00Z")).orElseThrow();
         assertThat(reevaluated.applicableActions()).singleElement().satisfies(action -> assertThat(action.actionId())
                 .isEqualTo("io.github.gmcnicol.ledgerling.LedgerlingActions.startPreparation"));
+        assertThat(reevaluated.reevaluateAt()).contains(Instant.parse("2026-08-23T09:00:00Z"));
     }
 
     @Test

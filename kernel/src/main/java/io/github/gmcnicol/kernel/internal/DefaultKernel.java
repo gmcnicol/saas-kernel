@@ -20,6 +20,7 @@ import java.sql.Timestamp;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
@@ -37,6 +38,8 @@ final class DefaultKernel implements Kernel {
     private final IntentService intents;
     private final IntentExecutionService execution;
     private final IntentQueryService intentQueries;
+    private final IntentWorkerProperties worker;
+    private final Clock clock;
     private final ApplicationVersion applicationVersion;
     private final String kernelVersion;
     private final SemanticPackVersion semanticPackVersion;
@@ -50,6 +53,8 @@ final class DefaultKernel implements Kernel {
             IntentService intents,
             IntentExecutionService execution,
             IntentQueryService intentQueries,
+            IntentWorkerProperties worker,
+            Clock clock,
             ApplicationVersion applicationVersion,
             String kernelVersion,
             SemanticPackVersion semanticPackVersion,
@@ -61,6 +66,8 @@ final class DefaultKernel implements Kernel {
         this.intents = intents;
         this.execution = execution;
         this.intentQueries = intentQueries;
+        this.worker = worker;
+        this.clock = clock;
         this.applicationVersion = applicationVersion;
         this.kernelVersion = kernelVersion;
         this.semanticPackVersion = semanticPackVersion;
@@ -99,6 +106,26 @@ final class DefaultKernel implements Kernel {
     }
 
     @Override
+    public Optional<EvaluationSnapshot> processNextReevaluation(Instant evaluatedAt) {
+        return Optional.ofNullable(processReevaluation(evaluatedAt).snapshot());
+    }
+
+    boolean processNextReevaluationWork(Instant evaluatedAt) {
+        return processReevaluation(evaluatedAt).claimed();
+    }
+
+    private ReevaluationOutcome processReevaluation(Instant evaluatedAt) {
+        if (evaluatedAt == null) throw new IllegalArgumentException("Reevaluation time must be explicit");
+        UUID token = UUID.randomUUID();
+        Instant claimedAt = clock.instant();
+        ReevaluationClaim claim = transactions.execute(status -> claimReevaluation(
+                token, evaluatedAt, claimedAt, claimedAt.plus(worker.leaseDuration())));
+        if (claim == null) return new ReevaluationOutcome(false, null);
+        return new ReevaluationOutcome(
+                true, transactions.execute(status -> reevaluate(claim, token, evaluatedAt)));
+    }
+
+    @Override
     public List<IntentView> findIntents(IntentQuery query) {
         return intentQueries.intents(query);
     }
@@ -128,8 +155,10 @@ final class DefaultKernel implements Kernel {
                 .filter(policy -> policy.isApplicable(state, facts))
                 .map(policy -> new ApplicableAction(policy.target(), policy.id()))
                 .toList();
-        Optional<Instant> reevaluateAt = results.stream()
-                .flatMap(result -> result.reevaluateAt().stream())
+        Optional<Instant> reevaluateAt = java.util.stream.Stream.concat(
+                        results.stream().flatMap(result -> result.reevaluateAt().stream()),
+                        policies.stream().flatMap(policy -> policy.nextChange(state, facts, evaluatedAt).stream()))
+                .filter(evaluatedAt::isBefore)
                 .min(Comparator.naturalOrder());
         var snapshot = new EvaluationSnapshot(
                 UUID.randomUUID(),
@@ -144,7 +173,74 @@ final class DefaultKernel implements Kernel {
                 facts,
                 actions,
                 reevaluateAt);
-        return persist(snapshot);
+        EvaluationSnapshot persisted = persist(snapshot);
+        scheduleReevaluation(persisted);
+        return persisted;
+    }
+
+    private ReevaluationClaim claimReevaluation(UUID token, Instant dueAt, Instant claimedAt, Instant claimUntil) {
+        TenantContext.assumeWorkerRole(jdbc);
+        List<ReevaluationClaim> claims = jdbc.query("""
+                SELECT tenant_id, subject_type, subject_id, expected_state_version,
+                       semantic_pack_id, semantic_pack_checksum
+                FROM kernel.claim_due_reevaluation(?, ?, ?, ?)
+                """, (result, row) -> new ReevaluationClaim(
+                        result.getString("tenant_id"),
+                        new io.github.gmcnicol.kernel.application.Subject(
+                                result.getString("subject_type"), result.getString("subject_id")),
+                        result.getLong("expected_state_version"), result.getString("semantic_pack_id"),
+                        result.getString("semantic_pack_checksum")),
+                token, Timestamp.from(dueAt), Timestamp.from(claimedAt), Timestamp.from(claimUntil));
+        return claims.isEmpty() ? null : claims.getFirst();
+    }
+
+    private EvaluationSnapshot reevaluate(ReevaluationClaim claim, UUID token, Instant evaluatedAt) {
+        TenantContext.assumeWorkerRole(jdbc);
+        TenantContext.useAfterRole(jdbc, claim.tenantId());
+        TenantContext.lockSubject(jdbc, claim.tenantId(), claim.subject());
+        Integer owned = jdbc.queryForObject("""
+                SELECT count(*) FROM kernel.reevaluation_request
+                WHERE tenant_id = ? AND subject_type = ? AND subject_id = ?
+                  AND lease_token = ? AND lease_until >= ?
+                """, Integer.class, claim.tenantId(), claim.subject().type(), claim.subject().id(), token,
+                Timestamp.from(clock.instant()));
+        if (owned == null || owned != 1) return null;
+        ProjectedState state = execution.currentState(claim.tenantId(), claim.subject());
+        if (state.version() != claim.expectedStateVersion()
+                || !semanticPackVersion.id().equals(claim.semanticPackId())
+                || !semanticPackVersion.checksum().equals(claim.semanticPackChecksum())) {
+            jdbc.update("""
+                    DELETE FROM kernel.reevaluation_request
+                    WHERE tenant_id = ? AND subject_type = ? AND subject_id = ? AND lease_token = ?
+                    """, claim.tenantId(), claim.subject().type(), claim.subject().id(), token);
+            return null;
+        }
+        return evaluateInTransaction(state, evaluatedAt);
+    }
+
+    private void scheduleReevaluation(EvaluationSnapshot snapshot) {
+        if (snapshot.reevaluateAt().isEmpty()) {
+            jdbc.update("""
+                    DELETE FROM kernel.reevaluation_request
+                    WHERE tenant_id = ? AND subject_type = ? AND subject_id = ?
+                    """, snapshot.tenantId(), snapshot.subject().type(), snapshot.subject().id());
+            return;
+        }
+        jdbc.update("""
+                INSERT INTO kernel.reevaluation_request
+                    (tenant_id, subject_type, subject_id, expected_state_version,
+                     semantic_pack_id, semantic_pack_checksum, due_at, lease_token, lease_until)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                ON CONFLICT (tenant_id, subject_type, subject_id) DO UPDATE SET
+                    expected_state_version = EXCLUDED.expected_state_version,
+                    semantic_pack_id = EXCLUDED.semantic_pack_id,
+                    semantic_pack_checksum = EXCLUDED.semantic_pack_checksum,
+                    due_at = EXCLUDED.due_at,
+                    lease_token = NULL,
+                    lease_until = NULL
+                """, snapshot.tenantId(), snapshot.subject().type(), snapshot.subject().id(),
+                snapshot.projectedStateVersion(), snapshot.semanticPackVersion().id(),
+                snapshot.semanticPackVersion().checksum(), Timestamp.from(snapshot.reevaluateAt().orElseThrow()));
     }
 
     private EvaluationSnapshot persist(EvaluationSnapshot snapshot) {
@@ -262,4 +358,13 @@ final class DefaultKernel implements Kernel {
                 VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
                 """, snapshot.id(), snapshot.tenantId(), index, action.actionId(), action.policyId());
     }
+
+    private record ReevaluationClaim(
+            String tenantId,
+            io.github.gmcnicol.kernel.application.Subject subject,
+            long expectedStateVersion,
+            String semanticPackId,
+            String semanticPackChecksum) {}
+
+    private record ReevaluationOutcome(boolean claimed, EvaluationSnapshot snapshot) {}
 }

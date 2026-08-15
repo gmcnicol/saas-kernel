@@ -166,7 +166,9 @@ final class IntentExecutionService {
                     expected_state_version = EXCLUDED.expected_state_version,
                     semantic_pack_id = EXCLUDED.semantic_pack_id,
                     semantic_pack_checksum = EXCLUDED.semantic_pack_checksum,
-                    due_at = EXCLUDED.due_at
+                    due_at = EXCLUDED.due_at,
+                    lease_token = NULL,
+                    lease_until = NULL
                 """, claim.tenantId(), stored.subject().type(), stored.subject().id(), version,
                 stored.semanticPackId(), stored.semanticPackChecksum(), Timestamp.from(processedAt));
         Instant completionTime = clock.instant();
@@ -359,7 +361,7 @@ final class IntentExecutionService {
                 intent.payloadType(), intent.payloadVersion(), values, trace, Optional.ofNullable(intent.priorIntentId())));
     }
 
-    private ProjectedState currentState(String tenantId, Subject subject) {
+    ProjectedState currentState(String tenantId, Subject subject) {
         Long version = jdbc.queryForObject("""
                 SELECT version FROM kernel.projected_state_version
                 WHERE tenant_id = ? AND subject_type = ? AND subject_id = ?

@@ -121,6 +121,9 @@ public class KeepInTouchCrmApplication {
                 action,
                 "io.github.gmcnicol.crm.followUpActions",
                 (state, facts) -> facts.stream()
-                        .anyMatch(fact -> fact.type().equals("io.github.gmcnicol.crm.FollowUpDue")));
+                        .anyMatch(fact -> fact.type().equals("io.github.gmcnicol.crm.FollowUpDue")),
+                (state, facts, evaluatedAt) -> java.util.Optional.ofNullable(state.values().get("followUpExpiresAt"))
+                        .map(Instant::parse)
+                        .filter(evaluatedAt::isBefore));
     }
 }
