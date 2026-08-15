@@ -1,0 +1,1 @@
+-- Kernel schema and history table are created by Flyway before this migration runs.

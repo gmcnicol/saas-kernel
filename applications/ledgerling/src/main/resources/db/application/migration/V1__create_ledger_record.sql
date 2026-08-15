@@ -1,6 +1,10 @@
 DO $$
 BEGIN
-    IF to_regclass('kernel.kernel_runtime_marker') IS NULL THEN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM kernel.flyway_kernel_schema_history
+        WHERE version = '1' AND success
+    ) THEN
         RAISE EXCEPTION 'Kernel migrations must run first';
     END IF;
 END $$;
