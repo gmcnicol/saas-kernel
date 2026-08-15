@@ -230,9 +230,12 @@ class ApplicationEvaluationTests {
 
         var offer = staff.actionOffers().getFirst();
         var intentId = UUID.randomUUID();
+        String traceId = "0af7651916cd43dd8448eb211c80319c";
         mvc.perform(post("/presentation/intents/{offerId}", offer.id())
                         .with(httpBasic("accountant", "test-password"))
                         .contentType("application/x-www-form-urlencoded")
+                        .header("traceparent", "00-" + traceId + "-b7ad6b7169203331-01")
+                        .header("tracestate", "vendor=value")
                         .param("intentId", intentId.toString())
                         .param("payloadType", offer.inputType())
                         .param("payloadVersion", "1")
@@ -252,11 +255,16 @@ class ApplicationEvaluationTests {
         assertThat(meters.find("kernel.event.projection.commit").timer()).isNotNull();
         assertThat(meters.find("kernel.presentation.rendering").timer()).isNotNull();
         assertThat(meters.find("kernel.intent.outcomes").tag("outcome", "succeeded").counter().count()).isPositive();
+        assertThat(meters.getMeters().stream()
+                        .filter(meter -> meter.getId().getName().startsWith("kernel."))
+                        .flatMap(meter -> meter.getId().getTags().stream()))
+                .allSatisfy(tag -> assertThat(tag.getKey()).isIn("error", "outcome", "worker"));
         assertThat(output).contains(
                         "\"tenant\":\"tenant-one\"",
                         "\"evaluation_snapshot\":\"" + snapshot.id() + "\"",
                         "\"action_offer\":\"" + offer.id() + "\"",
                         "\"intent\":\"" + intentId + "\"",
+                        "\"trace_correlation\":\"" + traceId + "\"",
                         "\"event\":")
                 .doesNotContain("2026-08-15T10:02:00Z", "private filing note");
 

@@ -437,9 +437,12 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 .filter(candidate -> candidate.actionId().endsWith("recordInteraction"))
                 .findFirst().orElseThrow();
         var intentId = UUID.randomUUID();
+        String traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
         mvc.perform(post("/presentation/intents/{offerId}", offer.id())
                         .with(httpBasic("gareth", "test-password"))
                         .contentType("application/x-www-form-urlencoded")
+                        .header("traceparent", "00-" + traceId + "-00f067aa0ba902b7-01")
+                        .header("tracestate", "vendor=value")
                         .param("intentId", intentId.toString())
                         .param("payloadType", offer.inputType())
                         .param("payloadVersion", "1")
@@ -460,11 +463,16 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         assertThat(meters.find("kernel.event.projection.commit").timer()).isNotNull();
         assertThat(meters.find("kernel.presentation.rendering").timer()).isNotNull();
         assertThat(meters.find("kernel.intent.outcomes").tag("outcome", "succeeded").counter().count()).isPositive();
+        assertThat(meters.getMeters().stream()
+                        .filter(meter -> meter.getId().getName().startsWith("kernel."))
+                        .flatMap(meter -> meter.getId().getTags().stream()))
+                .allSatisfy(tag -> assertThat(tag.getKey()).isIn("error", "outcome", "worker"));
         assertThat(output).contains(
                         "\"tenant\":\"tenant-one\"",
                         "\"evaluation_snapshot\":\"" + snapshot.id() + "\"",
                         "\"action_offer\":\"" + offer.id() + "\"",
                         "\"intent\":\"" + intentId + "\"",
+                        "\"trace_correlation\":\"" + traceId + "\"",
                         "\"event\":")
                 .doesNotContain("Spoke through rendered control", "never render");
 
@@ -657,7 +665,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
     }
 
     @Test
-    void rollsBackEveryCompletionEffectWhenAuditInsertionFails() throws Exception {
+    void rollsBackEveryCompletionEffectWhenAuditInsertionFails(CapturedOutput output) throws Exception {
         assertThat(kernel.processNext(Instant.EPOCH)).isEmpty();
         var processedAt = Instant.parse("2026-08-15T23:00:00Z");
         while (kernel.processNext(processedAt).isPresent()) {
@@ -720,6 +728,9 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                             Integer.class, intent.id()));
         });
         assertThat(persisted).containsExactly(0, 0, 0, 1, 3);
+        assertThat(output.getOut().lines().filter(line -> line.contains("\"message\":\"event_committed\"")
+                        && line.contains("\"intent\":\"" + intent.id() + "\"")))
+                .isEmpty();
     }
 
     @Test

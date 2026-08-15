@@ -8,10 +8,13 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationHandler;
 import io.micrometer.observation.ObservationRegistry;
+import io.micrometer.tracing.Tracer;
+import io.micrometer.tracing.test.simple.SimpleTracer;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 class KernelTelemetryTests {
 
@@ -24,7 +27,7 @@ class KernelTelemetryTests {
         });
         var meters = new SimpleMeterRegistry();
         var telemetry = new KernelTelemetry(
-                observations, meters, new ApplicationVersion("test.app", "1"), "1");
+                observations, meters, Tracer.NOOP, new ApplicationVersion("test.app", "1"), "1");
         var ran = new AtomicBoolean();
 
         String result = telemetry.observe("kernel.test", () -> {
@@ -57,27 +60,42 @@ class KernelTelemetryTests {
     @Test
     void workerObservationIsANewRootLinkedToIncomingTrace() {
         var observations = ObservationRegistry.create();
-        var stopped = new AtomicReference<Observation.Context>();
-        observations.observationConfig().observationHandler(new ObservationHandler<>() {
-            @Override public void onStop(Observation.Context context) {
-                if (context.getName().equals("kernel.intent.attempt")) stopped.set(context);
-            }
-            @Override public boolean supportsContext(Observation.Context context) { return true; }
-        });
+        var tracer = new SimpleTracer();
         var telemetry = new KernelTelemetry(
-                observations, new SimpleMeterRegistry(), new ApplicationVersion("test.app", "1"), "1");
+                observations, new SimpleMeterRegistry(), tracer, new ApplicationVersion("test.app", "1"), "1");
         String traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
-        Observation parent = Observation.start("acceptance", observations);
-        try (Observation.Scope ignored = parent.openScope()) {
+        var parent = tracer.nextSpan().name("acceptance").start();
+        try (Tracer.SpanInScope ignored = tracer.withSpan(parent)) {
             assertThat(telemetry.observeLinked("kernel.intent.attempt", traceparent, () -> "done"))
                     .isEqualTo("done");
         } finally {
-            parent.stop();
+            parent.end();
         }
 
-        assertThat(stopped.get().getParentObservation()).isNull();
-        assertThat(stopped.get().getHighCardinalityKeyValue("trace.link").getValue())
-                .isEqualTo("4bf92f3577b34da6a3ce929d0e0e4736");
+        var worker = tracer.getSpans().stream()
+                .filter(span -> span.getName().equals("kernel.intent.attempt"))
+                .findFirst().orElseThrow();
+        assertThat(worker.getParentId()).isBlank();
+        assertThat(worker.getTraceId()).isNotEqualTo("4bf92f3577b34da6a3ce929d0e0e4736");
+        assertThat(worker.getLinks()).singleElement().satisfies(link -> {
+            assertThat(link.getTraceContext().traceId()).isEqualTo("4bf92f3577b34da6a3ce929d0e0e4736");
+            assertThat(link.getTraceContext().spanId()).isEqualTo("00f067aa0ba902b7");
+        });
+    }
+
+    @Test
+    void rollbackDropsDeferredSuccessSignal() {
+        var ran = new AtomicBoolean();
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            KernelTelemetry.afterCommit(() -> ran.set(true));
+            TransactionSynchronizationManager.getSynchronizations()
+                    .forEach(synchronization -> synchronization.afterCompletion(
+                            TransactionSynchronization.STATUS_ROLLED_BACK));
+            assertThat(ran).isFalse();
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
     }
 }

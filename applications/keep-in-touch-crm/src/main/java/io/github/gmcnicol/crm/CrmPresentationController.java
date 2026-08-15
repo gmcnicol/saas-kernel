@@ -3,12 +3,14 @@ package io.github.gmcnicol.crm;
 import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.Principal;
+import io.github.gmcnicol.kernel.application.W3cTraceContext;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.presentationpack.PresentationResult;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
@@ -19,6 +21,7 @@ import org.springframework.util.MultiValueMap;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -61,7 +64,11 @@ final class CrmPresentationController {
             path = "/presentation/intents/{offerId}",
             consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE,
             produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    ResponseEntity<String> invoke(@PathVariable UUID offerId, @RequestParam MultiValueMap<String, String> form) {
+    ResponseEntity<String> invoke(
+            @PathVariable UUID offerId,
+            @RequestParam MultiValueMap<String, String> form,
+            @RequestHeader(name = "traceparent", required = false) String traceparent,
+            @RequestHeader(name = "tracestate", required = false) String tracestate) {
         UUID intentId = UUID.fromString(single(form, "intentId"));
         String payloadType = single(form, "payloadType");
         int payloadVersion = Integer.parseInt(single(form, "payloadVersion"));
@@ -72,7 +79,8 @@ final class CrmPresentationController {
                 values.put(name, entries.getFirst());
             }
         });
-        var intent = kernel.accept(offerId, intentId, new CandidatePayload(payloadType, payloadVersion, values));
+        var intent = kernel.accept(offerId, intentId, new CandidatePayload(
+                payloadType, payloadVersion, values, trace(traceparent, tracestate), Optional.empty()));
         String html = "<section id=\"intent-result\"><p>Intent " + intent.id()
                 + " accepted: " + intent.status() + "</p></section>";
         return ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM)
@@ -125,5 +133,11 @@ final class CrmPresentationController {
         var values = form.get(name);
         if (values == null || values.size() != 1) throw new IllegalArgumentException("Missing or duplicate " + name);
         return values.getFirst();
+    }
+
+    private static Optional<W3cTraceContext> trace(String traceparent, String tracestate) {
+        return traceparent == null && tracestate == null
+                ? Optional.empty()
+                : Optional.of(new W3cTraceContext(traceparent, tracestate));
     }
 }

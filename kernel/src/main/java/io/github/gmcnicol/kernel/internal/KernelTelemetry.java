@@ -8,37 +8,73 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
+import io.micrometer.tracing.Link;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
 import java.time.Duration;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 final class KernelTelemetry {
 
     private static final Logger LOG = LoggerFactory.getLogger("io.github.gmcnicol.kernel.workflow");
     private final ObservationRegistry observations;
     private final MeterRegistry meters;
+    private final Tracer tracer;
     private final ApplicationVersion application;
     private final String kernelVersion;
 
     KernelTelemetry(
             ObservationRegistry observations,
             MeterRegistry meters,
+            Tracer tracer,
             ApplicationVersion application,
             String kernelVersion) {
         this.observations = observations;
         this.meters = meters;
+        this.tracer = tracer;
         this.application = application;
         this.kernelVersion = kernelVersion;
     }
 
     <T> T observe(String name, Supplier<T> work) {
-        return observe(name, null, false, work);
+        return observe(name, false, work);
     }
 
     <T> T observeLinked(String name, String traceparent, Supplier<T> work) {
-        return observe(name, traceparent, true, work);
+        Span span;
+        try {
+            var builder = tracer.spanBuilder().setNoParent().name(name);
+            if (traceparent != null) builder.addLink(new Link(traceContext(traceparent)));
+            span = builder.start();
+        } catch (RuntimeException exporterFailure) {
+            return observe(name, true, work);
+        }
+        if (span.isNoop()) {
+            safe(span::end);
+            return observe(name, true, work);
+        }
+        long started = System.nanoTime();
+        Tracer.SpanInScope scope = null;
+        try {
+            try {
+                scope = tracer.withSpan(span);
+            } catch (RuntimeException ignored) {
+                // Telemetry is never authoritative.
+            }
+            return work.get();
+        } catch (RuntimeException | Error businessFailure) {
+            safe(() -> span.error(businessFailure));
+            throw businessFailure;
+        } finally {
+            if (scope != null) safe(scope::close);
+            safe(span::end);
+            timer(name, Duration.ofNanos(System.nanoTime() - started));
+        }
     }
 
     void outcome(IntentStatus status, Duration endToEnd) {
@@ -76,7 +112,7 @@ final class KernelTelemetry {
     }
 
     void evaluation(EvaluationSnapshot snapshot) {
-        safe(() -> LOG.atInfo()
+        afterCommit(() -> LOG.atInfo()
                 .addKeyValue("tenant", snapshot.tenantId())
                 .addKeyValue("subject_type", snapshot.subject().type())
                 .addKeyValue("subject_id", snapshot.subject().id())
@@ -88,7 +124,7 @@ final class KernelTelemetry {
     }
 
     void actionOffer(String tenantId, Subject subject, UUID snapshotId, UUID offerId, UUID correlation) {
-        safe(() -> LOG.atInfo()
+        afterCommit(() -> LOG.atInfo()
                 .addKeyValue("tenant", tenantId)
                 .addKeyValue("subject_type", subject.type())
                 .addKeyValue("subject_id", subject.id())
@@ -107,7 +143,7 @@ final class KernelTelemetry {
             UUID intentId,
             IntentStatus status,
             String correlation) {
-        safe(() -> LOG.atInfo()
+        afterCommit(() -> LOG.atInfo()
                 .addKeyValue("tenant", tenantId)
                 .addKeyValue("subject_type", subject.type())
                 .addKeyValue("subject_id", subject.id())
@@ -121,7 +157,7 @@ final class KernelTelemetry {
     }
 
     void event(String tenantId, Subject subject, UUID intentId, UUID eventId, String correlation) {
-        safe(() -> LOG.atInfo()
+        afterCommit(() -> LOG.atInfo()
                 .addKeyValue("tenant", tenantId)
                 .addKeyValue("subject_type", subject.type())
                 .addKeyValue("subject_id", subject.id())
@@ -130,19 +166,18 @@ final class KernelTelemetry {
                 .addKeyValue("application_version", application.version())
                 .addKeyValue("kernel_version", kernelVersion)
                 .addKeyValue("trace_correlation", correlation)
-                .log("event_recorded"));
+                .log("event_committed"));
     }
 
     static String traceId(String traceparent, UUID fallback) {
         return traceparent == null ? fallback.toString() : traceparent.substring(3, 35);
     }
 
-    private <T> T observe(String name, String traceparent, boolean root, Supplier<T> work) {
+    private <T> T observe(String name, boolean root, Supplier<T> work) {
         Observation observation;
         try {
             observation = Observation.createNotStarted(name, observations);
             if (root) observation.parentObservation(null);
-            if (traceparent != null) observation.highCardinalityKeyValue("trace.link", traceId(traceparent, null));
             observation.start();
         } catch (RuntimeException exporterFailure) {
             return work.get();
@@ -176,6 +211,26 @@ final class KernelTelemetry {
 
     private void timer(String name, Duration duration, String... tags) {
         safe(() -> Timer.builder(name).tags(tags).register(meters).record(nonNegative(duration)));
+    }
+
+    private io.micrometer.tracing.TraceContext traceContext(String traceparent) {
+        return tracer.traceContextBuilder()
+                .traceId(traceparent.substring(3, 35))
+                .spanId(traceparent.substring(36, 52))
+                .sampled((Integer.parseInt(traceparent.substring(53, 55), 16) & 1) == 1)
+                .build();
+    }
+
+    static void afterCommit(Runnable signal) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            safe(signal);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override public void afterCommit() {
+                safe(signal);
+            }
+        });
     }
 
     private void summary(String name, Duration duration, String... tags) {

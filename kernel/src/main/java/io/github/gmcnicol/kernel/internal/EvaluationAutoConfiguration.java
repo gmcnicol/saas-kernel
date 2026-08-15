@@ -13,6 +13,7 @@ import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
+import io.micrometer.tracing.Tracer;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
@@ -21,6 +22,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import lang.taxi.Compiler;
 import lang.taxi.CompilerConfig;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.actuate.info.InfoContributor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -224,10 +226,12 @@ public class EvaluationAutoConfiguration {
     KernelTelemetry kernelTelemetry(
             ObservationRegistry observations,
             MeterRegistry meters,
+            ObjectProvider<Tracer> tracer,
             @Value("${spring.application.name}") String applicationId,
             @Value("${spring.application.version}") String applicationVersion) {
         return new KernelTelemetry(
-                observations, meters, new ApplicationVersion(applicationId, applicationVersion), kernelVersion());
+                observations, meters, tracer.getIfAvailable(() -> Tracer.NOOP),
+                new ApplicationVersion(applicationId, applicationVersion), kernelVersion());
     }
 
     @Bean
