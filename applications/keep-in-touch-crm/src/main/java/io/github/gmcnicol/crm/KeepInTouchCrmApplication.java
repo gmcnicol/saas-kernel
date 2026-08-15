@@ -16,6 +16,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 import io.micrometer.observation.ObservationRegistry;
+import tools.jackson.databind.ObjectMapper;
 
 @SpringBootApplication
 public class KeepInTouchCrmApplication {
@@ -120,6 +121,11 @@ public class KeepInTouchCrmApplication {
     @Bean
     PresentationPack crmMobilePresentationPack(ObservationRegistry observations) {
         return CrmPresentation.mobile().observed(observations);
+    }
+
+    @Bean
+    CrmA2uiAdapter crmA2uiAdapter(ObjectMapper json, ObservationRegistry observations) {
+        return new CrmA2uiAdapter(json, observations);
     }
 
     private static ApplicabilityPolicy followUpPolicy(String action) {

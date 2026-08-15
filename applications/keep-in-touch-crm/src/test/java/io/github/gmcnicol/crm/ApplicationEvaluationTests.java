@@ -83,6 +83,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
     @Autowired MeterRegistry meters;
     @Autowired ObservationRegistry observations;
     @Autowired ApplicationAvailability availability;
+    @Autowired CrmA2uiAdapter a2ui;
     @Autowired @Qualifier("crmDesktopPresentationPack") PresentationPack desktopPresentation;
     @Autowired @Qualifier("crmMobilePresentationPack") PresentationPack mobilePresentation;
 
@@ -496,6 +497,76 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("integrity=\"sha384-")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("data-on:submit")));
+    }
+
+    @Test
+    void rendersBoundedA2uiAndAcceptsOnlyCurrentOffer() throws Exception {
+        var subject = new Subject("crm.Contact", "a2ui-contact");
+        var snapshot = kernel.evaluate(new ProjectedState("tenant-one", subject, 300, Map.of(
+                "displayName", "Ada <Lovelace>",
+                "followUpDueAt", "2026-08-15T09:00:00Z",
+                "followUpCompleted", "false")), Instant.parse("2026-08-15T10:00:00Z"));
+        var envelope = kernel.present(
+                "tenant-one", snapshot.id(), new Principal("Owner", "gareth"),
+                Instant.parse("2026-08-15T10:01:00Z"));
+        var offer = envelope.actionOffers().stream()
+                .filter(candidate -> candidate.actionId().endsWith("recordInteraction"))
+                .findFirst().orElseThrow();
+        String source = a2uiMessages(offer.id());
+        var rendered = a2ui.render(envelope, source);
+        var nativeHtml = desktopPresentation.render(envelope).html();
+
+        assertThat(rendered.html()).contains(
+                "Ada &lt;Lovelace&gt;", "/presentation/intents/" + offer.id(),
+                "name=\"payloadType\" value=\"" + offer.inputType() + "\"",
+                "name=\"payloadVersion\" value=\"1\"", "name=\"note\" value=\"A2UI contact note\"");
+        assertThat(nativeHtml).contains(
+                "/presentation/intents/" + offer.id(),
+                "name=\"payloadType\" value=\"" + offer.inputType() + "\"",
+                "name=\"payloadVersion\" value=\"1\"");
+
+        UUID intentId = UUID.randomUUID();
+        mvc.perform(post("/presentation/intents/{offerId}", offer.id())
+                        .with(httpBasic("gareth", "test-password"))
+                        .contentType("application/x-www-form-urlencoded")
+                        .param("intentId", intentId.toString())
+                        .param("payloadType", offer.inputType())
+                        .param("payloadVersion", "1")
+                        .param("note", "A2UI contact note"))
+                .andExpect(status().isOk());
+        assertThat(kernel.findIntents(new IntentQuery(
+                "tenant-one", Optional.of(IntentStatus.PENDING), Optional.of(subject),
+                Optional.of(intentId), Optional.empty()))).singleElement();
+        assertThat(processUntil(intentId, Instant.now().plusSeconds(30)).status())
+                .isEqualTo(IntentStatus.SUCCEEDED);
+
+        int beforeForged = kernel.findIntents(new IntentQuery(
+                "tenant-one", Optional.empty(), Optional.of(subject), Optional.empty(), Optional.empty())).size();
+        assertThatThrownBy(() -> a2ui.render(envelope, a2uiMessages(UUID.randomUUID())))
+                .isInstanceOf(CrmA2uiAdapter.InvalidSurface.class);
+        assertThat(kernel.findIntents(new IntentQuery(
+                "tenant-one", Optional.empty(), Optional.of(subject), Optional.empty(), Optional.empty())))
+                .hasSize(beforeForged);
+
+        var staleSubject = new Subject("crm.Contact", "a2ui-stale");
+        var staleSnapshot = kernel.evaluate(new ProjectedState("tenant-one", staleSubject, 310, Map.of(
+                "followUpDueAt", "2026-08-15T09:00:00Z", "followUpCompleted", "false")),
+                Instant.parse("2026-08-15T10:00:00Z"));
+        var staleOffer = kernel.present(
+                        "tenant-one", staleSnapshot.id(), new Principal("Owner", "gareth"),
+                        Instant.parse("2026-08-15T10:01:00Z"))
+                .actionOffers().stream().filter(candidate -> candidate.actionId().endsWith("recordInteraction"))
+                .findFirst().orElseThrow();
+        kernel.evaluate(new ProjectedState("tenant-one", staleSubject, 311, Map.of(
+                "followUpDueAt", "2026-08-16T09:00:00Z", "followUpCompleted", "false")),
+                Instant.parse("2026-08-15T10:02:00Z"));
+        UUID staleIntent = UUID.randomUUID();
+        assertThatThrownBy(() -> kernel.accept(staleOffer.id(), staleIntent, new CandidatePayload(
+                staleOffer.inputType(), 1, Map.of("note", "must not persist"))))
+                .isInstanceOf(IntentRejectedException.class);
+        assertThat(kernel.findIntents(new IntentQuery(
+                "tenant-one", Optional.empty(), Optional.of(staleSubject),
+                Optional.of(staleIntent), Optional.empty()))).isEmpty();
     }
 
     @Test
@@ -981,6 +1052,27 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         assertThat(kernel.findIntents(new IntentQuery(
                 "tenant-one", Optional.empty(), Optional.empty(), Optional.of(successfulIntent.id()), Optional.empty())))
                 .singleElement().satisfies(view -> assertThat(view.status()).isEqualTo(IntentStatus.SUCCEEDED));
+    }
+
+    private static String a2uiMessages(UUID offerId) {
+        return """
+                [
+                  {"version":"v0.9.1","createSurface":{"surfaceId":"contact","catalogId":"%s"}},
+                  {"version":"v0.9.1","updateComponents":{"surfaceId":"contact","components":[
+                    {"id":"root","component":"Column","children":["title","submit"]},
+                    {"id":"title","component":"Text","text":{"path":"/title"}},
+                    {"id":"label","component":"Text","text":"Record contact"},
+                    {"id":"submit","component":"Button","child":"label","action":{"event":{
+                      "name":"invokeActionOffer","context":{"actionOfferId":"%s",
+                        "note":{"path":"/note"}
+                      }
+                    }}}
+                  ]}},
+                  {"version":"v0.9.1","updateDataModel":{"surfaceId":"contact","path":"/","value":{
+                    "title":"Ada <Lovelace>","note":"A2UI contact note"
+                  }}}
+                ]
+                """.formatted(CrmA2uiAdapter.CATALOGUE, offerId);
     }
 
     private io.github.gmcnicol.kernel.application.Intent acceptedRecordInteraction(
