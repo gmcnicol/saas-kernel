@@ -4,7 +4,7 @@ import com.cedarpolicy.BasicAuthorizationEngine;
 import com.cedarpolicy.model.ValidationRequest;
 import com.cedarpolicy.model.policy.PolicySet;
 import com.cedarpolicy.model.schema.Schema;
-import io.github.gmcnicol.kernel.semanticpack.AuthorisationBundle;
+import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
 import io.github.gmcnicol.kernel.semanticpack.SemanticImplementation;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import java.io.IOException;
@@ -26,7 +26,7 @@ import lang.taxi.TaxiDocument;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.ResourceLoader;
 
-final class ApplicationAssemblyValidator {
+final class ApplicationValidator {
 
     private static final Pattern QUALIFIED_NAME = Pattern.compile("[A-Za-z_][\\w]*(?:\\.[A-Za-z_][\\w]*)+");
     private static final String SUPPORTED_KERNEL = "0.1";
@@ -37,7 +37,7 @@ final class ApplicationAssemblyValidator {
     private final List<SemanticImplementation> semanticImplementations;
     private final ResourceLoader resourceLoader;
 
-    ApplicationAssemblyValidator(
+    ApplicationValidator(
             List<SemanticPack> semanticPacks,
             List<AuthorisationBundle> authorisationBundles,
             List<SemanticImplementation> semanticImplementations,
@@ -59,7 +59,10 @@ final class ApplicationAssemblyValidator {
         requireValue(semantic, "Semantic Pack", "kernel-compatibility", SUPPORTED_KERNEL);
         coordinate(requireProperty(semantic, "Semantic Pack", "taxi-coordinate"));
         List<String> taxiSources = listProperty(semantic, "Semantic Pack", "taxi-sources");
-        verifyChecksum(semanticManifestPath, taxiSources, requireProperty(semantic, "Semantic Pack", "checksum"));
+        verifyChecksum(
+                semanticManifestPath,
+                concat(taxiSources, optionalListProperty(semantic, "compiled-content")),
+                requireProperty(semantic, "Semantic Pack", "checksum"));
         TaxiDocument taxi = compileTaxi(taxiSources);
         validateBindings(taxi, listProperty(semantic, "Semantic Pack", "bindings"));
 
@@ -72,7 +75,7 @@ final class ApplicationAssemblyValidator {
         List<String> policies = listProperty(authorisation, "Authorisation Bundle", "policies");
         verifyChecksum(
                 authorisationManifestPath,
-                concat(List.of(schemaPath), policies),
+                concat(concat(List.of(schemaPath), policies), optionalListProperty(authorisation, "compiled-content")),
                 requireProperty(authorisation, "Authorisation Bundle", "checksum"));
         validateCedar(schemaPath, policies);
     }
@@ -104,11 +107,6 @@ final class ApplicationAssemblyValidator {
                 throw new IllegalStateException("Duplicate Semantic Pack binding: " + declaration);
             }
         }
-        Arrays.stream(BindingKind.values()).forEach(kind -> {
-            if (bindings.get(kind).isEmpty()) {
-                throw new IllegalStateException("Semantic Pack binding missing: " + kind);
-            }
-        });
         for (BindingKind kind : List.of(BindingKind.FACT, BindingKind.PAYLOAD, BindingKind.EVENT, BindingKind.DERIVATION)) {
             bindings.get(kind).forEach(name -> requireTaxiType(taxi, kind, name));
         }
@@ -129,9 +127,6 @@ final class ApplicationAssemblyValidator {
                 throw new IllegalStateException("Semantic Pack implementation does not match manifest: " + kind);
             }
         }
-        requireSameBindings("Fact derivation", bindings.get(BindingKind.FACT), bindings.get(BindingKind.DERIVATION));
-        requireSameBindings("Action applicability", bindings.get(BindingKind.ACTION), bindings.get(BindingKind.APPLICABILITY));
-        requireSameBindings("Action handler", bindings.get(BindingKind.ACTION), bindings.get(BindingKind.HANDLER));
     }
 
     private static void requireTaxiType(TaxiDocument taxi, BindingKind kind, String name) {
@@ -148,12 +143,6 @@ final class ApplicationAssemblyValidator {
                 .count();
         if (matches != 1) {
             throw new IllegalStateException(kind + " binding does not resolve to one Taxi operation: " + name);
-        }
-    }
-
-    private static void requireSameBindings(String name, Set<String> expected, Set<String> actual) {
-        if (!expected.equals(actual)) {
-            throw new IllegalStateException(name + " bindings must match declared targets");
         }
     }
 
@@ -177,15 +166,22 @@ final class ApplicationAssemblyValidator {
         String expected = readText(checksumPath).trim();
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            digest.update(readBytes(manifest));
+            digest.update(canonicalManifest(manifest));
             content.forEach(path -> digest.update(readBytes(path)));
             String actual = java.util.HexFormat.of().formatHex(digest.digest());
             if (!actual.equals(expected)) {
-                throw new IllegalStateException("Assembly checksum mismatch: " + manifest);
+                throw new IllegalStateException("Application checksum mismatch: " + manifest);
             }
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 unavailable", exception);
         }
+    }
+
+    private byte[] canonicalManifest(String path) {
+        String content = readText(path).lines()
+                .filter(line -> !line.startsWith("checksum="))
+                .collect(Collectors.joining("\n", "", "\n"));
+        return content.getBytes(StandardCharsets.UTF_8);
     }
 
     private Properties loadProperties(String path) {
@@ -194,7 +190,7 @@ final class ApplicationAssemblyValidator {
             properties.load(input);
             return properties;
         } catch (IOException exception) {
-            throw new IllegalStateException("Cannot read assembly resource: " + path, exception);
+            throw new IllegalStateException("Cannot read Application resource: " + path, exception);
         }
     }
 
@@ -206,14 +202,14 @@ final class ApplicationAssemblyValidator {
         try {
             return resource(path).getContentAsByteArray();
         } catch (IOException exception) {
-            throw new IllegalStateException("Cannot read assembly resource: " + path, exception);
+            throw new IllegalStateException("Cannot read Application resource: " + path, exception);
         }
     }
 
     private Resource resource(String path) {
         Resource resource = resourceLoader.getResource("classpath:" + path);
         if (!resource.exists()) {
-            throw new IllegalStateException("Assembly resource not found: " + path);
+            throw new IllegalStateException("Application resource not found: " + path);
         }
         return resource;
     }
@@ -227,7 +223,7 @@ final class ApplicationAssemblyValidator {
     }
 
     private static void coordinate(String value) {
-        if (value.split(":", -1).length != 3) {
+        if (!Pattern.matches("[^\\s:]+:[^\\s:]+:[^\\s:]+", value)) {
             throw new IllegalStateException("Semantic Pack manifest has invalid Taxi coordinate: " + value);
         }
     }
@@ -243,6 +239,14 @@ final class ApplicationAssemblyValidator {
         return Arrays.stream(requireProperty(properties, manifest, name).split(","))
                 .map(String::trim)
                 .filter(value -> !value.isEmpty())
+                .toList();
+    }
+
+    private static List<String> optionalListProperty(Properties properties, String name) {
+        String value = properties.getProperty(name);
+        return value == null ? List.of() : Arrays.stream(value.split(","))
+                .map(String::trim)
+                .filter(item -> !item.isEmpty())
                 .toList();
     }
 

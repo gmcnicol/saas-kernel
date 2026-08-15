@@ -1,7 +1,7 @@
 package io.github.gmcnicol.ledgerling;
 
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
-import io.github.gmcnicol.kernel.semanticpack.AuthorisationBundle;
+import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
 import io.github.gmcnicol.kernel.semanticpack.SemanticImplementation;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import org.springframework.boot.SpringApplication;

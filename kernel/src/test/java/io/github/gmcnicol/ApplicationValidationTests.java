@@ -2,18 +2,18 @@ package io.github.gmcnicol;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.gmcnicol.kernel.internal.AssemblyAutoConfiguration;
-import io.github.gmcnicol.kernel.semanticpack.AuthorisationBundle;
+import io.github.gmcnicol.kernel.authorisation.AuthorisationBundle;
+import io.github.gmcnicol.kernel.internal.ApplicationValidationAutoConfiguration;
 import io.github.gmcnicol.kernel.semanticpack.SemanticImplementation;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
-class ApplicationAssemblyTests {
+class ApplicationValidationTests {
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
-            .withConfiguration(AutoConfigurations.of(AssemblyAutoConfiguration.class));
+            .withConfiguration(AutoConfigurations.of(ApplicationValidationAutoConfiguration.class));
 
     @Test
     void rejectsMissingSemanticPackAndAuthorisationBundle() {
@@ -32,7 +32,7 @@ class ApplicationAssemblyTests {
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
-                            .hasRootCauseMessage("Assembly resource not found: missing-semantic.properties");
+                            .hasRootCauseMessage("Application resource not found: missing-semantic.properties");
                 });
     }
 
@@ -68,9 +68,15 @@ class ApplicationAssemblyTests {
     }
 
     @Test
+    void rejectsMalformedTaxiCoordinate() {
+        runInvalid("assembly/invalid-coordinate.properties", "assembly/authorisation.properties",
+                "Semantic Pack manifest has invalid Taxi coordinate: ::");
+    }
+
+    @Test
     void rejectsChecksumMismatch() {
         runInvalid("assembly/tampered-semantic.properties", "assembly/authorisation.properties",
-                "Assembly checksum mismatch: assembly/tampered-semantic.properties");
+                "Application checksum mismatch: assembly/tampered-semantic.properties");
     }
 
     @Test
@@ -96,7 +102,7 @@ class ApplicationAssemblyTests {
     }
 
     @Test
-    void acceptsValidAssembly() {
+    void acceptsValidApplication() {
         contextRunner
                 .withBean(SemanticPack.class, () -> () -> "assembly/semantic.properties")
                 .withBean(AuthorisationBundle.class, () -> () -> "assembly/authorisation.properties")
@@ -106,6 +112,14 @@ class ApplicationAssemblyTests {
                         () -> new SemanticImplementation(SemanticImplementation.Kind.APPLICABILITY, "test.Actions.act"))
                 .withBean("handler", SemanticImplementation.class,
                         () -> new SemanticImplementation(SemanticImplementation.Kind.HANDLER, "test.Actions.act"))
+                .run(context -> assertThat(context).hasNotFailed());
+    }
+
+    @Test
+    void acceptsOnlyDeclaredBindings() {
+        contextRunner
+                .withBean(SemanticPack.class, () -> () -> "assembly/sparse-semantic.properties")
+                .withBean(AuthorisationBundle.class, () -> () -> "assembly/authorisation.properties")
                 .run(context -> assertThat(context).hasNotFailed());
     }
 
