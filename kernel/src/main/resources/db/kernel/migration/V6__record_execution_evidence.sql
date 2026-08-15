@@ -1,3 +1,8 @@
+ALTER TABLE kernel.intent
+    ADD COLUMN failure_reason text CHECK (
+        failure_reason IS NULL OR failure_reason IN (
+            'STATE_OR_SEMANTIC_STALE', 'NOT_APPLICABLE', 'AUTHORISATION_DENIED'));
+
 ALTER TABLE kernel.intent_audit
     ADD COLUMN failure_reason text,
     ADD COLUMN evidence_state_version bigint,

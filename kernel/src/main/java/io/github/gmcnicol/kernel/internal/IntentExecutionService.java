@@ -94,6 +94,13 @@ final class IntentExecutionService {
         TenantContext.lockSubject(jdbc, claim.tenantId(), stored.subject());
         ProjectedState state = currentState(claim.tenantId(), stored.subject());
         Intent claimed = new Intent(stored.id(), stored.actionOfferId(), IntentStatus.CLAIMED, stored.acceptedAt());
+        if (state.version() != stored.expectedStateVersion()
+                || !DefaultKernel.stateChecksum(state).equals(stored.expectedStateChecksum())
+                || !semanticPack.id().equals(stored.semanticPackId())
+                || !semanticPack.checksum().equals(stored.semanticPackChecksum())) {
+            return reject(claim, stored, token, processedAt, state, null, null, null,
+                    IntentStatus.STALE, IntentFailureReason.STATE_OR_SEMANTIC_STALE);
+        }
         List<Fact> facts = derivations.stream()
                 .map(derivation -> java.util.Map.entry(derivation, derivation.derive(state, processedAt)))
                 .flatMap(result -> result.getValue().values().stream()
@@ -106,13 +113,6 @@ final class IntentExecutionService {
                 .orElse(null);
         boolean applicable = policy != null && policy.isApplicable(state, facts);
         boolean authorised = cedar.allows(stored.principal(), stored.subject(), stored.actionId());
-        if (state.version() != stored.expectedStateVersion()
-                || !DefaultKernel.stateChecksum(state).equals(stored.expectedStateChecksum())
-                || !semanticPack.id().equals(stored.semanticPackId())
-                || !semanticPack.checksum().equals(stored.semanticPackChecksum())) {
-            return reject(claim, stored, token, processedAt, state, policy, applicable, authorised,
-                    IntentStatus.STALE, IntentFailureReason.STATE_OR_SEMANTIC_STALE);
-        }
         if (!applicable) {
             return reject(claim, stored, token, processedAt, state, policy, false, authorised,
                     IntentStatus.FAILED, IntentFailureReason.NOT_APPLICABLE);
@@ -173,14 +173,15 @@ final class IntentExecutionService {
             Instant processedAt,
             ProjectedState state,
             ApplicabilityPolicy policy,
-            boolean applicable,
-            boolean authorised,
+            Boolean applicable,
+            Boolean authorised,
             IntentStatus status,
             IntentFailureReason reason) {
         int updated = jdbc.update("""
-                UPDATE kernel.intent SET status = ?, lease_token = NULL, lease_until = NULL, completed_at = ?
+                UPDATE kernel.intent SET status = ?, failure_reason = ?, lease_token = NULL, lease_until = NULL,
+                    completed_at = ?
                 WHERE tenant_id = ? AND id = ? AND status = 'CLAIMED' AND lease_token = ? AND lease_until >= ?
-                """, status.name(), Timestamp.from(processedAt), claim.tenantId(), stored.id(), token,
+                """, status.name(), reason.name(), Timestamp.from(processedAt), claim.tenantId(), stored.id(), token,
                 Timestamp.from(clock.instant()));
         if (updated != 1) {
             throw new IllegalStateException("Intent lease is no longer owned");

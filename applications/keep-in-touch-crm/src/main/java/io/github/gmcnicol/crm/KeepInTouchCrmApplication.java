@@ -53,6 +53,10 @@ public class KeepInTouchCrmApplication {
                     if (Boolean.parseBoolean(state.values().getOrDefault("followUpCompleted", "false"))) {
                         return FactDerivation.Derivation.none();
                     }
+                    String expiresAt = state.values().get("followUpExpiresAt");
+                    if (expiresAt != null && !evaluatedAt.isBefore(Instant.parse(expiresAt))) {
+                        return FactDerivation.Derivation.none();
+                    }
                     Instant dueAt = Instant.parse(state.values().get("followUpDueAt"));
                     return evaluatedAt.isBefore(dueAt)
                             ? FactDerivation.Derivation.later(dueAt)

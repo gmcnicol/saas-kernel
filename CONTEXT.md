@@ -59,7 +59,7 @@ The versioned Action input submitted with an Action Offer for Taxi validation be
 _Avoid_: Intent, unvalidated Intent
 
 **Stale Intent**:
-An Intent whose expected state version no longer matches current Projected State, so it cannot be handled as originally accepted.
+An Intent whose expected Projected State or Semantic Pack no longer matches current execution context, so it cannot be handled as originally accepted.
 _Avoid_: Failed Intent, obsolete command
 
 **Event**:

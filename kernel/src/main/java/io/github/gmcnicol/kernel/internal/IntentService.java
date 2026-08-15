@@ -2,6 +2,7 @@ package io.github.gmcnicol.kernel.internal;
 
 import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.Intent;
+import io.github.gmcnicol.kernel.application.IntentFailureReason;
 import io.github.gmcnicol.kernel.application.IntentConflictException;
 import io.github.gmcnicol.kernel.application.IntentRejectedException;
 import io.github.gmcnicol.kernel.application.IntentStatus;
@@ -22,6 +23,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionOperations;
@@ -235,13 +237,14 @@ final class IntentService {
 
     private Intent existing(String tenantId, UUID intentId, String requestChecksum) {
         List<ExistingIntent> existing = jdbc.query("""
-                SELECT action_offer_id, status, accepted_at, request_checksum
+                SELECT action_offer_id, status, accepted_at, request_checksum, failure_reason
                 FROM kernel.intent WHERE tenant_id = ? AND id = ?
                 """, (result, row) -> new ExistingIntent(
                         result.getObject("action_offer_id", UUID.class),
                         IntentStatus.valueOf(result.getString("status")),
                         result.getTimestamp("accepted_at").toInstant(),
-                        result.getString("request_checksum")), tenantId, intentId);
+                        result.getString("request_checksum"),
+                        result.getString("failure_reason")), tenantId, intentId);
         if (existing.isEmpty()) {
             return null;
         }
@@ -249,7 +252,8 @@ final class IntentService {
         if (!found.requestChecksum().equals(requestChecksum)) {
             throw new IntentConflictException();
         }
-        return new Intent(intentId, found.actionOfferId(), found.status(), found.acceptedAt());
+        return new Intent(intentId, found.actionOfferId(), found.status(), found.acceptedAt(),
+                Optional.ofNullable(found.failureReason()).map(IntentFailureReason::valueOf));
     }
 
     private static String canonicalRequest(UUID actionOfferId, CandidatePayload payload) {
@@ -304,5 +308,9 @@ final class IntentService {
     private record StateVersion(long version, String checksum) {}
 
     private record ExistingIntent(
-            UUID actionOfferId, IntentStatus status, Instant acceptedAt, String requestChecksum) {}
+            UUID actionOfferId,
+            IntentStatus status,
+            Instant acceptedAt,
+            String requestChecksum,
+            String failureReason) {}
 }
