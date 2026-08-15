@@ -11,6 +11,17 @@
 
     <artifactId>saas-kernel</artifactId>
     <name>Semantic Workflow Kernel</name>
+    <description>SemVer-protected semantic workflow Kernel for ordinary Spring Boot Applications.</description>
+    <url>https://github.com/gmcnicol/saas-kernel</url>
+    <scm>
+        <connection>scm:git:https://github.com/gmcnicol/saas-kernel.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/gmcnicol/saas-kernel.git</developerConnection>
+        <url>https://github.com/gmcnicol/saas-kernel</url>
+        <tag>HEAD</tag>
+    </scm>
+    <properties>
+        <maven.deploy.skip>false</maven.deploy.skip>
+    </properties>
 
     <dependencies>
         <dependency>
@@ -42,6 +53,10 @@
             <artifactId>spring-boot-actuator</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-health</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.modulith</groupId>
             <artifactId>spring-modulith-api</artifactId>
             <optional>true</optional>
@@ -68,5 +83,142 @@
             <artifactId>micrometer-tracing-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>1.7.3</version>
+                <configuration>
+                    <flattenMode>ossrh</flattenMode>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>flatten-consumer-pom</id>
+                        <phase>process-resources</phase>
+                        <goals><goal>flatten</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>clean-flattened-pom</id>
+                        <goals><goal>clean</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-source-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>attach-sources</id>
+                        <goals><goal>jar-no-fork</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>attach-javadocs</id>
+                        <goals><goal>jar</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>${maven-antrun-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>release-checksums</id>
+                        <phase>verify</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <checksum algorithm="SHA-256" fileext=".sha256">
+                                    <fileset dir="${project.build.directory}">
+                                        <include name="${project.build.finalName}.jar"/>
+                                        <include name="${project.build.finalName}-sources.jar"/>
+                                        <include name="${project.build.finalName}-javadoc.jar"/>
+                                    </fileset>
+                                </checksum>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>com.github.siom79.japicmp</groupId>
+                <artifactId>japicmp-maven-plugin</artifactId>
+                <version>0.26.1</version>
+                <configuration>
+                    <oldVersion>
+                        <dependency>
+                            <groupId>${project.groupId}</groupId>
+                            <artifactId>${project.artifactId}</artifactId>
+                            <version>${japicmp.oldVersion}</version>
+                        </dependency>
+                    </oldVersion>
+                    <newVersion>
+                        <file><path>${project.build.directory}/${project.build.finalName}.jar</path></file>
+                    </newVersion>
+                    <parameter>
+                        <accessModifier>public</accessModifier>
+                        <includes>
+                            <include>io.github.gmcnicol.kernel.application.*</include>
+                            <include>io.github.gmcnicol.kernel.authorisation.*</include>
+                            <include>io.github.gmcnicol.kernel.presentationpack.*</include>
+                            <include>io.github.gmcnicol.kernel.semanticpack.*</include>
+                        </includes>
+                        <breakBuildOnBinaryIncompatibleModifications>${japicmp.breakBinary}</breakBuildOnBinaryIncompatibleModifications>
+                        <ignoreMissingClasses>true</ignoreMissingClasses>
+                    </parameter>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.8</version>
+                        <executions>
+                            <execution>
+                                <id>sign-release</id>
+                                <phase>verify</phase>
+                                <goals><goal>sign</goal></goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

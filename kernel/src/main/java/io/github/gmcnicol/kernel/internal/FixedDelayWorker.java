@@ -31,12 +31,47 @@ abstract class FixedDelayWorker implements SmartLifecycle {
 
     @Override
     public final void stop() {
-        if (scheduler != null) scheduler.shutdown();
         running = false;
+        if (scheduler != null) scheduler.shutdown();
+    }
+
+    @Override
+    public final void stop(Runnable callback) {
+        running = false;
+        if (scheduler == null) {
+            callback.run();
+            return;
+        }
+        scheduler.shutdown();
+        Thread.ofPlatform().daemon().name(threadName() + "-shutdown").start(() -> {
+            try {
+                if (!scheduler.awaitTermination(policy.shutdownTimeout().toMillis(), TimeUnit.MILLISECONDS)) {
+                    scheduler.shutdownNow();
+                    scheduler.awaitTermination(1, TimeUnit.SECONDS);
+                }
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            } finally {
+                callback.run();
+            }
+        });
     }
 
     @Override
     public final boolean isRunning() {
         return running;
+    }
+
+    final boolean isReady() {
+        return running;
+    }
+
+    final boolean isAcceptingWork() {
+        return running;
+    }
+
+    @Override
+    public final int getPhase() {
+        return 100;
     }
 }

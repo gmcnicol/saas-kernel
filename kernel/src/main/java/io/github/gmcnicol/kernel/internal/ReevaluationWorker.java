@@ -24,7 +24,7 @@ final class ReevaluationWorker extends FixedDelayWorker {
     @Override
     void poll() {
         try {
-            for (int count = 0; count < policy.claimBatchSize(); count++) {
+            for (int count = 0; isAcceptingWork() && count < policy.claimBatchSize(); count++) {
                 if (!kernel.processNextReevaluationWork(clock.instant())) break;
             }
         } catch (RuntimeException exception) {

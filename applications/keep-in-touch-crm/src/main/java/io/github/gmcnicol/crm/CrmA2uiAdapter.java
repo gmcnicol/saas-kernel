@@ -276,7 +276,7 @@ final class CrmA2uiAdapter {
                 + "\" data-on:submit=\"@post('/presentation/intents/" + offerId
                 + "', {contentType: 'form'})\"><input type=\"hidden\" name=\"intentId\" value=\""
                 + UUID.randomUUID() + "\"><input type=\"hidden\" name=\"payloadType\" value=\""
-                + escape(offer.inputType()) + "\"><input type=\"hidden\" name=\"payloadVersion\" value=\"1\">"
+                + escape(offer.inputType()) + "\"><input type=\"hidden\" name=\"payloadVersion\" value=\"2\">"
                 + fields + "<button id=\"" + escape(id) + "\" type=\"submit\">"
                 + render(text(component, "child"), components, data, envelope, new HashSet<>(ancestors))
                 + "</button></form>";

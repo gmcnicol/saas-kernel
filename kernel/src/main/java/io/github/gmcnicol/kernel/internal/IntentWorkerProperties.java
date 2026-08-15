@@ -11,6 +11,7 @@ final class IntentWorkerProperties {
     private Duration retryBackoff = Duration.ofMinutes(1);
     private int claimBatchSize = 10;
     private Duration pollingInterval = Duration.ofSeconds(1);
+    private Duration shutdownTimeout = Duration.ofSeconds(20);
     private boolean enabled = true;
 
     Duration leaseDuration() { return leaseDuration; }
@@ -18,6 +19,7 @@ final class IntentWorkerProperties {
     Duration retryBackoff() { return retryBackoff; }
     int claimBatchSize() { return claimBatchSize; }
     Duration pollingInterval() { return pollingInterval; }
+    Duration shutdownTimeout() { return shutdownTimeout; }
     boolean enabled() { return enabled; }
 
     public void setLeaseDuration(Duration value) { leaseDuration = positive(value, "lease duration"); }
@@ -31,6 +33,7 @@ final class IntentWorkerProperties {
         claimBatchSize = value;
     }
     public void setPollingInterval(Duration value) { pollingInterval = positive(value, "polling interval"); }
+    public void setShutdownTimeout(Duration value) { shutdownTimeout = positive(value, "shutdown timeout"); }
     public void setEnabled(boolean value) { enabled = value; }
 
     private static Duration positive(Duration value, String name) {

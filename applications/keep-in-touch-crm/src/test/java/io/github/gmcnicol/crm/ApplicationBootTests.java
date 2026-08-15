@@ -57,6 +57,12 @@ class ApplicationBootTests {
         var health = client.send(HttpRequest.newBuilder(
                         URI.create("http://localhost:" + managementPort + "/actuator/health")).build(),
                 HttpResponse.BodyHandlers.ofString());
+        var liveness = client.send(HttpRequest.newBuilder(
+                        URI.create("http://localhost:" + managementPort + "/actuator/health/liveness")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        var readiness = client.send(HttpRequest.newBuilder(
+                        URI.create("http://localhost:" + managementPort + "/actuator/health/readiness")).build(),
+                HttpResponse.BodyHandlers.ofString());
         var privateInfo = client.send(HttpRequest.newBuilder(
                         URI.create("http://localhost:" + managementPort + "/actuator/info")).build(),
                 HttpResponse.BodyHandlers.ofString());
@@ -75,6 +81,10 @@ class ApplicationBootTests {
                 HttpResponse.BodyHandlers.ofString());
 
         assertThat(health.statusCode()).isEqualTo(200);
+        assertThat(liveness.statusCode()).isEqualTo(200);
+        assertThat(readiness.statusCode()).isEqualTo(200);
+        assertThat(liveness.body()).contains("\"status\":\"UP\"");
+        assertThat(readiness.body()).contains("\"status\":\"UP\"");
         assertThat(privateInfo.statusCode()).isEqualTo(401);
         assertThat(authorisedInfo.statusCode()).isEqualTo(200);
         assertThat(authorisedMetrics.statusCode()).isEqualTo(200);

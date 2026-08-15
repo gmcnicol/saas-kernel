@@ -255,6 +255,7 @@ final class ApplicationValidator {
         for (BindingKind kind : List.of(BindingKind.ACTION, BindingKind.APPLICABILITY, BindingKind.HANDLER)) {
             bindings.get(kind).forEach(name -> requireTaxiOperation(taxi, kind, name));
         }
+        bindings.get(BindingKind.ADAPTER).forEach(adapter -> validateAdapter(adapter, bindings));
         Map<SemanticImplementation.Kind, List<String>> implementations = semanticImplementations.stream()
                 .collect(Collectors.groupingBy(
                         SemanticImplementation::kind,
@@ -268,6 +269,16 @@ final class ApplicationValidator {
             if (!bindings.get(BindingKind.valueOf(kind.name())).equals(new HashSet<>(targets))) {
                 throw new IllegalStateException("Semantic Pack implementation does not match manifest: " + kind);
             }
+        }
+    }
+
+    private static void validateAdapter(String adapter, Map<BindingKind, Set<String>> bindings) {
+        var match = Pattern.compile("(PAYLOAD|EVENT):(.+)@(\\d+)->(\\d+)").matcher(adapter);
+        if (!match.matches()
+                || Integer.parseInt(match.group(3)) < 1
+                || Integer.parseInt(match.group(4)) <= Integer.parseInt(match.group(3))
+                || !bindings.get(BindingKind.valueOf(match.group(1))).contains(match.group(2))) {
+            throw new IllegalStateException("Invalid Semantic Pack compatibility adapter: " + adapter);
         }
     }
 
@@ -417,6 +428,7 @@ final class ApplicationValidator {
         EVENT,
         DERIVATION,
         APPLICABILITY,
-        HANDLER
+        HANDLER,
+        ADAPTER
     }
 }

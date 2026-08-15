@@ -44,6 +44,7 @@ final class IntentExecutionService {
     private final FatalInvariantHandler fatalInvariants;
     private final Clock clock;
     private final KernelTelemetry telemetry;
+    private final SemanticCompatibility compatibility;
 
     IntentExecutionService(
             JdbcTemplate jdbc,
@@ -58,7 +59,8 @@ final class IntentExecutionService {
             IntentInvariantValidator invariants,
             FatalInvariantHandler fatalInvariants,
             Clock clock,
-            KernelTelemetry telemetry) {
+            KernelTelemetry telemetry,
+            SemanticCompatibility compatibility) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.handlers = handlers.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(
@@ -73,6 +75,7 @@ final class IntentExecutionService {
         this.fatalInvariants = fatalInvariants;
         this.clock = clock;
         this.telemetry = telemetry;
+        this.compatibility = compatibility;
     }
 
     Optional<Intent> processNext(Instant processedAt) {
@@ -101,8 +104,12 @@ final class IntentExecutionService {
     }
 
     List<Intent> processDue(Instant processedAt) {
+        return processDue(processedAt, () -> true);
+    }
+
+    List<Intent> processDue(Instant processedAt, java.util.function.BooleanSupplier acceptingWork) {
         java.util.ArrayList<Intent> processed = new java.util.ArrayList<>();
-        while (processed.size() < worker.claimBatchSize()) {
+        while (acceptingWork.getAsBoolean() && processed.size() < worker.claimBatchSize()) {
             Optional<Intent> next = processNext(processedAt);
             if (next.isEmpty()) break;
             processed.add(next.get());
@@ -167,7 +174,8 @@ final class IntentExecutionService {
         IntentHandler handler = Optional.ofNullable(handlers.get(stored.actionId()))
                 .orElseThrow(() -> new IllegalStateException("Missing Intent handler: " + stored.actionId()));
         List<Event> events = telemetry.observe(
-                "kernel.intent.handler", () -> List.copyOf(handler.handle(claimed, stored.payload(), state)));
+                "kernel.intent.handler",
+                () -> List.copyOf(handler.handle(claimed, compatibility.adapt(stored.payload()), state)));
         if (events.isEmpty()) {
             throw new IllegalStateException("Successful Intent handling must emit at least one Event");
         }
@@ -215,7 +223,7 @@ final class IntentExecutionService {
             Claim claim, StoredIntent stored, ProjectedState state, List<Event> events, Instant processedAt) {
         long version = state.version();
         for (int index = 0; index < events.size(); index++) {
-            Event event = events.get(index);
+            Event event = compatibility.adapt(events.get(index));
             payloads.validateEvent(stored.actionId(), event.type(), event.version(), event.payload());
             version++;
             persistEvent(claim, stored, event, index + 1, version, processedAt);

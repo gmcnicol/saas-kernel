@@ -10,6 +10,7 @@ import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
+import io.github.gmcnicol.kernel.semanticpack.SemanticVersionAdapter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
@@ -34,6 +35,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.jdbc.core.JdbcTemplate;
+import javax.sql.DataSource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -110,8 +112,31 @@ public class EvaluationAutoConfiguration {
     }
 
     @Bean
-    FatalInvariantHandler fatalInvariantHandler(ConfigurableApplicationContext context, KernelTelemetry telemetry) {
-        return new FatalInvariantHandler(context, telemetry);
+    FatalInvariantHandler fatalInvariantHandler(
+            ConfigurableApplicationContext context, KernelTelemetry telemetry, KernelRuntimeHealth health) {
+        return new FatalInvariantHandler(context, telemetry, health);
+    }
+
+    @Bean
+    @DependsOn({"applicationValidator", "runtimeRoleValidator"})
+    SemanticDeploymentGuard semanticDeploymentGuard(
+            DataSource dataSource,
+            SemanticPackVersion semanticPack,
+            @Value("${spring.application.name}") String applicationId,
+            ConfigurableApplicationContext context) {
+        return new SemanticDeploymentGuard(dataSource, applicationId, semanticPack.checksum(), () -> {
+            org.springframework.boot.availability.AvailabilityChangeEvent.publish(
+                    context, org.springframework.boot.availability.ReadinessState.REFUSING_TRAFFIC);
+            Thread.ofPlatform().name("kernel-deployment-guard-shutdown").start(context::close);
+        });
+    }
+
+    @Bean
+    @DependsOn({"applicationFlyway", "applicationValidator", "runtimeRoleValidator"})
+    KernelRuntimeHealth kernelRuntimeHealthIndicator(
+            ObjectProvider<FixedDelayWorker> workers,
+            ObjectProvider<SemanticDeploymentGuard> deploymentGuard) {
+        return new KernelRuntimeHealth(workers, deploymentGuard);
     }
 
     @Bean
@@ -187,7 +212,8 @@ public class EvaluationAutoConfiguration {
             List<ApplicabilityPolicy> policies,
             List<FactDerivation> derivations,
             Clock clock,
-            KernelTelemetry telemetry) {
+            KernelTelemetry telemetry,
+            SemanticCompatibility compatibility) {
         return new IntentService(
                 jdbc,
                 new TransactionTemplate(transactionManager),
@@ -198,7 +224,8 @@ public class EvaluationAutoConfiguration {
                 policies,
                 derivations,
                 clock,
-                telemetry);
+                telemetry,
+                compatibility);
     }
 
     @Bean
@@ -215,11 +242,17 @@ public class EvaluationAutoConfiguration {
             IntentInvariantValidator invariants,
             FatalInvariantHandler fatalInvariants,
             Clock clock,
-            KernelTelemetry telemetry) {
+            KernelTelemetry telemetry,
+            SemanticCompatibility compatibility) {
         return new IntentExecutionService(
                 jdbc, new TransactionTemplate(transactionManager), handlers, payloads,
                 semanticPackVersion, policies, derivations, cedar, worker, invariants, fatalInvariants, clock,
-                telemetry);
+                telemetry, compatibility);
+    }
+
+    @Bean
+    SemanticCompatibility semanticCompatibility(List<SemanticVersionAdapter> adapters) {
+        return new SemanticCompatibility(adapters);
     }
 
     @Bean

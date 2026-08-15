@@ -238,7 +238,7 @@ class ApplicationEvaluationTests {
                         .header("tracestate", "vendor=value")
                         .param("intentId", intentId.toString())
                         .param("payloadType", offer.inputType())
-                        .param("payloadVersion", "1")
+                        .param("payloadVersion", "2")
                         .param("receivedAt", "2026-08-15T10:02:00Z"))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith("text/event-stream"));

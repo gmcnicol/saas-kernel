@@ -8,6 +8,7 @@ import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
+import io.github.gmcnicol.kernel.semanticpack.SemanticVersionAdapter;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
@@ -116,7 +117,35 @@ public class LedgerlingApplication {
     }
 
     @Bean
+    SemanticVersionAdapter recordsReceivedPayloadV1() {
+        return adapter(SemanticVersionAdapter.Contract.PAYLOAD,
+                "io.github.gmcnicol.ledgerling.RecordRecordsReceivedInput");
+    }
+
+    @Bean
+    SemanticVersionAdapter startPreparationPayloadV1() {
+        return adapter(SemanticVersionAdapter.Contract.PAYLOAD,
+                "io.github.gmcnicol.ledgerling.StartPreparationInput");
+    }
+
+    @Bean
+    SemanticVersionAdapter recordsReceivedEventV1() {
+        return adapter(SemanticVersionAdapter.Contract.EVENT,
+                "io.github.gmcnicol.ledgerling.RecordsReceived");
+    }
+
+    @Bean
+    SemanticVersionAdapter preparationStartedEventV1() {
+        return adapter(SemanticVersionAdapter.Contract.EVENT,
+                "io.github.gmcnicol.ledgerling.PreparationStarted");
+    }
+
+    @Bean
     PresentationPack ledgerlingPresentationPack(ObservationRegistry observations) {
         return LedgerlingPresentation.defaultPack().observed(observations);
+    }
+
+    private static SemanticVersionAdapter adapter(SemanticVersionAdapter.Contract contract, String type) {
+        return SemanticVersionAdapter.identity(contract, type, 1, 2);
     }
 }

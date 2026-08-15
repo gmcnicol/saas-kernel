@@ -52,7 +52,7 @@ final class CrmPresentation {
                 + "', {contentType: 'form'})\">"
                 + "<input type=\"hidden\" name=\"intentId\" value=\"" + UUID.randomUUID() + "\">"
                 + "<input type=\"hidden\" name=\"payloadType\" value=\"" + escape(offer.inputType()) + "\">"
-                + "<input type=\"hidden\" name=\"payloadVersion\" value=\"1\">" + field
+                + "<input type=\"hidden\" name=\"payloadVersion\" value=\"2\">" + field
                 + "<button type=\"submit\">" + escape(LABELS.getOrDefault(action, action)) + "</button></form>";
     }
 

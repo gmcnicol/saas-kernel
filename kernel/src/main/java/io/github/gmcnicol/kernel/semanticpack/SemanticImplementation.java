@@ -14,7 +14,8 @@ public interface SemanticImplementation {
     public enum Kind {
         DERIVATION,
         APPLICABILITY,
-        HANDLER
+        HANDLER,
+        ADAPTER
     }
 
     record Binding(Kind kind, String target) implements SemanticImplementation {

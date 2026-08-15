@@ -8,6 +8,7 @@ import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
+import io.github.gmcnicol.kernel.semanticpack.SemanticVersionAdapter;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -114,6 +115,42 @@ public class KeepInTouchCrmApplication {
     }
 
     @Bean
+    SemanticVersionAdapter recordInteractionPayloadV1() {
+        return adapter(SemanticVersionAdapter.Contract.PAYLOAD,
+                "io.github.gmcnicol.crm.RecordInteractionInput");
+    }
+
+    @Bean
+    SemanticVersionAdapter snoozePayloadV1() {
+        return adapter(SemanticVersionAdapter.Contract.PAYLOAD,
+                "io.github.gmcnicol.crm.SnoozeFollowUpInput");
+    }
+
+    @Bean
+    SemanticVersionAdapter completePayloadV1() {
+        return adapter(SemanticVersionAdapter.Contract.PAYLOAD,
+                "io.github.gmcnicol.crm.CompleteFollowUpInput");
+    }
+
+    @Bean
+    SemanticVersionAdapter interactionRecordedV1() {
+        return adapter(SemanticVersionAdapter.Contract.EVENT,
+                "io.github.gmcnicol.crm.InteractionRecorded");
+    }
+
+    @Bean
+    SemanticVersionAdapter followUpSnoozedV1() {
+        return adapter(SemanticVersionAdapter.Contract.EVENT,
+                "io.github.gmcnicol.crm.FollowUpSnoozed");
+    }
+
+    @Bean
+    SemanticVersionAdapter followUpCompletedV1() {
+        return adapter(SemanticVersionAdapter.Contract.EVENT,
+                "io.github.gmcnicol.crm.FollowUpCompleted");
+    }
+
+    @Bean
     PresentationPack crmDesktopPresentationPack(ObservationRegistry observations) {
         return CrmPresentation.desktop().observed(observations);
     }
@@ -137,5 +174,9 @@ public class KeepInTouchCrmApplication {
                 (state, facts, evaluatedAt) -> java.util.Optional.ofNullable(state.values().get("followUpExpiresAt"))
                         .map(Instant::parse)
                         .filter(evaluatedAt::isBefore));
+    }
+
+    private static SemanticVersionAdapter adapter(SemanticVersionAdapter.Contract contract, String type) {
+        return SemanticVersionAdapter.identity(contract, type, 1, 2);
     }
 }

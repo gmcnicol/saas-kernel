@@ -22,7 +22,7 @@ final class IntentWorker extends FixedDelayWorker {
     @Override
     void poll() {
         try {
-            execution.processDue(clock.instant());
+            execution.processDue(clock.instant(), this::isAcceptingWork);
         } catch (RuntimeException exception) {
             LOG.log(System.Logger.Level.WARNING, "intent_worker_poll_failed type={0}",
                     exception.getClass().getSimpleName());

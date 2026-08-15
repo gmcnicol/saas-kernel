@@ -40,6 +40,7 @@ final class IntentService {
     private final List<FactDerivation> derivations;
     private final Clock clock;
     private final KernelTelemetry telemetry;
+    private final SemanticCompatibility compatibility;
 
     IntentService(
             JdbcTemplate jdbc,
@@ -51,7 +52,8 @@ final class IntentService {
             List<ApplicabilityPolicy> policies,
             List<FactDerivation> derivations,
             Clock clock,
-            KernelTelemetry telemetry) {
+            KernelTelemetry telemetry,
+            SemanticCompatibility compatibility) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.evaluations = evaluations;
@@ -62,6 +64,7 @@ final class IntentService {
         this.derivations = derivations;
         this.clock = clock;
         this.telemetry = telemetry;
+        this.compatibility = compatibility;
     }
 
     Intent accept(UUID actionOfferId, UUID intentId, CandidatePayload payload) {
@@ -103,7 +106,7 @@ final class IntentService {
         TenantContext.lockSubject(jdbc, tenantId, offer.subject());
         StoredEvaluation evaluation = evaluations.load(tenantId, offer.evaluationSnapshotId());
         Instant acceptedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
-        validateCurrent(tenantId, offer, evaluation, payload, acceptedAt);
+        validateCurrent(tenantId, offer, evaluation, compatibility.adapt(payload), acceptedAt);
         String traceparent = payload.traceContext().map(W3cTraceContext::traceparent).orElse(null);
         String tracestate = payload.traceContext().map(W3cTraceContext::tracestate).orElse(null);
         String envelopeChecksum = checksum(canonicalStrings(

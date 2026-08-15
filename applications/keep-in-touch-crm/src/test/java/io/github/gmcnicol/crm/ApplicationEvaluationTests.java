@@ -15,11 +15,13 @@ import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.Subject;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
+import io.github.gmcnicol.kernel.semanticpack.SemanticVersionAdapter;
 import io.github.gmcnicol.kernel.internal.CurrentExecutionBasisTest;
 import java.sql.DriverManager;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Map;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -84,6 +86,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
     @Autowired ObservationRegistry observations;
     @Autowired ApplicationAvailability availability;
     @Autowired CrmA2uiAdapter a2ui;
+    @Autowired List<SemanticVersionAdapter> semanticAdapters;
     @Autowired @Qualifier("crmDesktopPresentationPack") PresentationPack desktopPresentation;
     @Autowired @Qualifier("crmMobilePresentationPack") PresentationPack mobilePresentation;
 
@@ -446,7 +449,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                         .header("tracestate", "vendor=value")
                         .param("intentId", intentId.toString())
                         .param("payloadType", offer.inputType())
-                        .param("payloadVersion", "1")
+                        .param("payloadVersion", "2")
                         .param("note", "Spoke through rendered control"))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith("text/event-stream"))
@@ -519,11 +522,11 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         assertThat(rendered.html()).contains(
                 "Ada &lt;Lovelace&gt;", "/presentation/intents/" + offer.id(),
                 "name=\"payloadType\" value=\"" + offer.inputType() + "\"",
-                "name=\"payloadVersion\" value=\"1\"", "name=\"note\" value=\"A2UI contact note\"");
+                "name=\"payloadVersion\" value=\"2\"", "name=\"note\" value=\"A2UI contact note\"");
         assertThat(nativeHtml).contains(
                 "/presentation/intents/" + offer.id(),
                 "name=\"payloadType\" value=\"" + offer.inputType() + "\"",
-                "name=\"payloadVersion\" value=\"1\"");
+                "name=\"payloadVersion\" value=\"2\"");
 
         UUID intentId = UUID.randomUUID();
         mvc.perform(post("/presentation/intents/{offerId}", offer.id())
@@ -531,7 +534,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                         .contentType("application/x-www-form-urlencoded")
                         .param("intentId", intentId.toString())
                         .param("payloadType", offer.inputType())
-                        .param("payloadVersion", "1")
+                        .param("payloadVersion", "2")
                         .param("note", "A2UI contact note"))
                 .andExpect(status().isOk());
         assertThat(kernel.findIntents(new IntentQuery(
@@ -645,7 +648,7 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
                 payload.type(), 1, Map.of("note", "Different"))))
                 .isInstanceOf(IntentConflictException.class);
         assertThatThrownBy(() -> kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
-                payload.type(), 2, payload.values())))
+                payload.type(), 3, payload.values())))
                 .isInstanceOf(IntentRejectedException.class);
         assertThatThrownBy(() -> kernel.accept(offer.id(), UUID.randomUUID(), new CandidatePayload(
                 payload.type(), 1, Map.of("unexpected", "value"))))
@@ -1052,6 +1055,59 @@ class ApplicationEvaluationTests extends CurrentExecutionBasisTest {
         assertThat(kernel.findIntents(new IntentQuery(
                 "tenant-one", Optional.empty(), Optional.empty(), Optional.of(successfulIntent.id()), Optional.empty())))
                 .singleElement().satisfies(view -> assertThat(view.status()).isEqualTo(IntentStatus.SUCCEEDED));
+    }
+
+    @Test
+    void readsPersistedHistoricalEventAndPayloadVersionsThroughRegisteredAdapters() throws Exception {
+        var intent = acceptedRecordInteraction(
+                "historical-contract", 160, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
+        assertThat(processUntil(intent.id(), Instant.parse("2031-01-01T00:00:00Z")).status())
+                .isEqualTo(IntentStatus.SUCCEEDED);
+
+        String eventType;
+        int storedVersion;
+        Map<String, String> storedPayload;
+        try (var admin = DriverManager.getConnection(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())) {
+            try (var update = admin.prepareStatement(
+                    "UPDATE kernel.event SET payload_version = 1 WHERE intent_id = ?")) {
+                update.setObject(1, intent.id());
+                update.executeUpdate();
+            }
+            try (var query = admin.prepareStatement("""
+                    SELECT event_record.event_type, event_record.payload_version,
+                           payload.name, payload.value
+                    FROM kernel.event event_record
+                    JOIN kernel.event_payload_value payload ON payload.event_id = event_record.id
+                    WHERE event_record.intent_id = ?
+                    """)) {
+                query.setObject(1, intent.id());
+                try (var result = query.executeQuery()) {
+                    assertThat(result.next()).isTrue();
+                    eventType = result.getString("event_type");
+                    storedVersion = result.getInt("payload_version");
+                    storedPayload = Map.of(result.getString("name"), result.getString("value"));
+                }
+            }
+        }
+
+        var adapter = semanticAdapters.stream()
+                .filter(candidate -> candidate.contract() == SemanticVersionAdapter.Contract.EVENT)
+                .filter(candidate -> candidate.type().equals(eventType))
+                .filter(candidate -> candidate.fromVersion() == storedVersion)
+                .findFirst().orElseThrow();
+        assertThat(adapter.toVersion()).isEqualTo(2);
+        assertThat(adapter.adapt(storedPayload)).containsEntry("contactId", "historical-contract");
+        try (var admin = DriverManager.getConnection(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+             var query = admin.prepareStatement(
+                     "SELECT payload_version FROM kernel.event WHERE intent_id = ?")) {
+            query.setObject(1, intent.id());
+            try (var result = query.executeQuery()) {
+                assertThat(result.next()).isTrue();
+                assertThat(result.getInt(1)).isEqualTo(1);
+            }
+        }
     }
 
     private static String a2uiMessages(UUID offerId) {

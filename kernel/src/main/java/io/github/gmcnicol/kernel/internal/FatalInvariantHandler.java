@@ -8,15 +8,19 @@ final class FatalInvariantHandler {
 
     private final ConfigurableApplicationContext context;
     private final KernelTelemetry telemetry;
+    private final KernelRuntimeHealth health;
 
-    FatalInvariantHandler(ConfigurableApplicationContext context, KernelTelemetry telemetry) {
+    FatalInvariantHandler(
+            ConfigurableApplicationContext context, KernelTelemetry telemetry, KernelRuntimeHealth health) {
         this.context = context;
         this.telemetry = telemetry;
+        this.health = health;
     }
 
     void terminate(FatalInvariantError error) {
+        health.fatal();
         telemetry.fatalInvariant();
         AvailabilityChangeEvent.publish(context, ReadinessState.REFUSING_TRAFFIC);
-        context.close();
+        Thread.ofPlatform().name("kernel-fatal-shutdown").start(context::close);
     }
 }
