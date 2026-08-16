@@ -38,6 +38,10 @@ import lang.taxi.types.TypeKind;
 
 final class TaxiJavaGenerator {
     private static final String STANDARD_SCHEMA = "/META-INF/saas-kernel/standard.taxi";
+    private static final String SUBJECT = "io.github.gmcnicol.kernel.taxi.Subject";
+    private static final String CONTRACT = "io.github.gmcnicol.kernel.taxi.Contract";
+    private static final String PROJECTED_STATE = "io.github.gmcnicol.kernel.taxi.ProjectedState";
+    private static final String FACT = "io.github.gmcnicol.kernel.taxi.Fact";
     private static final Set<String> JAVA_KEYWORDS = Set.of(
             "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
             "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
@@ -112,6 +116,15 @@ final class TaxiJavaGenerator {
                 .filter(type -> authored(type, authoredSources))
                 .sorted(Comparator.comparing(Type::getQualifiedName))
                 .toList();
+        boolean bindingsGenerated = authoredTypes.stream()
+                .anyMatch(type -> annotated(type, PROJECTED_STATE) || annotated(type, FACT));
+        if (bindingsGenerated) {
+            authoredTypes.stream()
+                    .filter(type -> type.getQualifiedName().equals("GeneratedSemanticBindings")
+                            || type.getQualifiedName().startsWith("GeneratedSemanticBindings."))
+                    .findFirst()
+                    .ifPresent(type -> fail(type, "generated-name collision with GeneratedSemanticBindings"));
+        }
         for (Type type : authoredTypes) {
             validateQualifiedIdentifier(type.getQualifiedName(), location(type));
             if (!generatedNames.add(type.getQualifiedName())) fail(type, "generated-name collision");
@@ -138,6 +151,7 @@ final class TaxiJavaGenerator {
                         fail(type, "model inheritance is unsupported");
                     }
                     models.put(type.getQualifiedName(), objectType);
+                    var generatedMembers = new HashSet<String>();
                     for (Field field : objectType.getFields()) {
                         validateIdentifier(field.getName(), location(field));
                         if (FORBIDDEN_RECORD_COMPONENTS.contains(field.getName())) {
@@ -148,6 +162,16 @@ final class TaxiJavaGenerator {
                             fail(field, "computed expressions are unsupported");
                         }
                         validateFieldType(field, field.getType());
+                        if (!generatedMembers.add(constantName(field.getName()))) {
+                            fail(field, "generated field-descriptor collision for '" + constantName(field.getName()) + "'");
+                        }
+                    }
+                    if ((annotated(type, PROJECTED_STATE) || annotated(type, FACT))
+                            && generatedMembers.contains("TYPE")) {
+                        fail(type, "generated field-descriptor collision for 'TYPE'");
+                    }
+                    if (annotated(type, FACT) && generatedMembers.contains("DERIVATION")) {
+                        fail(type, "generated field-descriptor collision for 'DERIVATION'");
                     }
                 }
             } else if (!(type instanceof PrimitiveType) && !(type instanceof ArrayType)) {
@@ -176,7 +200,96 @@ final class TaxiJavaGenerator {
         document.getExpressions().stream()
                 .filter(expression -> authored(expression, authoredSources))
                 .forEach(expression -> fail(expression, "computed expressions are unsupported"));
+        validateRoles(document, authoredTypes);
         rejectRecursion(models);
+    }
+
+    private static void validateRoles(TaxiDocument document, List<Type> authoredTypes) {
+        var projections = new HashMap<String, ObjectType>();
+        for (Type type : authoredTypes) {
+            boolean subject = annotated(type, SUBJECT);
+            boolean projection = annotated(type, PROJECTED_STATE);
+            boolean fact = annotated(type, FACT);
+            if ((subject ? 1 : 0) + (projection ? 1 : 0) + (fact ? 1 : 0) > 1) {
+                fail(type, "semantic role annotations cannot be combined");
+            }
+            if (subject && (!(type instanceof ObjectType objectType)
+                    || objectType.getTypeKind() != TypeKind.Type)) {
+                fail(type, "@Subject may only annotate a named scalar");
+            }
+            if (projection) {
+                if (!(type instanceof ObjectType objectType) || objectType.getTypeKind() != TypeKind.Model) {
+                    fail(type, "@ProjectedState may only annotate a model");
+                }
+                contractVersion(type);
+                String subjectName = annotationString(type, PROJECTED_STATE, "subject");
+                Type subjectType;
+                try {
+                    subjectType = document.type(subjectName);
+                } catch (RuntimeException exception) {
+                    fail(type, "@ProjectedState subject must reference one @Subject scalar: " + subjectName);
+                    return;
+                }
+                if (!(subjectType instanceof ObjectType scalar)
+                        || scalar.getTypeKind() != TypeKind.Type
+                        || !annotated(subjectType, SUBJECT)) {
+                    fail(type, "@ProjectedState subject must reference one @Subject scalar: " + subjectName);
+                }
+                ObjectType previous = projections.putIfAbsent(subjectName, (ObjectType) type);
+                if (previous != null) {
+                    fail(type, "only one @ProjectedState is allowed for @Subject " + subjectName);
+                }
+            }
+            if (fact) {
+                if (!(type instanceof ObjectType objectType) || objectType.getTypeKind() != TypeKind.Model) {
+                    fail(type, "@Fact may only annotate a model");
+                }
+                contractVersion(type);
+                String projectionName = annotationString(type, FACT, "projection");
+                Type projectionType;
+                try {
+                    projectionType = document.type(projectionName);
+                } catch (RuntimeException exception) {
+                    fail(type, "@Fact projection must reference one @ProjectedState model: " + projectionName);
+                    return;
+                }
+                if (!(projectionType instanceof ObjectType model)
+                        || model.getTypeKind() != TypeKind.Model
+                        || !annotated(projectionType, PROJECTED_STATE)) {
+                    fail(type, "@Fact projection must reference one @ProjectedState model: " + projectionName);
+                }
+            }
+        }
+    }
+
+    private static boolean annotated(Type type, String qualifiedName) {
+        return type instanceof lang.taxi.types.Annotatable annotatable
+                && annotatable.getAnnotations().stream()
+                        .anyMatch(annotation -> annotation.getQualifiedName().equals(qualifiedName));
+    }
+
+    private static lang.taxi.types.Annotation annotation(Type type, String qualifiedName) {
+        return ((lang.taxi.types.Annotatable) type).getAnnotations().stream()
+                .filter(candidate -> candidate.getQualifiedName().equals(qualifiedName))
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private static String annotationString(Type type, String annotation, String parameter) {
+        Object value = annotation(type, annotation).parameter(parameter);
+        if (!(value instanceof String text) || text.isBlank()) {
+            fail(type, "@" + simpleName(annotation) + " requires " + parameter + " as a qualified type name");
+        }
+        return (String) value;
+    }
+
+    private static int contractVersion(Type type) {
+        if (!annotated(type, CONTRACT)) fail(type, "durable semantic types require @Contract(version = n)");
+        Object value = annotation(type, CONTRACT).parameter("version");
+        if (!(value instanceof Number number) || number.intValue() < 1) {
+            fail(type, "@Contract version must be a positive integer");
+        }
+        return ((Number) value).intValue();
     }
 
     private static void validateServiceMember(ServiceMember member) {
@@ -251,8 +364,11 @@ final class TaxiJavaGenerator {
 
     private static Map<Path, String> render(TaxiDocument document, String basePackage, Set<String> authoredSources) {
         var files = new HashMap<Path, String>();
-        for (Type type : document.getTypes().stream().sorted(Comparator.comparing(Type::getQualifiedName)).toList()) {
-            if (!authored(type, authoredSources)) continue;
+        var authoredTypes = document.getTypes().stream()
+                .filter(type -> authored(type, authoredSources))
+                .sorted(Comparator.comparing(Type::getQualifiedName))
+                .toList();
+        for (Type type : authoredTypes) {
             String source = switch (type) {
                 case ObjectType objectType when objectType.getTypeKind() == TypeKind.Type -> renderScalar(objectType, basePackage);
                 case ObjectType objectType -> renderModel(objectType, basePackage);
@@ -261,7 +377,29 @@ final class TaxiJavaGenerator {
             };
             files.put(javaPath(type, basePackage), source);
         }
+        var projections = authoredTypes.stream().filter(type -> annotated(type, PROJECTED_STATE)).toList();
+        var facts = authoredTypes.stream().filter(type -> annotated(type, FACT)).toList();
+        if (!projections.isEmpty() || !facts.isEmpty()) {
+            files.put(Path.of(basePackage.replace('.', '/'), "GeneratedSemanticBindings.java"),
+                    renderBindings(basePackage, projections, facts));
+        }
         return files;
+    }
+
+    private static String renderBindings(String basePackage, List<Type> projections, List<Type> facts) {
+        String projectionTypes = projections.stream()
+                .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
+                .collect(java.util.stream.Collectors.joining(", "));
+        String factTypes = facts.stream()
+                .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
+                .collect(java.util.stream.Collectors.joining(", "));
+        return "package " + basePackage + ";\n\n"
+                + "public final class GeneratedSemanticBindings {\n"
+                + "    public static final io.github.gmcnicol.kernel.semanticpack.SemanticBindings INSTANCE = new "
+                + "io.github.gmcnicol.kernel.semanticpack.SemanticBindings(java.util.List.of(" + projectionTypes
+                + "), java.util.List.of(" + factTypes + "));\n\n"
+                + "    private GeneratedSemanticBindings() {}\n"
+                + "}\n";
     }
 
     private static boolean authored(Compiled compiled, Set<String> authoredSources) {
@@ -274,6 +412,11 @@ final class TaxiJavaGenerator {
         String packageName = javaPackage(type, basePackage);
         String name = simpleName(type.getQualifiedName());
         String valueType = PRIMITIVES.get(primitive(type));
+        String descriptor = annotated(type, SUBJECT)
+                ? "    public static final io.github.gmcnicol.kernel.application.SubjectType<" + name + "> TYPE = "
+                        + "new io.github.gmcnicol.kernel.application.SubjectType<>(\"" + type.getQualifiedName()
+                        + "\", " + name + ".class, value -> value.value().toString());\n\n"
+                : "";
         return """
                 package %s;
 
@@ -282,12 +425,13 @@ final class TaxiJavaGenerator {
                 import java.util.Objects;
 
                 public record %s(@JsonValue %s value) {
+                %s
                     @JsonCreator(mode = JsonCreator.Mode.DELEGATING)
                     public %s {
                         Objects.requireNonNull(value, "value");
                     }
                 }
-                """.formatted(packageName, name, valueType, name);
+                """.formatted(packageName, name, valueType, descriptor.stripTrailing(), name);
     }
 
     private static String renderModel(ObjectType type, String basePackage) {
@@ -314,8 +458,45 @@ final class TaxiJavaGenerator {
                         .append(field.getName()).append("\");\n");
             }
         }
+        var descriptors = new StringBuilder();
+        for (Field field : fields) {
+            descriptors.append("    public static final io.github.gmcnicol.kernel.application.FieldType<")
+                    .append(name).append(", ").append(javaType(field.getType(), field.getNullable(), basePackage))
+                    .append("> ").append(constantName(field.getName())).append(" = new ")
+                    .append("io.github.gmcnicol.kernel.application.FieldType<>(\"")
+                    .append(type.getQualifiedName()).append(".").append(field.getName()).append("\", ")
+                    .append(name).append("::").append(field.getName()).append(");\n");
+        }
+        if (annotated(type, PROJECTED_STATE)) {
+            String subjectName = annotationString(type, PROJECTED_STATE, "subject");
+            descriptors.append("    public static final io.github.gmcnicol.kernel.application.ProjectionType<")
+                    .append(basePackage).append(".").append(subjectName).append(", ").append(name)
+                    .append("> TYPE = new ")
+                    .append("io.github.gmcnicol.kernel.application.ProjectionType<>(\"")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
+                    .append(basePackage).append(".").append(subjectName).append(".TYPE, ")
+                    .append(name).append(".class, java.util.List.of(")
+                    .append(fields.stream().map(field -> constantName(field.getName())).collect(java.util.stream.Collectors.joining(", ")))
+                    .append("));\n");
+        }
+        if (annotated(type, FACT)) {
+            String projectionName = annotationString(type, FACT, "projection");
+            descriptors.append("    public static final io.github.gmcnicol.kernel.application.FactType<")
+                    .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.FactType<>(\"")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
+                    .append(basePackage).append(".").append(projectionName).append(".TYPE, ")
+                    .append(name).append(".class);\n")
+                    .append("    public static final io.github.gmcnicol.kernel.semanticpack.FactDerivationSlot<")
+                    .append(basePackage).append(".").append(projectionName).append(", ").append(name)
+                    .append("> DERIVATION = new io.github.gmcnicol.kernel.semanticpack.FactDerivationSlot<>(TYPE);\n");
+        }
+        if (!descriptors.isEmpty()) descriptors.append("\n");
         return "package " + packageName + ";\n\npublic record " + name + "(\n" + components + "\n) {\n"
-                + "    public " + name + " {\n" + body + "    }\n}\n";
+                + descriptors + "    public " + name + " {\n" + body + "    }\n}\n";
+    }
+
+    private static String constantName(String fieldName) {
+        return fieldName.replaceAll("([a-z0-9])([A-Z])", "$1_$2").toUpperCase(java.util.Locale.ROOT);
     }
 
     private static String immutableList(ArrayType array, String expression) {

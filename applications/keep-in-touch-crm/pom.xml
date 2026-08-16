@@ -30,6 +30,16 @@
         <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-postgresql</artifactId><scope>test</scope></dependency>
     </dependencies>
     <build><plugins>
+        <plugin>
+            <groupId>io.github.gmcnicol</groupId>
+            <artifactId>saas-kernel-taxi-generator</artifactId>
+            <version>${project.version}</version>
+            <configuration>
+                <sourceDirectory>${project.basedir}/src/main/resources/semantic-pack</sourceDirectory>
+                <basePackage>io.github.gmcnicol.crm.bindings</basePackage>
+            </configuration>
+            <executions><execution><goals><goal>generate</goal></goals></execution></executions>
+        </plugin>
         <plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId><configuration><image><name>ghcr.io/gmcnicol/keep-in-touch-crm:${project.version}</name></image></configuration></plugin>
         <plugin>
             <groupId>org.apache.maven.plugins</groupId><artifactId>maven-antrun-plugin</artifactId><version>${maven-antrun-plugin.version}</version>

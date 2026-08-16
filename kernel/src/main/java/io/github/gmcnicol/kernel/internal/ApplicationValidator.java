@@ -223,9 +223,8 @@ final class ApplicationValidator {
     }
 
     private TaxiDocument compileTaxi(List<String> sources) {
-        String source = sources.stream().map(this::readText).collect(Collectors.joining("\n"));
         try {
-            return new Compiler(source, sources.getFirst(), List.of(), new CompilerConfig()).compile();
+            return TaxiSchemas.compile(sources, this::readText);
         } catch (RuntimeException exception) {
             throw new IllegalStateException("Taxi compilation failed: " + exception.getMessage(), exception);
         }

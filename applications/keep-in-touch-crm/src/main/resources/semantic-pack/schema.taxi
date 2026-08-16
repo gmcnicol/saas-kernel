@@ -1,7 +1,23 @@
+import io.github.gmcnicol.kernel.taxi.Subject
+import io.github.gmcnicol.kernel.taxi.Contract
+import io.github.gmcnicol.kernel.taxi.ProjectedState
+import io.github.gmcnicol.kernel.taxi.Fact
+
 namespace io.github.gmcnicol.crm
 
+@Subject
 type ContactId inherits String
 
+@Contract(version = 1)
+@ProjectedState(subject = "io.github.gmcnicol.crm.ContactId")
+model FollowUpProjection {
+    contactId: ContactId
+    nextContactDueAt: Instant
+    followUpCompleted: Boolean
+}
+
+@Contract(version = 1)
+@Fact(projection = "io.github.gmcnicol.crm.FollowUpProjection")
 model FollowUpDue {
     contactId: ContactId
 }

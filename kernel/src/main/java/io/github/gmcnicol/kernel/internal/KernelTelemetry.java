@@ -4,6 +4,7 @@ import io.github.gmcnicol.kernel.application.ApplicationVersion;
 import io.github.gmcnicol.kernel.application.EvaluationSnapshot;
 import io.github.gmcnicol.kernel.application.IntentStatus;
 import io.github.gmcnicol.kernel.application.Subject;
+import io.github.gmcnicol.kernel.application.TypedEvaluationSnapshot;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.observation.Observation;
@@ -130,6 +131,19 @@ final class KernelTelemetry {
                 .addKeyValue("tenant", snapshot.tenantId())
                 .addKeyValue("subject_type", snapshot.subject().type())
                 .addKeyValue("subject_correlation", subjectCorrelation(snapshot.tenantId(), snapshot.subject()))
+                .addKeyValue("evaluation_snapshot", snapshot.id())
+                .addKeyValue("application_version", application.version())
+                .addKeyValue("kernel_version", kernelVersion)
+                .addKeyValue("trace_correlation", snapshot.id())
+                .log("evaluation_completed"));
+    }
+
+    void evaluation(TypedEvaluationSnapshot<?, ?> snapshot) {
+        Subject subject = new Subject(snapshot.subject().type().qualifiedName(), snapshot.subject().externalId());
+        afterCommit(() -> LOG.atInfo()
+                .addKeyValue("tenant", snapshot.tenantId())
+                .addKeyValue("subject_type", subject.type())
+                .addKeyValue("subject_correlation", subjectCorrelation(snapshot.tenantId(), subject))
                 .addKeyValue("evaluation_snapshot", snapshot.id())
                 .addKeyValue("application_version", application.version())
                 .addKeyValue("kernel_version", kernelVersion)

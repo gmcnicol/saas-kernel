@@ -6,6 +6,10 @@ import io.github.gmcnicol.kernel.application.AuthorisationEnvelope;
 import io.github.gmcnicol.kernel.application.EvaluationSnapshot;
 import io.github.gmcnicol.kernel.application.Fact;
 import io.github.gmcnicol.kernel.application.CandidatePayload;
+import io.github.gmcnicol.kernel.application.CanonicalCodec;
+import io.github.gmcnicol.kernel.application.CanonicalEvidence;
+import io.github.gmcnicol.kernel.application.FactSet;
+import io.github.gmcnicol.kernel.application.FactType;
 import io.github.gmcnicol.kernel.application.Intent;
 import io.github.gmcnicol.kernel.application.IntentAuditEntry;
 import io.github.gmcnicol.kernel.application.IntentQuery;
@@ -15,8 +19,14 @@ import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.PresentationEnvelope;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
+import io.github.gmcnicol.kernel.application.SemanticType;
+import io.github.gmcnicol.kernel.application.TypedEvaluationSnapshot;
+import io.github.gmcnicol.kernel.application.TypedProjectedState;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
+import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
+import io.github.gmcnicol.kernel.semanticpack.TypedFactDerivation;
+import io.github.gmcnicol.kernel.semanticpack.SemanticBindings;
 import java.sql.Timestamp;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -24,7 +34,9 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.IntStream;
@@ -46,6 +58,9 @@ final class DefaultKernel implements Kernel {
     private final SemanticPackVersion semanticPackVersion;
     private final List<FactDerivation> derivations;
     private final List<ApplicabilityPolicy> policies;
+    private final List<TypedFactDerivation<?, ?>> typedDerivations;
+    private final List<TypedApplicabilityPolicy<?>> typedPolicies;
+    private final CanonicalCodec canonical;
     private final KernelTelemetry telemetry;
 
     DefaultKernel(
@@ -62,6 +77,10 @@ final class DefaultKernel implements Kernel {
             SemanticPackVersion semanticPackVersion,
             List<FactDerivation> derivations,
             List<ApplicabilityPolicy> policies,
+            List<TypedFactDerivation<?, ?>> typedDerivations,
+            List<TypedApplicabilityPolicy<?>> typedPolicies,
+            List<SemanticBindings> typedBindings,
+            CanonicalCodec.Limits canonicalLimits,
             KernelTelemetry telemetry) {
         this.jdbc = jdbc;
         this.transactions = transactions;
@@ -81,6 +100,49 @@ final class DefaultKernel implements Kernel {
         this.policies = policies.stream()
                 .sorted(Comparator.comparing(ApplicabilityPolicy::target).thenComparing(ApplicabilityPolicy::id))
                 .toList();
+        this.typedDerivations = typedDerivations.stream()
+                .sorted(Comparator.comparing(derivation -> derivation.factType().qualifiedName()))
+                .toList();
+        var factKeys = new java.util.HashSet<String>();
+        this.typedDerivations.forEach(derivation -> {
+            String key = descriptorKey(derivation.factType());
+            if (!factKeys.add(key)) throw new IllegalStateException("Duplicate typed Fact derivation: " + key);
+        });
+        this.typedPolicies = typedPolicies.stream()
+                .sorted(Comparator.comparing((TypedApplicabilityPolicy<?> policy) -> policy.target())
+                        .thenComparing(policy -> policy.id()))
+                .toList();
+        var descriptors = new LinkedHashMap<String, SemanticType<?>>();
+        var expectedFacts = new LinkedHashMap<String, FactType<?>>();
+        var subjectProjections = new java.util.HashSet<String>();
+        typedBindings.forEach(bindings -> bindings.projections().forEach(projection -> {
+                addDescriptor(descriptors, projection);
+                if (!subjectProjections.add(projection.subjectType().qualifiedName())) {
+                    throw new IllegalStateException(
+                            "Multiple active typed Projections for Subject: " + projection.subjectType().qualifiedName());
+                }
+            }));
+        typedBindings.forEach(bindings -> bindings.facts().forEach(fact -> {
+                addDescriptor(descriptors, fact);
+                if (expectedFacts.putIfAbsent(descriptorKey(fact), fact) != null) {
+                    throw new IllegalStateException("Duplicate generated Fact descriptor: " + descriptorKey(fact));
+                }
+                if (descriptors.get(descriptorKey(fact.projectionType())) != fact.projectionType()) {
+                    throw new IllegalStateException("Fact references an unregistered Projection: " + fact.qualifiedName());
+                }
+            }));
+        if (!expectedFacts.keySet().equals(factKeys)
+                || this.typedDerivations.stream().anyMatch(
+                        derivation -> expectedFacts.get(descriptorKey(derivation.factType())) != derivation.factType())) {
+            throw new IllegalStateException("Typed Fact derivations do not match generated bindings");
+        }
+        this.typedPolicies.forEach(policy -> {
+            if (descriptors.get(descriptorKey(policy.projectionType())) != policy.projectionType()) {
+                throw new IllegalStateException(
+                        "Typed policy references an unregistered Projection: " + policy.id());
+            }
+        });
+        this.canonical = new CanonicalCodec(descriptors.values(), canonicalLimits);
     }
 
     @Override
@@ -88,6 +150,174 @@ final class DefaultKernel implements Kernel {
         return telemetry.observe(
                 "kernel.evaluation", () -> transactions.execute(status -> evaluateInTransaction(state, evaluatedAt)));
     }
+
+    @Override
+    public <I, P> TypedEvaluationSnapshot<I, P> evaluate(TypedProjectedState<I, P> state, Instant evaluatedAt) {
+        return telemetry.observe(
+                "kernel.evaluation", () -> transactions.execute(status -> evaluateTypedInTransaction(state, evaluatedAt)));
+    }
+
+    private <I, P> TypedEvaluationSnapshot<I, P> evaluateTypedInTransaction(
+            TypedProjectedState<I, P> state, Instant evaluatedAt) {
+        if (evaluatedAt == null) throw new IllegalArgumentException("Evaluation time must be explicit");
+        TenantContext.use(jdbc, state.tenantId());
+        var legacySubject = new io.github.gmcnicol.kernel.application.Subject(
+                state.subject().type().qualifiedName(), state.subject().externalId());
+        TenantContext.lockSubject(jdbc, state.tenantId(), legacySubject);
+        CanonicalEvidence projectionEvidence = canonical.encode(state.type(), state.value());
+        persistTypedProjection(state, projectionEvidence);
+
+        List<TypedDerivedFact> derived = typedDerivations.stream()
+                .filter(derivation -> derivation.factType().projectionType() == state.type())
+                .map(derivation -> derive(derivation, state.value(), evaluatedAt))
+                .toList();
+        var values = new LinkedHashMap<FactType<?>, Object>();
+        derived.forEach(fact -> fact.value().ifPresent(value -> values.put(fact.type(), value)));
+        FactSet facts = FactSet.of(values);
+        List<ApplicableAction> actions = typedPolicies.stream()
+                .filter(policy -> policy.projectionType() == state.type())
+                .filter(policy -> applicable(policy, state.value(), facts))
+                .map(policy -> new ApplicableAction(policy.target(), policy.id()))
+                .toList();
+        Optional<Instant> reevaluateAt = java.util.stream.Stream.concat(
+                        derived.stream().flatMap(result -> result.reevaluateAt().stream()),
+                        typedPolicies.stream()
+                                .filter(policy -> policy.projectionType() == state.type())
+                                .flatMap(policy -> nextChange(policy, state.value(), facts, evaluatedAt).stream()))
+                .filter(evaluatedAt::isBefore)
+                .min(Comparator.naturalOrder());
+        var snapshot = new TypedEvaluationSnapshot<>(
+                UUID.randomUUID(), state.tenantId(), state.subject(), state.version(), state.type(),
+                projectionEvidence.checksum(), evaluatedAt, applicationVersion, kernelVersion,
+                semanticPackVersion, facts, actions, reevaluateAt);
+        TypedEvaluationSnapshot<I, P> persisted = persistTypedSnapshot(snapshot, derived);
+        telemetry.evaluation(persisted);
+        return persisted;
+    }
+
+    @SuppressWarnings("unchecked")
+    private TypedDerivedFact derive(
+            TypedFactDerivation<?, ?> derivation, Object projection, Instant evaluatedAt) {
+        var typed = (TypedFactDerivation<Object, Object>) derivation;
+        TypedFactDerivation.Result<Object> result = typed.derive(projection, evaluatedAt);
+        Optional<CanonicalEvidence> evidence = result.value().map(value -> encodeFact(typed.factType(), value));
+        return new TypedDerivedFact(typed.factType(), typed.id(), result.value(), evidence, result.reevaluateAt());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean applicable(TypedApplicabilityPolicy<?> policy, Object projection, FactSet facts) {
+        return ((TypedApplicabilityPolicy<Object>) policy).isApplicable(projection, facts);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Optional<Instant> nextChange(
+            TypedApplicabilityPolicy<?> policy, Object projection, FactSet facts, Instant evaluatedAt) {
+        return ((TypedApplicabilityPolicy<Object>) policy).nextChange(projection, facts, evaluatedAt);
+    }
+
+    @SuppressWarnings("unchecked")
+    private CanonicalEvidence encodeFact(FactType<?> type, Object value) {
+        return canonical.encode((FactType<Object>) type, value);
+    }
+
+    private <I, P> void persistTypedProjection(
+            TypedProjectedState<I, P> state, CanonicalEvidence evidence) {
+        int inserted = jdbc.update("""
+                INSERT INTO kernel.typed_projected_state
+                    (tenant_id, subject_type, subject_id, state_version, projection_type,
+                     contract_version, format_version, content, checksum)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
+                """, state.tenantId(), state.subject().type().qualifiedName(), state.subject().externalId(),
+                state.version(), evidence.qualifiedType(), evidence.contractVersion(), evidence.formatVersion(),
+                evidence.canonicalJson(), evidence.checksum());
+        String persisted = jdbc.queryForObject("""
+                SELECT checksum FROM kernel.typed_projected_state
+                WHERE tenant_id = ? AND subject_type = ? AND subject_id = ? AND state_version = ?
+                  AND projection_type = ? AND contract_version = ?
+                """, String.class, state.tenantId(), state.subject().type().qualifiedName(),
+                state.subject().externalId(), state.version(), evidence.qualifiedType(), evidence.contractVersion());
+        if (inserted == 0 && !evidence.checksum().equals(persisted)) {
+            throw new IllegalArgumentException("Typed Projected State version already exists with different content");
+        }
+    }
+
+    private <I, P> TypedEvaluationSnapshot<I, P> persistTypedSnapshot(
+            TypedEvaluationSnapshot<I, P> snapshot, List<TypedDerivedFact> facts) {
+        int inserted = jdbc.update("""
+                INSERT INTO kernel.typed_evaluation_snapshot
+                    (id, tenant_id, subject_type, subject_id, state_version, projection_type,
+                     projection_contract_version, state_checksum, evaluated_at, application_id,
+                     application_version, kernel_version, semantic_pack_id, semantic_pack_checksum, reevaluate_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
+                """, snapshot.id(), snapshot.tenantId(), snapshot.subject().type().qualifiedName(),
+                snapshot.subject().externalId(), snapshot.projectedStateVersion(),
+                snapshot.projectionType().qualifiedName(), snapshot.projectionType().contractVersion(),
+                snapshot.projectedStateChecksum(), Timestamp.from(snapshot.evaluatedAt()),
+                snapshot.applicationVersion().id(), snapshot.applicationVersion().version(), snapshot.kernelVersion(),
+                snapshot.semanticPackVersion().id(), snapshot.semanticPackVersion().checksum(),
+                snapshot.reevaluateAt().map(Timestamp::from).orElse(null));
+        if (inserted == 0) {
+            UUID id = jdbc.queryForObject("""
+                    SELECT id FROM kernel.typed_evaluation_snapshot
+                    WHERE tenant_id = ? AND subject_type = ? AND subject_id = ? AND state_version = ?
+                      AND projection_type = ? AND projection_contract_version = ? AND state_checksum = ?
+                      AND evaluated_at = ? AND application_id = ? AND application_version = ?
+                      AND kernel_version = ? AND semantic_pack_id = ? AND semantic_pack_checksum = ?
+                    """, UUID.class, snapshot.tenantId(), snapshot.subject().type().qualifiedName(),
+                    snapshot.subject().externalId(), snapshot.projectedStateVersion(),
+                    snapshot.projectionType().qualifiedName(), snapshot.projectionType().contractVersion(),
+                    snapshot.projectedStateChecksum(), Timestamp.from(snapshot.evaluatedAt()),
+                    snapshot.applicationVersion().id(), snapshot.applicationVersion().version(),
+                    snapshot.kernelVersion(), snapshot.semanticPackVersion().id(),
+                    snapshot.semanticPackVersion().checksum());
+            return new TypedEvaluationSnapshot<>(
+                    id, snapshot.tenantId(), snapshot.subject(), snapshot.projectedStateVersion(),
+                    snapshot.projectionType(), snapshot.projectedStateChecksum(), snapshot.evaluatedAt(),
+                    snapshot.applicationVersion(), snapshot.kernelVersion(), snapshot.semanticPackVersion(),
+                    snapshot.facts(), snapshot.applicableActions(), snapshot.reevaluateAt());
+        }
+        int position = 0;
+        for (TypedDerivedFact fact : facts) {
+            if (fact.evidence().isEmpty()) continue;
+            CanonicalEvidence evidence = fact.evidence().orElseThrow();
+            jdbc.update("""
+                    INSERT INTO kernel.typed_evaluation_fact
+                        (snapshot_id, tenant_id, position, fact_type, contract_version,
+                         format_version, derivation_id, content, checksum)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, snapshot.id(), snapshot.tenantId(), position++, evidence.qualifiedType(),
+                    evidence.contractVersion(), evidence.formatVersion(), fact.derivationId(),
+                    evidence.canonicalJson(), evidence.checksum());
+        }
+        IntStream.range(0, snapshot.applicableActions().size()).forEach(index -> {
+            ApplicableAction action = snapshot.applicableActions().get(index);
+            jdbc.update("""
+                    INSERT INTO kernel.typed_evaluation_applicable_action
+                        (snapshot_id, tenant_id, position, action_id, policy_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    """, snapshot.id(), snapshot.tenantId(), index, action.actionId(), action.policyId());
+        });
+        return snapshot;
+    }
+
+    private static void addDescriptor(Map<String, SemanticType<?>> descriptors, SemanticType<?> descriptor) {
+        String key = descriptorKey(descriptor);
+        SemanticType<?> previous = descriptors.putIfAbsent(key, descriptor);
+        if (previous != null && previous != descriptor) {
+            throw new IllegalStateException("Conflicting semantic descriptor: " + key);
+        }
+    }
+
+    private static String descriptorKey(SemanticType<?> descriptor) {
+        return descriptor.qualifiedName() + "@" + descriptor.contractVersion();
+    }
+
+    private record TypedDerivedFact(
+            FactType<?> type,
+            String derivationId,
+            Optional<Object> value,
+            Optional<CanonicalEvidence> evidence,
+            Optional<Instant> reevaluateAt) {}
 
     @Override
     public AuthorisationEnvelope authorise(

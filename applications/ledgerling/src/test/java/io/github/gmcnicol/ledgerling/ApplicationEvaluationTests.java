@@ -319,6 +319,7 @@ class ApplicationEvaluationTests {
 
     @Test
     void acceptsRecordsReceivedIntentThroughTheApplicationInterface() {
+        Instant processedAt = Instant.now().plusSeconds(30);
         var subject = new Subject("ledgerling.Filing", "intent-acme");
         var snapshot = kernel.evaluate(new ProjectedState(
                 "tenant-one", subject, 30, Map.of(
@@ -342,12 +343,12 @@ class ApplicationEvaluationTests {
         assertThat(intent.actionOfferId()).isEqualTo(offer.id());
         assertThat(intent.status()).isEqualTo(IntentStatus.PENDING);
 
-        var completed = processUntil(intent.id(), Instant.parse("2026-08-15T23:03:00Z"));
+        var completed = processUntil(intent.id(), processedAt);
         assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
         assertThat(filings.outstandingBy(
                 "tenant-one", Instant.parse("2026-08-31T09:00:00Z"), Optional.empty(), 10))
                 .extracting(LedgerlingFilingQueries.FilingOutstanding::filingId).doesNotContain(subject.id());
-        var reevaluated = kernel.processNextReevaluation(Instant.parse("2026-08-15T23:04:00Z")).orElseThrow();
+        var reevaluated = kernel.processNextReevaluation(processedAt.plusSeconds(1)).orElseThrow();
         assertThat(reevaluated.applicableActions()).singleElement().satisfies(action -> assertThat(action.actionId())
                 .isEqualTo("io.github.gmcnicol.ledgerling.LedgerlingActions.startPreparation"));
         assertThat(reevaluated.reevaluateAt()).contains(Instant.parse("2026-08-23T09:00:00Z"));
@@ -355,6 +356,7 @@ class ApplicationEvaluationTests {
 
     @Test
     void rejectsIntentWhenStateChangesAfterAcceptance() {
+        Instant processedAt = Instant.now().plusSeconds(30);
         var subject = new Subject("ledgerling.Filing", "stale-intent-acme");
         var snapshot = kernel.evaluate(new ProjectedState(
                 "tenant-one", subject, 40, Map.of(
@@ -374,7 +376,7 @@ class ApplicationEvaluationTests {
                 "recordsOutstanding", "false",
                 "documentRequestId", "request-85")), Instant.parse("2026-08-15T10:03:00Z"));
 
-        var rejected = processUntil(intent.id(), Instant.parse("2026-08-15T23:04:00Z"));
+        var rejected = processUntil(intent.id(), processedAt);
         assertThat(rejected.status()).isEqualTo(IntentStatus.STALE);
         assertThat(rejected.failureReason()).contains(IntentFailureReason.STATE_OR_SEMANTIC_STALE);
     }

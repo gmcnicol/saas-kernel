@@ -156,6 +156,101 @@ class TaxiJavaGeneratorTests {
         assertTrue(failure.getMessage().matches("(?s).*function\\.taxi:[0-9]+:[0-9]+: computed expressions are unsupported.*"));
     }
 
+    @Test
+    void generatesRoleCheckedTypedDescriptors() throws IOException {
+        Path source = temporaryDirectory.resolve("src/typed.taxi");
+        Path output = temporaryDirectory.resolve("target/generated-sources/taxi");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Subject
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                import io.github.gmcnicol.kernel.taxi.Fact
+                namespace example
+                @Subject type CustomerId inherits String
+                @Contract(version = 1) @ProjectedState(subject = "example.CustomerId")
+                model Customer { id: CustomerId, balance: Decimal }
+                @Contract(version = 2) @Fact(projection = "example.Customer")
+                model Overdrawn { amount: Decimal }
+                """);
+
+        TaxiJavaGenerator.generate(source.getParent(), output, "generated");
+
+        String subject = Files.readString(output.resolve("generated/example/CustomerId.java"));
+        String projection = Files.readString(output.resolve("generated/example/Customer.java"));
+        String fact = Files.readString(output.resolve("generated/example/Overdrawn.java"));
+        String bindings = Files.readString(output.resolve("generated/GeneratedSemanticBindings.java"));
+        assertTrue(subject.contains("SubjectType<CustomerId> TYPE"), subject);
+        assertTrue(projection.contains("FieldType<Customer, generated.example.CustomerId> ID"), projection);
+        assertTrue(projection.contains("ProjectionType<generated.example.CustomerId, Customer> TYPE"), projection);
+        assertTrue(projection.contains("CustomerId.TYPE"), projection);
+        assertTrue(fact.contains("FactType<Overdrawn> TYPE"), fact);
+        assertTrue(fact.contains("FactDerivationSlot<generated.example.Customer, Overdrawn> DERIVATION"), fact);
+        assertTrue(fact.contains("Customer.TYPE"), fact);
+        assertTrue(bindings.contains("generated.example.Customer.TYPE"), bindings);
+        assertTrue(bindings.contains("generated.example.Overdrawn.TYPE"), bindings);
+
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                namespace example
+                type CustomerId inherits String
+                @Contract(version = 1) @ProjectedState(subject = "example.CustomerId")
+                model Customer { id: CustomerId }
+                """);
+        var failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
+        assertTrue(failure.getMessage().contains("@ProjectedState subject must reference one @Subject scalar"),
+                failure::getMessage);
+
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Subject
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                namespace example
+                @Subject type CustomerId inherits String
+                @Contract(version = 1) @ProjectedState(subject = "example.CustomerId") model First {}
+                @Contract(version = 1) @ProjectedState(subject = "example.CustomerId") model Second {}
+                """);
+        var duplicate = assertThrows(
+                IllegalArgumentException.class,
+                () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
+        assertTrue(duplicate.getMessage().contains("only one @ProjectedState is allowed for @Subject"),
+                duplicate::getMessage);
+
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                import io.github.gmcnicol.kernel.taxi.Fact
+                namespace example
+                @Contract(version = 1)
+                @ProjectedState(subject = "example.CustomerId")
+                @Fact(projection = "example.Customer")
+                model Both {}
+                """);
+        var combined = assertThrows(
+                IllegalArgumentException.class,
+                () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
+        assertTrue(combined.getMessage().contains("semantic role annotations cannot be combined"),
+                combined::getMessage);
+
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Subject
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                namespace GeneratedSemanticBindings
+                @Subject type CustomerId inherits String
+                @Contract(version = 1) @ProjectedState(subject = "GeneratedSemanticBindings.CustomerId")
+                model Customer {}
+                """);
+        var inventoryCollision = assertThrows(
+                IllegalArgumentException.class,
+                () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
+        assertTrue(inventoryCollision.getMessage().contains(
+                "generated-name collision with GeneratedSemanticBindings"), inventoryCollision::getMessage);
+    }
+
     private static Map<Path, byte[]> files(Path root) throws IOException {
         try (Stream<Path> paths = Files.walk(root)) {
             return paths.filter(Files::isRegularFile).collect(Collectors.toMap(root::relativize, path -> read(path)));

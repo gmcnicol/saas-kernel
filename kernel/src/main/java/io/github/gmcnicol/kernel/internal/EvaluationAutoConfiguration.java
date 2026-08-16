@@ -9,6 +9,9 @@ import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
+import io.github.gmcnicol.kernel.semanticpack.TypedFactDerivation;
+import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
+import io.github.gmcnicol.kernel.semanticpack.SemanticBindings;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import io.github.gmcnicol.kernel.semanticpack.SemanticVersionAdapter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -65,6 +68,10 @@ public class EvaluationAutoConfiguration {
             @Value("${spring.application.version}") String applicationVersion,
             List<FactDerivation> derivations,
             List<ApplicabilityPolicy> policies,
+            List<TypedFactDerivation<?, ?>> typedDerivations,
+            List<TypedApplicabilityPolicy<?>> typedPolicies,
+            List<SemanticBindings> typedBindings,
+            io.github.gmcnicol.kernel.application.CanonicalCodec.Limits canonicalLimits,
             KernelTelemetry telemetry) {
         return new DefaultKernel(
                 jdbc,
@@ -80,6 +87,10 @@ public class EvaluationAutoConfiguration {
                 semanticPackVersion,
                 derivations,
                 policies,
+                typedDerivations,
+                typedPolicies,
+                typedBindings,
+                canonicalLimits,
                 telemetry);
     }
 
@@ -186,7 +197,6 @@ public class EvaluationAutoConfiguration {
         List<String> sources = java.util.Arrays.stream(manifest.getProperty("taxi-sources").split(","))
                 .map(String::trim)
                 .toList();
-        String source = sources.stream().map(path -> read(resources, path)).collect(Collectors.joining("\n"));
         Set<String> actions = java.util.Arrays.stream(manifest.getProperty("bindings").split(","))
                 .map(String::trim)
                 .filter(binding -> binding.startsWith("ACTION="))
@@ -198,7 +208,7 @@ public class EvaluationAutoConfiguration {
                 .map(binding -> binding.substring("EVENT=".length()))
                 .collect(Collectors.toSet());
         return new TaxiPayloadValidator(
-                new Compiler(source, sources.getFirst(), List.of(), new CompilerConfig()).compile(), actions, events);
+                TaxiSchemas.compile(sources, path -> read(resources, path)), actions, events);
     }
 
     @Bean
@@ -268,6 +278,12 @@ public class EvaluationAutoConfiguration {
         return new KernelTelemetry(
                 observations, meters, tracer.getIfAvailable(() -> Tracer.NOOP),
                 new ApplicationVersion(applicationId, applicationVersion), kernelVersion(), subjectKey, subjectKeyId);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    io.github.gmcnicol.kernel.application.CanonicalCodec.Limits canonicalCodecLimits() {
+        return io.github.gmcnicol.kernel.application.CanonicalCodec.Limits.defaults();
     }
 
     @Bean

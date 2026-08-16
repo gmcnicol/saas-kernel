@@ -10,6 +10,8 @@ public interface Kernel {
 
     EvaluationSnapshot evaluate(ProjectedState state, Instant evaluatedAt);
 
+    <I, P> TypedEvaluationSnapshot<I, P> evaluate(TypedProjectedState<I, P> state, Instant evaluatedAt);
+
     AuthorisationEnvelope authorise(String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt);
 
     PresentationEnvelope present(String tenantId, UUID snapshotId, Principal principal, Instant presentedAt);

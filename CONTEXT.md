@@ -46,6 +46,10 @@ _Avoid_: Permission, raw field
 An immutable result containing Facts and Applicable Actions derived for a subject from one Projected State version, at an explicit evaluation time, using one Semantic Pack version.
 _Avoid_: Evidence graph, decision log
 
+**Canonical Evidence**:
+The exact versioned UTF-8 JSON and checksum persisted for one typed Projected State, Fact, Candidate Payload, or Event. It protects semantic history and is not an Application business model or query store.
+_Avoid_: Source of truth, business JSON, relational projection
+
 **Authorisation Envelope**:
 A principal-specific projection containing only Cedar-authorised fields, Facts, and Action Offers for one Evaluation Snapshot.
 _Avoid_: Authorised Evaluation, Evaluation Snapshot

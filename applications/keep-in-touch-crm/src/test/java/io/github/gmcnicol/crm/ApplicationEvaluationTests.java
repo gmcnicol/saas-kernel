@@ -17,6 +17,15 @@ import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.RetryableIntentException;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.application.Subject;
+import io.github.gmcnicol.kernel.application.TypedProjectedState;
+import io.github.gmcnicol.kernel.application.TypedSubject;
+import io.github.gmcnicol.kernel.semanticpack.TypedFactDerivation;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.ContactId;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpDue;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpProjection;
+import io.github.gmcnicol.crm.bindings.GeneratedSemanticBindings;
+import io.github.gmcnicol.kernel.semanticpack.SemanticBindings;
+import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.application.AuthorisationModel;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
@@ -31,6 +40,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationHandler;
@@ -50,6 +60,9 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -68,6 +81,7 @@ import org.testcontainers.utility.DockerImageName;
 @SpringBootTest
 @AutoConfigureMockMvc
 @ExtendWith(OutputCaptureExtension.class)
+@Import(ApplicationEvaluationTests.TypedEvaluationConfiguration.class)
 class ApplicationEvaluationTests {
 
     @Container
@@ -96,6 +110,8 @@ class ApplicationEvaluationTests {
     @Autowired CrmA2uiAdapter a2ui;
     @Autowired CrmContactQueries contacts;
     @Autowired List<SemanticVersionAdapter> semanticAdapters;
+    @Autowired @Qualifier("typedProjectionSeen") AtomicReference<FollowUpProjection> typedProjectionSeen;
+    @Autowired @Qualifier("typedPolicyProjectionSeen") AtomicReference<FollowUpProjection> typedPolicyProjectionSeen;
     @Autowired @Qualifier("crmDesktopPresentationPack") PresentationPack desktopPresentation;
     @Autowired @Qualifier("crmMobilePresentationPack") PresentationPack mobilePresentation;
 
@@ -160,6 +176,62 @@ class ApplicationEvaluationTests {
     void restoreCurrentExecutionBasis() {
         org.mockito.Mockito.reset(
                 authorisationModel, semanticPack, recordInteractionHandler, followUpDueDerivation, clock);
+    }
+
+    @Test
+    void evaluatesGeneratedProjectionIntoDurableTypedFact() {
+        var dueAt = Instant.parse("2040-08-15T09:00:00Z");
+        seedOpenContact("typed-alex", dueAt);
+        FollowUpProjection projection = new TransactionTemplate(transactionManager).execute(status -> {
+            useTenant();
+            return jdbc.queryForObject("""
+                    SELECT contact_id, next_contact_due_at, open_follow_up_id IS NULL AS completed
+                    FROM crm_contact_engagement_projection
+                    WHERE tenant_id = 'tenant-one' AND contact_id = 'typed-alex'
+                    """, (result, row) -> new FollowUpProjection(
+                            new ContactId(result.getString("contact_id")),
+                            result.getTimestamp("next_contact_due_at").toInstant(),
+                            result.getBoolean("completed")));
+        });
+        var state = new TypedProjectedState<>(
+                "tenant-one",
+                new TypedSubject<>(ContactId.TYPE, projection.contactId()),
+                400,
+                FollowUpProjection.TYPE,
+                projection);
+
+        var snapshot = kernel.evaluate(state, dueAt.plusSeconds(1));
+
+        assertThat(typedProjectionSeen.get()).isSameAs(projection);
+        assertThat(typedPolicyProjectionSeen.get()).isSameAs(projection);
+        assertThat(snapshot.projectionType()).isSameAs(FollowUpProjection.TYPE);
+        assertThat(snapshot.facts().find(FollowUpDue.TYPE))
+                .contains(new FollowUpDue(new ContactId("typed-alex")));
+        assertThat(snapshot.applicableActions())
+                .extracting(action -> action.actionId())
+                .containsExactly("io.github.gmcnicol.crm.CrmActions.recordInteraction");
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            useTenant();
+            assertThat(jdbc.queryForMap("""
+                    SELECT projection_type, contract_version, format_version, content, checksum
+                    FROM kernel.typed_projected_state
+                    WHERE tenant_id = 'tenant-one' AND subject_id = 'typed-alex'
+                    """))
+                    .containsEntry("projection_type", "io.github.gmcnicol.crm.FollowUpProjection")
+                    .containsEntry("contract_version", 1)
+                    .containsEntry("format_version", 1)
+                    .containsEntry("content", "{\"contactId\":\"typed-alex\",\"followUpCompleted\":false,\"nextContactDueAt\":\"2040-08-15T09:00:00Z\"}");
+            assertThat(jdbc.queryForObject("""
+                    SELECT count(*) FROM kernel.typed_evaluation_fact
+                    WHERE snapshot_id = ? AND fact_type = 'io.github.gmcnicol.crm.FollowUpDue'
+                      AND contract_version = 1 AND format_version = 1
+                    """, Integer.class, snapshot.id())).isEqualTo(1);
+            assertThat(jdbc.queryForObject("""
+                    SELECT action_id FROM kernel.typed_evaluation_applicable_action
+                    WHERE snapshot_id = ? AND position = 0
+                    """, String.class, snapshot.id()))
+                    .isEqualTo("io.github.gmcnicol.crm.CrmActions.recordInteraction");
+        });
     }
 
     @Test
@@ -765,6 +837,7 @@ class ApplicationEvaluationTests {
 
     @Test
     void processesRecordInteractionAtomicallyAndRemovesFollowUpActions() {
+        Instant processedAt = Instant.now().plusSeconds(30);
         var subject = new Subject("crm.Contact", "processed-alex");
         var initial = new ProjectedState("tenant-one", subject, 40, Map.of(
                 "followUpDueAt", "2026-08-15T09:00:00Z",
@@ -783,7 +856,7 @@ class ApplicationEvaluationTests {
                 "tenant-one", Instant.parse("2026-08-15T23:00:00Z"), Optional.empty(), 10))
                 .extracting(CrmContactQueries.ContactDue::contactId).contains(subject.id());
 
-        var completed = processUntil(intent.id(), Instant.parse("2026-08-15T23:02:00Z"));
+        var completed = processUntil(intent.id(), processedAt);
 
         assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
         var resultingState = new ProjectedState("tenant-one", subject, 41, Map.of(
@@ -831,7 +904,7 @@ class ApplicationEvaluationTests {
         var snoozeIntent = kernel.accept(snooze.id(), UUID.randomUUID(), new CandidatePayload(
                 "io.github.gmcnicol.crm.SnoozeFollowUpInput", 1,
                 Map.of("until", "2026-08-20T09:00:00Z")));
-        assertThat(processUntil(snoozeIntent.id(), Instant.parse("2026-08-15T23:06:00Z")).status())
+        assertThat(processUntil(snoozeIntent.id(), processedAt).status())
                 .isEqualTo(IntentStatus.SUCCEEDED);
         Instant projectedInteraction = new TransactionTemplate(transactionManager).execute(status -> {
             useTenant();
@@ -846,7 +919,7 @@ class ApplicationEvaluationTests {
     @Test
     void rollsBackEveryCompletionEffectWhenAuditInsertionFails(CapturedOutput output) throws Exception {
         assertThat(kernel.processNext(Instant.EPOCH)).isEmpty();
-        var processedAt = Instant.parse("2026-08-15T23:00:00Z");
+        var processedAt = Instant.now().plusSeconds(30);
         while (kernel.processNext(processedAt).isPresent()) {
             // Drain Intent left by other independent acceptance tests.
         }
@@ -918,7 +991,8 @@ class ApplicationEvaluationTests {
 
     @Test
     void rejectsStaleInapplicableAndReauthorisationDeniedIntentWithoutEvents() throws Exception {
-        while (kernel.processNext(Instant.parse("2026-08-15T23:00:00Z")).isPresent()) {
+        Instant processedAt = Instant.now().plusSeconds(30);
+        while (kernel.processNext(processedAt).isPresent()) {
             // Drain Intent left by other independent acceptance tests.
         }
 
@@ -927,14 +1001,14 @@ class ApplicationEvaluationTests {
         kernel.evaluate(new ProjectedState("tenant-one", new Subject("crm.Contact", "stale-execution"), 61, Map.of(
                 "followUpDueAt", "2026-08-15T09:00:00Z", "followUpCompleted", "false")),
                 Instant.parse("2026-08-15T10:01:00Z"));
-        var staleResult = processUntil(stale.id(), Instant.parse("2026-08-15T23:01:00Z"));
+        var staleResult = processUntil(stale.id(), processedAt);
         assertThat(staleResult.status()).isEqualTo(IntentStatus.STALE);
         assertThat(staleResult.failureReason()).contains(IntentFailureReason.STATE_OR_SEMANTIC_STALE);
 
         var stalePack = acceptedRecordInteraction(
                 "stale-pack", 70, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
         changeCurrentSemanticPack();
-        var stalePackResult = processUntil(stalePack.id(), Instant.parse("2026-08-15T23:02:00Z"));
+        var stalePackResult = processUntil(stalePack.id(), processedAt);
         assertThat(stalePackResult.status()).isEqualTo(IntentStatus.STALE);
         assertThat(stalePackResult.failureReason()).contains(IntentFailureReason.STATE_OR_SEMANTIC_STALE);
         restoreCurrentSemanticPack();
@@ -949,7 +1023,7 @@ class ApplicationEvaluationTests {
         var denied = acceptedRecordInteraction(
                 "authorisation-revoked", 90, "2026-08-15T09:00:00Z", "2026-08-15T10:00:00Z");
         revokeCurrentAuthorisation();
-        var deniedResult = processUntil(denied.id(), Instant.parse("2026-08-15T23:02:00Z"));
+        var deniedResult = processUntil(denied.id(), processedAt);
         assertThat(deniedResult.status()).isEqualTo(IntentStatus.FAILED);
         assertThat(deniedResult.failureReason()).contains(IntentFailureReason.AUTHORISATION_DENIED);
         assertThat(kernel.accept(denied.actionOfferId(), requestKey("authorisation-revoked"), interactionPayload())
@@ -1324,5 +1398,60 @@ class ApplicationEvaluationTests {
     private void useTenant() {
         jdbc.execute("SET LOCAL ROLE kernel_runtime");
         jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
+    }
+
+    @TestConfiguration
+    static class TypedEvaluationConfiguration {
+        @Bean
+        AtomicReference<FollowUpProjection> typedProjectionSeen() {
+            return new AtomicReference<>();
+        }
+
+        @Bean
+        AtomicReference<FollowUpProjection> typedPolicyProjectionSeen() {
+            return new AtomicReference<>();
+        }
+
+        @Bean
+        SemanticBindings typedBindings() {
+            return GeneratedSemanticBindings.INSTANCE;
+        }
+
+        @Bean
+        TypedFactDerivation<FollowUpProjection, FollowUpDue> typedFollowUpDueDerivation(
+                @Qualifier("typedProjectionSeen") AtomicReference<FollowUpProjection> seen) {
+            return FollowUpDue.DERIVATION.bind((projection, evaluatedAt) -> {
+                seen.set(projection);
+                return projection.followUpCompleted() || evaluatedAt.isBefore(projection.nextContactDueAt())
+                        ? TypedFactDerivation.Result.none()
+                        : TypedFactDerivation.Result.fact(new FollowUpDue(projection.contactId()));
+            });
+        }
+
+        @Bean
+        TypedApplicabilityPolicy<FollowUpProjection> typedRecordInteractionApplicability(
+                @Qualifier("typedPolicyProjectionSeen")
+                AtomicReference<FollowUpProjection> typedPolicyProjectionSeen) {
+            return new TypedApplicabilityPolicy<>() {
+                @Override public io.github.gmcnicol.kernel.application.ProjectionType<?, FollowUpProjection>
+                        projectionType() {
+                    return FollowUpProjection.TYPE;
+                }
+
+                @Override public String target() {
+                    return "io.github.gmcnicol.crm.CrmActions.recordInteraction";
+                }
+
+                @Override public String id() {
+                    return "io.github.gmcnicol.crm.typedFollowUpActions";
+                }
+
+                @Override public boolean isApplicable(
+                        FollowUpProjection projection, io.github.gmcnicol.kernel.application.FactSet facts) {
+                    typedPolicyProjectionSeen.set(projection);
+                    return facts.find(FollowUpDue.TYPE).isPresent();
+                }
+            };
+        }
     }
 }
