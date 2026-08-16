@@ -1,0 +1,23 @@
+namespace io.github.gmcnicol.kernel.taxi
+
+annotation Subject
+
+annotation Contract {
+    version: Int
+}
+
+annotation ProjectedState {
+    subject: String
+}
+
+annotation Fact {
+    projection: String
+}
+
+annotation Event
+
+annotation ActionService {
+    projection: String
+}
+
+annotation Published

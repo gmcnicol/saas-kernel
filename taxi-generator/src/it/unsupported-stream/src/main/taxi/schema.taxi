@@ -1,0 +1,7 @@
+namespace example
+
+model Event {}
+
+service Events {
+    stream events: Stream<Event>
+}

@@ -1,0 +1,22 @@
+import io.github.gmcnicol.kernel.taxi.Subject
+
+namespace customer.crm
+
+@Subject
+type CustomerId inherits String
+
+enum Status {
+    Active,
+    Dormant
+}
+
+model Customer {
+    id: CustomerId
+    name: String
+    nickname: String?
+    tags: String[]
+    aliases: String[]?
+    status: Status
+}
+
+model Removable {}
