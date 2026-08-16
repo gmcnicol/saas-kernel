@@ -4,14 +4,17 @@ import io.github.gmcnicol.kernel.taxi.ProjectedState
 import io.github.gmcnicol.kernel.taxi.Fact
 import io.github.gmcnicol.kernel.taxi.Event
 import io.github.gmcnicol.kernel.taxi.ActionService
+import io.github.gmcnicol.kernel.taxi.Published
 
 namespace io.github.gmcnicol.crm
 
 @Subject
+@Published
 type ContactId inherits String
 
 @Contract(version = 1)
 @ProjectedState(subject = "io.github.gmcnicol.crm.ContactId")
+@Published
 model FollowUpProjection {
     contactId: ContactId
     nextContactDueAt: Instant
@@ -20,52 +23,26 @@ model FollowUpProjection {
 
 @Contract(version = 1)
 @Fact(projection = "io.github.gmcnicol.crm.FollowUpProjection")
+@Published
 model FollowUpDue {
     contactId: ContactId
 }
 
-model RecordInteractionInput {
-    note: String
-}
-
-model InteractionRecorded {
-    contactId: ContactId
-}
-
 @Contract(version = 1)
+@Published
 model RecordInteractionCandidateV1 {
     note: String
 }
 
 @Contract(version = 1)
 @Event
+@Published
 model InteractionRecordedEventV1 {
     contactId: ContactId
 }
 
-model SnoozeFollowUpInput {
-    until: Instant
-}
-
-model FollowUpSnoozed {
-    contactId: ContactId
-}
-
-model CompleteFollowUpInput {
-    note: String
-}
-
-model FollowUpCompleted {
-    contactId: ContactId
-}
-
-service CrmActions {
-    operation recordInteraction(input: RecordInteractionInput): InteractionRecorded
-    operation snoozeFollowUp(input: SnoozeFollowUpInput): FollowUpSnoozed
-    operation completeFollowUp(input: CompleteFollowUpInput): FollowUpCompleted
-}
-
 @ActionService(projection = "io.github.gmcnicol.crm.FollowUpProjection")
+@Published
 service TypedCrmActions {
     operation recordInteraction(input: RecordInteractionCandidateV1): InteractionRecordedEventV1[]
 }

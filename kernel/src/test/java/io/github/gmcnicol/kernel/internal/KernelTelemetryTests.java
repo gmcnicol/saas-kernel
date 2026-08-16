@@ -42,7 +42,6 @@ class KernelTelemetryTests {
         telemetry.leaseLost();
         telemetry.backlogAge(Duration.ofSeconds(3));
         telemetry.reevaluation("completed", Duration.ofSeconds(4));
-        telemetry.fatalInvariant();
 
         assertThat(result).isEqualTo("completed");
         assertThat(ran).isTrue();
@@ -53,8 +52,7 @@ class KernelTelemetryTests {
                 "kernel.intent.backlog.age",
                 "kernel.intent.end.to.end",
                 "kernel.reevaluation.outcomes",
-                "kernel.reevaluation.backlog.age",
-                "kernel.fatal.invariants");
+                "kernel.reevaluation.backlog.age");
         assertThat(meters.getMeters()).allSatisfy(meter -> assertThat(meter.getId().getTags())
                 .allSatisfy(tag -> assertThat(tag.getKey()).isIn("outcome", "worker")));
     }

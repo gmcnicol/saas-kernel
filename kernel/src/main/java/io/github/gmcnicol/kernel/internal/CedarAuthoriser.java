@@ -10,8 +10,6 @@ import com.cedarpolicy.value.EntityUID;
 import com.cedarpolicy.value.CedarMap;
 import com.cedarpolicy.value.Value;
 import io.github.gmcnicol.kernel.application.Principal;
-import io.github.gmcnicol.kernel.application.Subject;
-import io.github.gmcnicol.kernel.application.AuthorisationModel;
 import io.github.gmcnicol.kernel.application.ActionType;
 import io.github.gmcnicol.kernel.application.FactType;
 import io.github.gmcnicol.kernel.application.FactSet;
@@ -31,7 +29,6 @@ final class CedarAuthoriser {
     private final BasicAuthorizationEngine engine = new BasicAuthorizationEngine();
     private final Schema schema;
     private final PolicySet policies;
-    private final AuthorisationModel model;
     private final List<TypedAuthorisationModel<?>> typedModels;
     private final String bundleId;
     private final String bundleChecksum;
@@ -39,13 +36,11 @@ final class CedarAuthoriser {
     CedarAuthoriser(
             Schema schema,
             PolicySet policies,
-            AuthorisationModel model,
             List<TypedAuthorisationModel<?>> typedModels,
             String bundleId,
             String bundleChecksum) {
         this.schema = schema;
         this.policies = policies;
-        this.model = model;
         this.typedModels = List.copyOf(typedModels);
         if (this.typedModels.stream().map(TypedAuthorisationModel::projectionType).distinct().count()
                 != this.typedModels.size()) {
@@ -53,17 +48,6 @@ final class CedarAuthoriser {
         }
         this.bundleId = bundleId;
         this.bundleChecksum = bundleChecksum;
-    }
-
-    boolean allows(Principal principal, Subject subject, String operation) {
-        if (!model.subjectTypes().contains(subject.type())) {
-            return false;
-        }
-        try {
-            return allows(principal, model.resourceType(), subject.id(), operation);
-        } catch (Exception exception) {
-            return false;
-        }
     }
 
     <P> TypedAuthorisationModel<P> model(ProjectionType<?, P> projectionType) {
@@ -141,26 +125,6 @@ final class CedarAuthoriser {
         field.toCedar(field.value(fact)).ifPresent(value -> attributes.put(field.name(), value));
     }
 
-    private boolean allows(Principal principal, String resourceType, String resourceId, String operation) {
-        try {
-            Entity principalEntity = entity(principal.type(), principal.id());
-            Entity resourceEntity = entity(resourceType, resourceId);
-            var request = new AuthorizationRequest(
-                    principalEntity.getEUID(),
-                    euid("Action", operation),
-                    resourceEntity.getEUID(),
-                    Optional.of(Map.of()),
-                    Optional.of(schema),
-                    true);
-            return engine.isAuthorized(request, policies, Set.of(principalEntity, resourceEntity))
-                    .success
-                    .map(response -> response.isAllowed())
-                    .orElse(false);
-        } catch (Exception exception) {
-            return false;
-        }
-    }
-
     @SuppressWarnings("unchecked")
     private static <P> TypedAuthorisationModel<P> cast(TypedAuthorisationModel<?> model) {
         return (TypedAuthorisationModel<P>) model;
@@ -168,10 +132,6 @@ final class CedarAuthoriser {
 
     private static String simpleName(String qualifiedName) {
         return qualifiedName.substring(qualifiedName.lastIndexOf('.') + 1);
-    }
-
-    Map<String, String> fields() {
-        return model.fields();
     }
 
     String bundleId() {

@@ -31,9 +31,7 @@ public record ActionType<P, C, E>(
     public TypedApplicabilityPolicy<P> bindApplicability(BiPredicate<P, FactSet> implementation) {
         Objects.requireNonNull(implementation, "implementation");
         return new TypedApplicabilityPolicy<>() {
-            @Override public ProjectionType<?, P> projectionType() { return projectionType; }
-            @Override public String target() { return qualifiedName; }
-            @Override public String id() { return qualifiedName + ".applicability"; }
+            @Override public ActionType<P, C, E> actionType() { return ActionType.this; }
             @Override public boolean isApplicable(P projection, FactSet facts) {
                 return implementation.test(projection, facts);
             }

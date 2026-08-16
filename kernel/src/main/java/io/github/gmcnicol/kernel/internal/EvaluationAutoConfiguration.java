@@ -4,17 +4,11 @@ import com.cedarpolicy.model.policy.PolicySet;
 import com.cedarpolicy.model.schema.Schema;
 import io.github.gmcnicol.kernel.application.ApplicationVersion;
 import io.github.gmcnicol.kernel.application.AuthorisationBundle;
-import io.github.gmcnicol.kernel.application.AuthorisationModel;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
-import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
-import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
-import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.TypedFactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.SemanticBindings;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
-import io.github.gmcnicol.kernel.semanticpack.SemanticVersionAdapter;
-import io.github.gmcnicol.kernel.semanticpack.TypedSemanticAdapter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
@@ -58,9 +52,6 @@ public class EvaluationAutoConfiguration {
     DefaultKernel kernel(
             JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager,
-            AuthorisationService authorisation,
-            IntentService intents,
-            IntentExecutionService execution,
             TypedActionService typedActions,
             IntentQueryService intentQueries,
             IntentWorkerProperties worker,
@@ -69,18 +60,13 @@ public class EvaluationAutoConfiguration {
             SemanticPackVersion semanticPackVersion,
             @Value("${spring.application.name}") String applicationId,
             @Value("${spring.application.version}") String applicationVersion,
-            List<FactDerivation> derivations,
-            List<ApplicabilityPolicy> policies,
             List<TypedFactDerivation<?, ?>> typedDerivations,
             List<TypedApplicabilityPolicy<?>> typedPolicies,
             List<SemanticBindings> typedBindings,
-            TypedSemanticCompatibility typedCompatibility) {
+            SemanticCodec semanticCodec) {
         return new DefaultKernel(
                 jdbc,
                 new TransactionTemplate(transactionManager),
-                authorisation,
-                intents,
-                execution,
                 typedActions,
                 intentQueries,
                 worker,
@@ -88,47 +74,16 @@ public class EvaluationAutoConfiguration {
                 new ApplicationVersion(applicationId, applicationVersion),
                 kernelVersion(),
                 semanticPackVersion,
-                derivations,
-                policies,
                 typedDerivations,
                 typedPolicies,
                 typedBindings,
-                typedCompatibility,
+                semanticCodec,
                 telemetry);
-    }
-
-    @Bean
-    @DependsOn({"applicationValidator", "runtimeRoleValidator"})
-    AuthorisationService authorisationService(
-            JdbcTemplate jdbc,
-            PlatformTransactionManager transactionManager,
-            CedarAuthoriser cedar,
-            EvaluationStore evaluations,
-            TaxiPayloadValidator payloads,
-            KernelTelemetry telemetry) {
-        return new AuthorisationService(
-                jdbc, new TransactionTemplate(transactionManager), cedar, evaluations, payloads, telemetry);
-    }
-
-    @Bean
-    EvaluationStore evaluationStore(JdbcTemplate jdbc) {
-        return new EvaluationStore(jdbc);
     }
 
     @Bean
     IntentQueryService intentQueryService(JdbcTemplate jdbc, PlatformTransactionManager transactionManager) {
         return new IntentQueryService(jdbc, new TransactionTemplate(transactionManager));
-    }
-
-    @Bean
-    IntentInvariantValidator intentInvariantValidator() {
-        return new IntentInvariantValidator();
-    }
-
-    @Bean
-    FatalInvariantHandler fatalInvariantHandler(
-            ConfigurableApplicationContext context, KernelTelemetry telemetry, KernelRuntimeHealth health) {
-        return new FatalInvariantHandler(context, telemetry, health);
     }
 
     @Bean
@@ -166,7 +121,6 @@ public class EvaluationAutoConfiguration {
     @Bean
     CedarAuthoriser cedarAuthoriser(
             List<AuthorisationBundle> bundles,
-            List<AuthorisationModel> models,
             List<io.github.gmcnicol.kernel.application.TypedAuthorisationModel<?>> typedModels,
             ResourceLoader resources) {
         Properties manifest = load(resources, bundles.getFirst().manifestResource());
@@ -180,7 +134,6 @@ public class EvaluationAutoConfiguration {
             return new CedarAuthoriser(
                     Schema.parse(Schema.JsonOrCedar.Cedar, schema),
                     PolicySet.parsePolicies(policies),
-                    models.getFirst(),
                     typedModels,
                     manifest.getProperty("id"),
                     checksum);
@@ -197,76 +150,6 @@ public class EvaluationAutoConfiguration {
     }
 
     @Bean
-    TaxiPayloadValidator taxiPayloadValidator(List<SemanticPack> semanticPacks, ResourceLoader resources) {
-        Properties manifest = load(resources, semanticPacks.getFirst().manifestResource());
-        List<String> sources = java.util.Arrays.stream(manifest.getProperty("taxi-sources").split(","))
-                .map(String::trim)
-                .toList();
-        Set<String> actions = java.util.Arrays.stream(manifest.getProperty("bindings").split(","))
-                .map(String::trim)
-                .filter(binding -> binding.startsWith("ACTION="))
-                .map(binding -> binding.substring("ACTION=".length()))
-                .collect(Collectors.toSet());
-        Set<String> events = java.util.Arrays.stream(manifest.getProperty("bindings").split(","))
-                .map(String::trim)
-                .filter(binding -> binding.startsWith("EVENT="))
-                .map(binding -> binding.substring("EVENT=".length()))
-                .collect(Collectors.toSet());
-        return new TaxiPayloadValidator(
-                TaxiSchemas.compile(sources, path -> read(resources, path)), actions, events);
-    }
-
-    @Bean
-    IntentService intentService(
-            JdbcTemplate jdbc,
-            PlatformTransactionManager transactionManager,
-            EvaluationStore evaluations,
-            CedarAuthoriser cedar,
-            TaxiPayloadValidator payloads,
-            SemanticPackVersion semanticPackVersion,
-            List<ApplicabilityPolicy> policies,
-            List<FactDerivation> derivations,
-            Clock clock,
-            KernelTelemetry telemetry,
-            SemanticCompatibility compatibility) {
-        return new IntentService(
-                jdbc,
-                new TransactionTemplate(transactionManager),
-                evaluations,
-                cedar,
-                payloads,
-                semanticPackVersion,
-                policies,
-                derivations,
-                clock,
-                telemetry,
-                compatibility);
-    }
-
-    @Bean
-    IntentExecutionService intentExecutionService(
-            JdbcTemplate jdbc,
-            PlatformTransactionManager transactionManager,
-            List<io.github.gmcnicol.kernel.semanticpack.IntentHandler> handlers,
-            List<io.github.gmcnicol.kernel.semanticpack.EventProjector> projectors,
-            TaxiPayloadValidator payloads,
-            SemanticPackVersion semanticPackVersion,
-            List<ApplicabilityPolicy> policies,
-            List<FactDerivation> derivations,
-            CedarAuthoriser cedar,
-            IntentWorkerProperties worker,
-            IntentInvariantValidator invariants,
-            FatalInvariantHandler fatalInvariants,
-            Clock clock,
-            KernelTelemetry telemetry,
-            SemanticCompatibility compatibility) {
-        return new IntentExecutionService(
-                jdbc, new TransactionTemplate(transactionManager), handlers, projectors, payloads,
-                semanticPackVersion, policies, derivations, cedar, worker, invariants, fatalInvariants, clock,
-                telemetry, compatibility);
-    }
-
-    @Bean
     TypedActionService typedActionService(
             JdbcTemplate jdbc,
             PlatformTransactionManager transactionManager,
@@ -280,23 +163,17 @@ public class EvaluationAutoConfiguration {
             List<io.github.gmcnicol.kernel.semanticpack.TypedEventProjector<?, ?>> projectors,
             List<TypedApplicabilityPolicy<?>> policies,
             List<TypedFactDerivation<?, ?>> derivations,
-            TypedSemanticCompatibility compatibility) {
+            SemanticCodec semanticCodec) {
         return new TypedActionService(
                 jdbc, new TransactionTemplate(transactionManager), cedar, worker, clock, telemetry, semanticPack, bindings,
-                handlers, projectors, policies, derivations, compatibility);
+                handlers, projectors, policies, derivations, semanticCodec);
     }
 
     @Bean
-    TypedSemanticCompatibility typedSemanticCompatibility(
+    SemanticCodec semanticCodec(
             List<SemanticBindings> bindings,
-            List<TypedSemanticAdapter<?, ?>> adapters,
             io.github.gmcnicol.kernel.application.CanonicalCodec.Limits limits) {
-        return new TypedSemanticCompatibility(bindings, adapters, limits);
-    }
-
-    @Bean
-    SemanticCompatibility semanticCompatibility(List<SemanticVersionAdapter> adapters) {
-        return new SemanticCompatibility(adapters);
+        return new SemanticCodec(bindings, limits);
     }
 
     @Bean
@@ -336,7 +213,6 @@ public class EvaluationAutoConfiguration {
     InfoContributor kernelInfo(
             SemanticPackVersion semanticPack,
             CedarAuthoriser cedar,
-            List<PresentationPack> presentations,
             ResourceLoader resources,
             @Value("${spring.application.name}") String applicationId,
             @Value("${spring.application.version}") String applicationVersion) {
@@ -346,13 +222,7 @@ public class EvaluationAutoConfiguration {
                 .withDetail("semanticPack", java.util.Map.of(
                         "id", semanticPack.id(), "checksum", semanticPack.checksum()))
                 .withDetail("authorisationBundle", java.util.Map.of(
-                        "id", cedar.bundleId(), "checksum", cedar.bundleChecksum()))
-                .withDetail("presentationPacks", presentations.stream().map(pack -> {
-                    Properties manifest = load(resources, pack.manifestResource());
-                    return java.util.Map.of(
-                            "id", manifest.getProperty("id"),
-                            "checksum", read(resources, manifest.getProperty("checksum")).trim());
-                }).toList());
+                        "id", cedar.bundleId(), "checksum", cedar.bundleChecksum()));
     }
 
     @Bean

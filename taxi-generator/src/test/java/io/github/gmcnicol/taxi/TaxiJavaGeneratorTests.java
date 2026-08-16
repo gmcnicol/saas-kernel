@@ -8,6 +8,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -17,6 +22,124 @@ import org.junit.jupiter.api.io.TempDir;
 class TaxiJavaGeneratorTests {
     @TempDir
     Path temporaryDirectory;
+
+    @Test
+    void emitsChecksummedPublicationBundleWithApplicationLocalImportedBindings() throws IOException {
+        Path source = temporaryDirectory.resolve("semantic-pack/schema.taxi");
+        Path output = temporaryDirectory.resolve("generated");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Published
+                import shared.CustomerEmail
+                namespace application
+                @Published model Contact { primaryEmail: CustomerEmail }
+                @Published service Directory {
+                    operation find(contactEmail: CustomerEmail): Contact
+                }
+                """);
+        String shared = """
+                import io.github.gmcnicol.kernel.taxi.Published
+                namespace shared
+                @Published type CustomerEmail inherits String
+                """;
+        var imported = new TaxiJavaGenerator.ImportedSource(
+                "example:vocabulary:1.0.0", "shared.taxi", shared, sha256(shared));
+
+        TaxiJavaGenerator.generate(source.getParent(), output, "generated", "1.0.0", List.of(imported));
+
+        assertTrue(Files.exists(output.resolve("generated/shared/CustomerEmail.java")));
+        assertTrue(Files.readString(output.resolve("generated/application/Contact.java"))
+                .contains("generated.shared.CustomerEmail primaryEmail"));
+        assertFalse(Files.exists(output.resolve("generated/application/Directory.java")));
+        String manifest = Files.readString(
+                output.resolve("META-INF/saas-kernel/publication/manifest.properties"));
+        assertTrue(manifest.contains("dependency.0=example:vocabulary:1.0.0|shared.taxi|" + sha256(shared)), manifest);
+        assertTrue(manifest.contains("type.0=application.Contact|"), manifest);
+        assertTrue(manifest.contains("type.1=shared.CustomerEmail|"), manifest);
+        assertTrue(manifest.contains("service.0=application.Directory|SERVICE"), manifest);
+        String published = publicationSources(output);
+        assertTrue(published.contains("primaryEmail: CustomerEmail"), published);
+        assertTrue(published.contains("contactEmail: CustomerEmail"), published);
+        assertTrue(published.contains("namespace shared"), published);
+    }
+
+    @Test
+    void rejectsTransitivePublicationOfUnpublishedType() throws IOException {
+        Path source = temporaryDirectory.resolve("semantic-pack/schema.taxi");
+        Path output = temporaryDirectory.resolve("generated");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Published
+                namespace application
+                model Secret { value: String }
+                @Published model PublicContact { secret: Secret }
+                """);
+
+        var failure = assertThrows(IllegalArgumentException.class,
+                () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
+
+        assertTrue(failure.getMessage().contains(
+                "published root application.PublicContact leaks unpublished type application.Secret"),
+                failure::getMessage);
+    }
+
+    @Test
+    void publishesActionServicesAsDescriptionsOnly() throws IOException {
+        Path source = temporaryDirectory.resolve("action/schema.taxi");
+        Path output = temporaryDirectory.resolve("action/generated");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Subject
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                import io.github.gmcnicol.kernel.taxi.Event
+                import io.github.gmcnicol.kernel.taxi.ActionService
+                import io.github.gmcnicol.kernel.taxi.Published
+                namespace published
+                @Subject @Published type Id inherits String
+                @Contract(version = 1) @ProjectedState(subject = "published.Id") @Published
+                model State { id: Id }
+                @Contract(version = 1) @Published model Input { note: String }
+                @Contract(version = 1) @Event @Published closed model Changed { id: Id }
+                @ActionService(projection = "published.State") @Published service Actions {
+                    operation change(input: Input): Changed[]
+                }
+                """);
+
+        TaxiJavaGenerator.generate(source.getParent(), output, "generated");
+
+        String manifest = Files.readString(
+                output.resolve("META-INF/saas-kernel/publication/manifest.properties"));
+        assertTrue(manifest.contains("service.0=published.Actions|ACTION|"), manifest);
+        assertFalse(manifest.matches("(?s).*(handler|endpoint|authorit).*"), manifest);
+        assertTrue(Files.readString(output.resolve("generated/published/Actions.java"))
+                .contains("ActionType<"));
+    }
+
+    @Test
+    void definitionChecksumIgnoresUnrelatedDefinitionsInSameSource() throws IOException {
+        Path source = temporaryDirectory.resolve("checksums/schema.taxi");
+        Path output = temporaryDirectory.resolve("checksum-output");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Published
+                namespace published
+                @Published model Stable { value: String }
+                @Published model Changing { value: String }
+                """);
+        TaxiJavaGenerator.generate(source.getParent(), output, "generated");
+        String first = publicationLine(output, "type.1=published.Stable|");
+
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Published
+                namespace published
+                @Published model Stable { value: String }
+                @Published model Changing { value: String, count: Int }
+                """);
+        TaxiJavaGenerator.generate(source.getParent(), output, "generated");
+
+        assertTrue(first.equals(publicationLine(output, "type.1=published.Stable|")));
+    }
 
     @Test
     void cleanGenerationIsByteIdenticalAndRemovesStaleTypes() throws IOException {
@@ -342,7 +465,58 @@ class TaxiJavaGeneratorTests {
     }
 
     @Test
-    void retainsEveryVersionedDurableModelAndGeneratesLegacyFactories() throws IOException {
+    void generatesPackagedSemanticIndexFromTaxi() throws IOException {
+        Path source = temporaryDirectory.resolve("semantic-pack/schema.taxi");
+        Path output = temporaryDirectory.resolve("target/generated-sources/taxi");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Subject
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                import io.github.gmcnicol.kernel.taxi.Fact
+                import io.github.gmcnicol.kernel.taxi.Event
+                import io.github.gmcnicol.kernel.taxi.ActionService
+                namespace example
+                @Subject type CustomerId inherits String
+                @Contract(version = 1) @ProjectedState(subject = "example.CustomerId")
+                model Customer { id: CustomerId }
+                @Contract(version = 1) @Fact(projection = "example.Customer")
+                model CustomerKnown { id: CustomerId }
+                @Contract(version = 1) model ChangeCustomer { name: String }
+                @Contract(version = 1) @Event closed model CustomerChanged { id: CustomerId }
+                @ActionService(projection = "example.Customer") service CustomerActions {
+                    operation change(input: ChangeCustomer): CustomerChanged[]
+                }
+                """);
+
+        TaxiJavaGenerator.generate(source.getParent(), output, "generated", "9.8.7");
+
+        String index = Files.readString(
+                output.resolve("META-INF/saas-kernel/semantic-index.properties"));
+        assertTrue(index.contains("kernel-version=9.8.7\n"), index);
+        assertTrue(index.contains("taxi-compiler-version=1.70.0\n"), index);
+        assertTrue(index.contains("source.0=semantic-pack/schema.taxi|"), index);
+        assertTrue(index.contains("type.0="), index);
+        assertTrue(index.contains("example.Customer|PROJECTION|1|generated.example.Customer|"
+                + "example.CustomerId"), index);
+        assertTrue(index.contains("action.0=example.CustomerActions.change|example.Customer|"
+                + "example.ChangeCustomer|example.CustomerChanged"), index);
+        assertTrue(index.contains("slot.0="), index);
+        assertTrue(index.contains("DERIVATION|example.CustomerKnown"), index);
+        assertTrue(index.contains("PROJECTOR|example.CustomerChanged"), index);
+        assertTrue(index.contains("generated-content.0=generated/GeneratedSemanticBindings.class\n"), index);
+        assertTrue(index.contains("generated-content.1=generated/GeneratedSemanticRegistry.class\n"), index);
+        assertTrue(index.contains("generated-content.2=generated/example/ChangeCustomer.class\n"), index);
+        assertTrue(index.contains("generated-content.3=generated/example/Customer.class\n"), index);
+        assertTrue(index.contains("generated-content.4=generated/example/CustomerActions.class\n"), index);
+        assertTrue(index.contains("generated-content.5=generated/example/CustomerChanged.class\n"), index);
+        assertTrue(index.contains("generated-content.6=generated/example/CustomerId.class\n"), index);
+        assertTrue(index.contains("generated-content.7=generated/example/CustomerKnown.class\n"), index);
+        assertTrue(index.matches("(?s).*index-checksum=[0-9a-f]{64}\\n"), index);
+    }
+
+    @Test
+    void generatesCandidateDescriptorOnlyForExactActionInput() throws IOException {
         Path source = temporaryDirectory.resolve("src/versions.taxi");
         Path output = temporaryDirectory.resolve("target/generated-sources/taxi");
         Files.createDirectories(source.getParent());
@@ -355,15 +529,15 @@ class TaxiJavaGeneratorTests {
                 import io.github.gmcnicol.kernel.taxi.ActionService
                 namespace example
                 @Subject type Id inherits String
-                @Contract(version = 1, family = "example.State") @ProjectedState(subject = "example.Id")
+                @Contract(version = 1) @ProjectedState(subject = "example.Id")
                 model State { id: Id, name: String }
-                @Contract(version = 1, family = "example.Known") @Fact(projection = "example.State")
+                @Contract(version = 1) @Fact(projection = "example.State")
                 model Known { id: Id }
-                @Contract(version = 1, family = "example.ChangeRequest")
+                @Contract(version = 1)
                 model Candidate { name: String }
-                @Contract(version = 2, family = "example.ChangeRequest")
+                @Contract(version = 2)
                 model CurrentCandidate { name: String, note: String? }
-                @Contract(version = 1, family = "example.Changed") @Event closed model Changed { id: Id }
+                @Contract(version = 1) @Event closed model Changed { id: Id }
                 @Contract(version = 1) model Description { text: String }
                 @ActionService(projection = "example.State")
                 service HistoricalActions {
@@ -379,16 +553,11 @@ class TaxiJavaGeneratorTests {
         String currentCandidate = Files.readString(output.resolve("generated/example/CurrentCandidate.java"));
         String description = Files.readString(output.resolve("generated/example/Description.java"));
         assertTrue(candidate.contains("CandidateType<Candidate> TYPE"), candidate);
-        assertTrue(candidate.contains("\"example.ChangeRequest\""), candidate);
-        assertTrue(currentCandidate.contains("CandidateType<CurrentCandidate> TYPE"), currentCandidate);
-        assertTrue(state.contains("\"example.State\""), state);
+        assertFalse(currentCandidate.contains("CandidateType<CurrentCandidate> TYPE"), currentCandidate);
+        assertTrue(state.contains("ProjectionType<"), state);
         assertFalse(description.contains("CandidateType<Description>"), description);
         assertFalse(description.contains("LEGACY_DECODER"), description);
-        assertTrue(bindings.contains("State.LEGACY_DECODER"), bindings);
-        assertTrue(bindings.contains("Known.LEGACY_DECODER"), bindings);
-        assertTrue(bindings.contains("Candidate.LEGACY_DECODER"), bindings);
-        assertTrue(bindings.contains("CurrentCandidate.LEGACY_DECODER"), bindings);
-        assertTrue(bindings.contains("Changed.LEGACY_DECODER"), bindings);
+        assertFalse(bindings.contains("LEGACY_DECODER"), bindings);
     }
 
     @Test
@@ -460,6 +629,33 @@ class TaxiJavaGeneratorTests {
     private static Map<Path, byte[]> files(Path root) throws IOException {
         try (Stream<Path> paths = Files.walk(root)) {
             return paths.filter(Files::isRegularFile).collect(Collectors.toMap(root::relativize, path -> read(path)));
+        }
+    }
+
+    private static String publicationSources(Path output) throws IOException {
+        Path root = output.resolve("META-INF/saas-kernel/publication/sources");
+        try (Stream<Path> paths = Files.walk(root)) {
+            return paths.filter(Files::isRegularFile).sorted().map(path -> {
+                try {
+                    return Files.readString(path);
+                } catch (IOException exception) {
+                    throw new IllegalStateException(exception);
+                }
+            }).collect(Collectors.joining("\n"));
+        }
+    }
+
+    private static String publicationLine(Path output, String prefix) throws IOException {
+        return Files.readAllLines(output.resolve("META-INF/saas-kernel/publication/manifest.properties")).stream()
+                .filter(line -> line.startsWith(prefix)).findFirst().orElseThrow();
+    }
+
+    private static String sha256(String content) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(content.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException(exception);
         }
     }
 

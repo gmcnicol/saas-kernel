@@ -3,9 +3,12 @@ package io.github.gmcnicol.crm;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import io.github.gmcnicol.kernel.application.PresentationActionOffer;
-import io.github.gmcnicol.kernel.application.PresentationEnvelope;
-import io.github.gmcnicol.kernel.application.Subject;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.ContactId;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpProjection;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.TypedCrmActions;
+import io.github.gmcnicol.kernel.application.TypedActionOffer;
+import io.github.gmcnicol.kernel.application.TypedPresentationEnvelope;
+import io.github.gmcnicol.kernel.application.TypedSubject;
 import io.micrometer.observation.ObservationRegistry;
 import java.time.Instant;
 import java.util.List;
@@ -27,7 +30,7 @@ class CrmA2uiAdapterTests {
 
         assertThat(rendered.html())
                 .contains("Alex &lt;script&gt;", "Record &lt;now&gt;", "/presentation/intents/" + OFFER_ID,
-                        "data-on:submit", "io.github.gmcnicol.crm.RecordInteractionInput", "Talk &lt;soon&gt;")
+                        "data-on:submit", "io.github.gmcnicol.crm.RecordInteractionCandidateV1", "Talk &lt;soon&gt;")
                 .doesNotContain("Alex <script>", "Record <now>");
         assertThat(rendered.eventStream()).startsWith("event: datastar-patch-elements\n");
         assertThat(rendered.eventStream()).doesNotContain("\nevent: forged");
@@ -84,19 +87,17 @@ class CrmA2uiAdapterTests {
                 .isInstanceOf(CrmA2uiAdapter.InvalidSurface.class);
     }
 
-    private static PresentationEnvelope envelope() {
-        return new PresentationEnvelope(
+    private static TypedPresentationEnvelope<ContactId, FollowUpProjection> envelope() {
+        return new TypedPresentationEnvelope<>(
                 1,
-                new Subject("crm.Contact", "alex"),
+                new TypedSubject<>(ContactId.TYPE, new ContactId("alex")),
+                FollowUpProjection.TYPE,
                 UUID.randomUUID(),
                 Instant.parse("2026-08-15T10:00:00Z"),
                 "io.github.gmcnicol.crm.semantic",
-                Map.of(),
                 List.of(),
-                List.of(new PresentationActionOffer(
-                        OFFER_ID,
-                        "io.github.gmcnicol.crm.CrmActions.recordInteraction",
-                        "io.github.gmcnicol.crm.RecordInteractionInput")));
+                List.of(),
+                List.of(new TypedActionOffer<>(OFFER_ID, TypedCrmActions.RECORD_INTERACTION)));
     }
 
     private static String messages(UUID offerId, String textComponent, String path) {

@@ -8,7 +8,6 @@ final class KernelRuntimeHealth implements HealthIndicator {
 
     private final ObjectProvider<FixedDelayWorker> workers;
     private final ObjectProvider<SemanticDeploymentGuard> deploymentGuard;
-    private volatile boolean fatal;
 
     KernelRuntimeHealth(
             ObjectProvider<FixedDelayWorker> workers,
@@ -21,15 +20,10 @@ final class KernelRuntimeHealth implements HealthIndicator {
     public Health health() {
         var currentWorkers = workers.orderedStream().toList();
         var currentGuards = deploymentGuard.orderedStream().toList();
-        boolean ready = !fatal
-                && currentWorkers.size() == 2
+        boolean ready = currentWorkers.size() == 2
                 && currentWorkers.stream().allMatch(FixedDelayWorker::isReady)
                 && currentGuards.size() == 1
                 && currentGuards.getFirst().isRunning();
         return ready ? Health.up().build() : Health.down().build();
-    }
-
-    void fatal() {
-        fatal = true;
     }
 }

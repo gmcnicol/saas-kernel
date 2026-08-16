@@ -30,7 +30,7 @@ final class IntentQueryService {
             return jdbc.query("""
                     SELECT id, tenant_id, subject_type, subject_id, action_id, status, accepted_at,
                            attempt_count, failure_reason, prior_intent_id
-                    FROM kernel.intent
+                    FROM kernel.typed_intent
                     WHERE tenant_id = ?
                       AND (?::text IS NULL OR status = ?::text)
                       AND (?::text IS NULL OR subject_type = ?::text)
@@ -62,9 +62,10 @@ final class IntentQueryService {
             TenantContext.useAfterRole(jdbc, query.tenantId());
             return jdbc.query("""
                     SELECT audit.id, audit.intent_id, audit.sequence, audit.from_status, audit.to_status,
-                           audit.occurred_at, audit.reason, audit.failure_reason, audit.correlation
-                    FROM kernel.intent_audit audit
-                    JOIN kernel.intent intent ON intent.id = audit.intent_id AND intent.tenant_id = audit.tenant_id
+                           audit.occurred_at, audit.reason, intent.failure_reason,
+                           audit.correlation
+                    FROM kernel.typed_intent_audit audit
+                    JOIN kernel.typed_intent intent ON intent.id = audit.intent_id AND intent.tenant_id = audit.tenant_id
                     WHERE intent.tenant_id = ? AND intent.id = ?
                       AND (?::integer IS NULL OR audit.sequence > ?::integer)
                     ORDER BY audit.sequence

@@ -19,7 +19,7 @@ public record TypedEvaluationSnapshot<I, P>(
         String kernelVersion,
         SemanticPackVersion semanticPackVersion,
         FactSet facts,
-        List<ApplicableAction> applicableActions,
+        List<ActionType<P, ?, ?>> applicableActions,
         Optional<Instant> reevaluateAt) {
 
     public TypedEvaluationSnapshot {

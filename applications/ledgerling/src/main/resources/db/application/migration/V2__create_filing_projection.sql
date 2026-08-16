@@ -1,6 +1,7 @@
 CREATE TABLE ledger_filing_projection (
     tenant_id text NOT NULL,
     filing_id text NOT NULL,
+    request_id text NOT NULL,
     client_reference text NOT NULL,
     filing_due_at timestamptz NOT NULL,
     records_outstanding boolean NOT NULL,

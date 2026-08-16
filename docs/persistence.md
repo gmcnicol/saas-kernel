@@ -9,8 +9,9 @@ An Application may supply Kernel Projected State from any normal Application-own
 
 Kernel persistence is control-plane evidence only: evaluation provenance, immutable Projected
 State supplied for that evaluation, Action Offers, Intent, Events, audit, leases, and reevaluation.
-The generic name/value rows inside an immutable Projected State or Event payload preserve exact
-semantic evidence. They are not the canonical business model and must not serve ordinary reads.
+Canonical JSON inside immutable Projected State, Fact, Candidate Payload, and Event evidence
+preserves exact qualified Taxi identity, contract version, bytes, and checksum. It is not the
+canonical business model and must not serve ordinary reads.
 
 Hot reads use Application-owned indexed models directly. For example, keep-in-touch CRM queries
 `crm_contact_engagement_projection` for due contacts and Ledgerling queries

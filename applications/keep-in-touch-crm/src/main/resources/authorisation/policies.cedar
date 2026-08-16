@@ -2,18 +2,6 @@ permit(principal is Owner, action, resource);
 
 permit(
     principal is Viewer,
-    action == Action::"io.github.gmcnicol.crm.Contact.displayName",
-    resource
-);
-
-permit(
-    principal is Viewer,
-    action == Action::"io.github.gmcnicol.crm.FollowUpDue",
-    resource
-);
-
-permit(
-    principal is Viewer,
     action == Action::"typed/v1/io.github.gmcnicol.crm.FollowUpProjection.contactId",
     resource
 ) when {

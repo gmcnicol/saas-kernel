@@ -1,5 +1,7 @@
 package io.github.gmcnicol.crm;
 
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.ContactId;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpProjection;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -18,6 +20,24 @@ final class CrmContactQueries {
     CrmContactQueries(JdbcTemplate jdbc, PlatformTransactionManager transactionManager) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(transactionManager);
+    }
+
+    FollowUpProjection projection(String tenantId, String contactId) {
+        if (tenantId == null || tenantId.isBlank() || contactId == null || contactId.isBlank()) {
+            throw new IllegalArgumentException("Contact projection requires tenant and contact");
+        }
+        return transactions.execute(status -> {
+            jdbc.execute("SET LOCAL ROLE kernel_runtime");
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, tenantId);
+            return jdbc.queryForObject("""
+                    SELECT contact_id, next_contact_due_at, open_follow_up_id IS NULL AS follow_up_completed
+                    FROM crm_contact_engagement_projection
+                    WHERE tenant_id = ? AND contact_id = ?
+                    """, (result, row) -> new FollowUpProjection(
+                            new ContactId(result.getString("contact_id")),
+                            result.getTimestamp("next_contact_due_at").toInstant(),
+                            result.getBoolean("follow_up_completed")), tenantId, contactId);
+        });
     }
 
     List<ContactDue> dueBy(String tenantId, Instant dueBy, Optional<ContactDue> after, int limit) {

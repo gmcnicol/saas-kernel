@@ -8,23 +8,15 @@ import java.util.UUID;
 /** Stable entry point for Application-owned state and Kernel workflow mechanics. */
 public interface Kernel {
 
-    EvaluationSnapshot evaluate(ProjectedState state, Instant evaluatedAt);
-
     <I, P> TypedEvaluationSnapshot<I, P> evaluate(TypedProjectedState<I, P> state, Instant evaluatedAt);
-
-    AuthorisationEnvelope authorise(String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt);
 
     <I, P> TypedAuthorisationEnvelope<I, P> authorise(
             String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt,
             ProjectionType<I, P> projectionType);
 
-    PresentationEnvelope present(String tenantId, UUID snapshotId, Principal principal, Instant presentedAt);
-
     <I, P> TypedPresentationEnvelope<I, P> present(
             String tenantId, UUID snapshotId, Principal principal, Instant presentedAt,
             ProjectionType<I, P> projectionType);
-
-    Intent accept(UUID actionOfferId, UUID intentId, CandidatePayload payload);
 
     <C> Intent accept(UUID actionOfferId, UUID intentId, TypedCandidatePayload<C> payload);
 
@@ -39,7 +31,7 @@ public interface Kernel {
 
     List<Intent> processDue(Instant processedAt);
 
-    Optional<EvaluationSnapshot> processNextReevaluation(Instant evaluatedAt);
+    Optional<TypedEvaluationSnapshot<?, ?>> processNextReevaluation(Instant evaluatedAt);
 
     List<IntentView> findIntents(IntentQuery query);
 

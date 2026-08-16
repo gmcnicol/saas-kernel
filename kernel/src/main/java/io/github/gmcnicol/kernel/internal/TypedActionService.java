@@ -1,11 +1,8 @@
 package io.github.gmcnicol.kernel.internal;
 
-import io.github.gmcnicol.kernel.application.ActionOffer;
 import io.github.gmcnicol.kernel.application.ActionType;
-import io.github.gmcnicol.kernel.application.AuthorisationEnvelope;
 import io.github.gmcnicol.kernel.application.CanonicalCodec;
 import io.github.gmcnicol.kernel.application.CanonicalEvidence;
-import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.EventType;
 import io.github.gmcnicol.kernel.application.FactSet;
 import io.github.gmcnicol.kernel.application.FactType;
@@ -16,7 +13,6 @@ import io.github.gmcnicol.kernel.application.IntentRejectedException;
 import io.github.gmcnicol.kernel.application.IntentStatus;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.ProjectionType;
-import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.application.RetryableIntentException;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.application.SemanticType;
@@ -58,7 +54,7 @@ import org.springframework.dao.TransientDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionOperations;
 
-/** Typed Action offer, acceptance and execution path kept separate from legacy map evidence. */
+/** Typed Action offer, acceptance and execution path. */
 final class TypedActionService {
     private final JdbcTemplate jdbc;
     private final TransactionOperations transactions;
@@ -67,8 +63,7 @@ final class TypedActionService {
     private final Clock clock;
     private final KernelTelemetry telemetry;
     private final SemanticPackVersion semanticPack;
-    private final TypedSemanticCompatibility canonical;
-    private final Map<String, ActionType<?, ?, ?>> declaredActions;
+    private final SemanticCodec canonical;
     private final Map<String, ActionType<?, ?, ?>> actions;
     private final Map<String, FactType<?>> factTypes;
     private final Map<String, TypedIntentHandler<?, ?, ?>> handlers;
@@ -91,7 +86,7 @@ final class TypedActionService {
             List<TypedFactDerivation<?, ?>> derivations,
             CanonicalCodec.Limits limits) {
         this(jdbc, transactions, cedar, worker, clock, telemetry, semanticPack, bindings, handlers, projectors,
-                policies, derivations, new TypedSemanticCompatibility(bindings, List.of(), limits));
+                policies, derivations, new SemanticCodec(bindings, limits));
     }
 
     TypedActionService(
@@ -107,7 +102,7 @@ final class TypedActionService {
             List<TypedEventProjector<?, ?>> projectors,
             List<TypedApplicabilityPolicy<?>> policies,
             List<TypedFactDerivation<?, ?>> derivations,
-            TypedSemanticCompatibility canonical) {
+            SemanticCodec canonical) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.cedar = cedar;
@@ -116,9 +111,7 @@ final class TypedActionService {
         this.telemetry = telemetry;
         this.semanticPack = semanticPack;
         this.canonical = canonical;
-        this.declaredActions = bindings.stream().flatMap(binding -> binding.actions().stream())
-                .collect(java.util.stream.Collectors.toUnmodifiableMap(ActionType::qualifiedName, action -> action));
-        this.actions = declaredActions.values().stream().filter(this::isCurrent)
+        this.actions = bindings.stream().flatMap(binding -> binding.actions().stream())
                 .collect(java.util.stream.Collectors.toUnmodifiableMap(ActionType::qualifiedName, action -> action));
         this.factTypes = bindings.stream().flatMap(binding -> binding.facts().stream())
                 .collect(java.util.stream.Collectors.toUnmodifiableMap(TypedActionService::key, fact -> fact));
@@ -147,17 +140,16 @@ final class TypedActionService {
         projectors.forEach(projector -> requireIdentity(
                 descriptors.get(key(projector.eventType())), projector.eventType(), "projector Event"));
         policies.forEach(policy -> {
-            ActionType<?, ?, ?> action = this.actions.get(policy.target());
-            if (action == null || action.projectionType() != policy.projectionType()) {
+            ActionType<?, ?, ?> action = this.actions.get(policy.actionType().qualifiedName());
+            if (action != policy.actionType()) {
                 throw new IllegalStateException("Typed applicability policy is not bound to a generated Action");
             }
         });
         this.actions.values().forEach(action -> {
             List<TypedApplicabilityPolicy<?>> actionPolicies = policies.stream()
-                    .filter(policy -> policy.target().equals(action.qualifiedName()))
+                    .filter(policy -> policy.actionType() == action)
                     .toList();
-            if (actionPolicies.size() != 1
-                    || !actionPolicies.getFirst().id().equals(action.qualifiedName() + ".applicability")) {
+            if (actionPolicies.size() != 1) {
                 throw new IllegalStateException(
                         "Generated Action requires exactly one applicability binding: " + action.qualifiedName());
             }
@@ -170,20 +162,14 @@ final class TypedActionService {
         });
     }
 
-    private boolean isCurrent(ActionType<?, ?, ?> action) {
-        return canonical.isCurrent(action.projectionType())
-                && canonical.isCurrent(action.candidateType())
-                && action.eventTypes().stream().allMatch(canonical::isCurrent);
-    }
-
     <P, C, E> TypedIntentEvidence<C, E> readIntentEvidence(
             String tenantId, UUID intentId, ActionType<P, C, E> actionType) {
         if (intentId == null || actionType == null
-                || declaredActions.get(actionType.qualifiedName()) != actionType) {
+                || actions.get(actionType.qualifiedName()) != actionType) {
             throw new IllegalArgumentException("Intent evidence identity is required");
         }
-        canonical.requireCurrent(actionType.candidateType());
-        actionType.eventTypes().forEach(canonical::requireCurrent);
+        canonical.requireRegistered(actionType.candidateType());
+        actionType.eventTypes().forEach(canonical::requireRegistered);
         return transactions.execute(status -> readIntentEvidenceInTransaction(
                 tenantId, intentId, actionType));
     }
@@ -191,7 +177,7 @@ final class TypedActionService {
     private <P, C, E> TypedIntentEvidence<C, E> readIntentEvidenceInTransaction(
             String tenantId, UUID intentId, ActionType<P, C, E> actionType) {
         TenantContext.use(jdbc, tenantId);
-        List<StoredCanonicalCandidate> typedCandidates = jdbc.query("""
+        List<StoredCanonicalCandidate> candidates = jdbc.query("""
                 SELECT action_id, payload_type, payload_contract_version, payload_format_version,
                        payload_content, payload_checksum
                 FROM kernel.typed_intent WHERE tenant_id = ? AND id = ?
@@ -201,59 +187,21 @@ final class TypedActionService {
                                 result.getInt("payload_format_version"),
                                 result.getString("payload_content").getBytes(StandardCharsets.UTF_8),
                                 result.getString("payload_checksum"))), tenantId, intentId);
-        List<LegacyIntentEvidence> legacyCandidates = jdbc.query("""
-                SELECT action_offer_id, action_id, payload_type, payload_version, request_checksum,
-                       traceparent, tracestate, prior_intent_id
-                FROM kernel.intent WHERE tenant_id = ? AND id = ?
-                """, (result, row) -> new LegacyIntentEvidence(
-                        result.getObject("action_offer_id", UUID.class), result.getString("action_id"),
-                        result.getString("payload_type"),
-                        result.getInt("payload_version"), result.getString("request_checksum"),
-                        result.getString("traceparent"), result.getString("tracestate"),
-                        result.getObject("prior_intent_id", UUID.class)), tenantId, intentId);
-        if (typedCandidates.size() + legacyCandidates.size() != 1) {
+        if (candidates.size() != 1) {
             throw new IllegalArgumentException("Intent evidence is missing or ambiguous");
         }
-        if (!typedCandidates.isEmpty()) {
-            StoredCanonicalCandidate stored = typedCandidates.getFirst();
-            requireAction(stored.actionId(), actionType);
-            C candidate = canonical.decode(stored.evidence(), actionType.candidateType());
-            List<E> events = jdbc.query("""
-                    SELECT event_type, event_contract_version, event_format_version,
-                           event_content, event_checksum
-                    FROM kernel.typed_event WHERE tenant_id = ? AND intent_id = ? ORDER BY sequence
-                    """, (result, row) -> canonical.decodeEvent(new CanonicalEvidence(
-                            result.getString("event_type"), result.getInt("event_contract_version"),
-                            result.getInt("event_format_version"),
-                            result.getString("event_content").getBytes(StandardCharsets.UTF_8),
-                            result.getString("event_checksum")), actionType.eventTypes()), tenantId, intentId);
-            return new TypedIntentEvidence<>(candidate, events);
-        }
-        LegacyIntentEvidence stored = legacyCandidates.getFirst();
+        StoredCanonicalCandidate stored = candidates.getFirst();
         requireAction(stored.actionId(), actionType);
-        Map<String, String> candidateValues = legacyValues(
-                tenantId, "intent_payload_value", "intent_id", intentId);
-        Optional<W3cTraceContext> trace = Optional.ofNullable(stored.traceparent())
-                .map(value -> new W3cTraceContext(value, stored.tracestate()));
-        CandidatePayload payload = new CandidatePayload(
-                stored.type(), stored.version(), candidateValues, trace, Optional.ofNullable(stored.priorIntentId()));
-        if (!IntentService.requestChecksum(stored.offerId(), payload).equals(stored.requestChecksum())) {
-            throw new IllegalArgumentException("Legacy Candidate Payload checksum mismatch");
-        }
-        C candidate = canonical.decodeLegacy(
-                stored.type(), stored.version(), candidateValues, actionType.candidateType());
-        List<LegacyEventEvidence> storedEvents = jdbc.query("""
-                SELECT id, event_type, payload_version FROM kernel.event
-                WHERE tenant_id = ? AND intent_id = ? ORDER BY sequence
-                """, (result, row) -> new LegacyEventEvidence(
-                        result.getObject("id", UUID.class), result.getString("event_type"),
-                        result.getInt("payload_version")), tenantId, intentId);
-        canonical.requireLegacyCollectionSize(storedEvents.size());
-        List<E> events = storedEvents.stream()
-                .map(event -> canonical.decodeLegacyEvent(event.type(), event.version(),
-                        legacyValues(tenantId, "event_payload_value", "event_id", event.id()),
-                        actionType.eventTypes()))
-                .toList();
+        C candidate = canonical.decode(stored.evidence(), actionType.candidateType());
+        List<E> events = jdbc.query("""
+                SELECT event_type, event_contract_version, event_format_version,
+                       event_content, event_checksum
+                FROM kernel.typed_event WHERE tenant_id = ? AND intent_id = ? ORDER BY sequence
+                """, (result, row) -> canonical.decodeEvent(new CanonicalEvidence(
+                        result.getString("event_type"), result.getInt("event_contract_version"),
+                        result.getInt("event_format_version"),
+                        result.getString("event_content").getBytes(StandardCharsets.UTF_8),
+                        result.getString("event_checksum")), actionType.eventTypes()), tenantId, intentId);
         return new TypedIntentEvidence<>(candidate, events);
     }
 
@@ -261,17 +209,6 @@ final class TypedActionService {
         if (!actionType.qualifiedName().equals(storedActionId)) {
             throw new IllegalArgumentException("Intent evidence Action does not match generated descriptor");
         }
-    }
-
-    private Map<String, String> legacyValues(
-            String tenantId, String table, String ownerColumn, UUID owner) {
-        var values = new LinkedHashMap<String, String>();
-        jdbc.query("SELECT name, value FROM kernel." + table + " WHERE tenant_id = ? AND "
-                        + ownerColumn + " = ? ORDER BY name",
-                (result, row) -> Map.entry(result.getString("name"), result.getString("value")),
-                tenantId, owner)
-                .forEach(entry -> values.put(entry.getKey(), entry.getValue()));
-        return Map.copyOf(values);
     }
 
     <I, P> TypedAuthorisationEnvelope<I, P> authorise(
@@ -334,10 +271,7 @@ final class TypedActionService {
                         result.getTimestamp("evaluated_at").toInstant(), result.getString("semantic_pack_id"),
                         result.getString("semantic_pack_checksum"), result.getInt("format_version"),
                         result.getString("content")), tenantId, snapshotId);
-        if (snapshots.isEmpty()) {
-            return authoriseLegacyInTransaction(
-                    tenantId, snapshotId, principal, projectionType);
-        }
+        if (snapshots.size() != 1) throw new io.github.gmcnicol.kernel.application.AuthorisationDeniedException();
         AuthorisationSnapshot snapshot = snapshots.getFirst();
         if (!snapshot.subjectType().equals(projectionType.subjectType().qualifiedName())) {
             throw new io.github.gmcnicol.kernel.application.AuthorisationDeniedException();
@@ -377,118 +311,13 @@ final class TypedActionService {
                         principal, subject, projectionType, projection, authorisationFacts, entry.getValue()))
                 .map(entry -> typedOffer(persistOffer(
                         tenantId, snapshotId, snapshot.offerSnapshot(), principal, entry.getKey().actionId(),
-                        entry.getKey().policyId(), authorisedAt, correlation).id(), entry.getValue()))
+                        entry.getKey().policyId(), authorisedAt, correlation), entry.getValue()))
                 .forEach(offer -> offers.add(castOffer(offer)));
         return new TypedAuthorisationEnvelope<>(snapshotId, snapshot.evaluatedAt(), snapshot.semanticPackId(),
                 subject, projectionType, fields, facts, offers);
     }
 
-    private <I, P> TypedAuthorisationEnvelope<I, P> authoriseLegacyInTransaction(
-            String tenantId,
-            UUID snapshotId,
-            Principal principal,
-            ProjectionType<I, P> projectionType) {
-        List<LegacyAuthorisationSnapshot> snapshots = jdbc.query("""
-                SELECT snapshot.subject_type, snapshot.subject_id, snapshot.state_version,
-                       snapshot.state_checksum, snapshot.evaluated_at, snapshot.semantic_pack_id
-                FROM kernel.evaluation_snapshot snapshot
-                JOIN kernel.projected_state_version state
-                  ON state.tenant_id = snapshot.tenant_id AND state.subject_type = snapshot.subject_type
-                 AND state.subject_id = snapshot.subject_id AND state.version = snapshot.state_version
-                 AND state.checksum = snapshot.state_checksum
-                WHERE snapshot.tenant_id = ? AND snapshot.id = ?
-                """, (result, row) -> new LegacyAuthorisationSnapshot(
-                        result.getString("subject_type"), result.getString("subject_id"),
-                        result.getLong("state_version"), result.getString("state_checksum"),
-                        result.getTimestamp("evaluated_at").toInstant(), result.getString("semantic_pack_id")),
-                tenantId, snapshotId);
-        if (snapshots.isEmpty() || !snapshots.getFirst().subjectType()
-                .equals(projectionType.subjectType().qualifiedName())) {
-            throw new io.github.gmcnicol.kernel.application.AuthorisationDeniedException();
-        }
-        LegacyAuthorisationSnapshot snapshot = snapshots.getFirst();
-        Map<String, String> values = new LinkedHashMap<>();
-        jdbc.query("""
-                SELECT name, value FROM kernel.projected_state_value
-                WHERE tenant_id = ? AND subject_type = ? AND subject_id = ? AND version = ?
-                ORDER BY name
-                """, (result, row) -> Map.entry(result.getString("name"), result.getString("value")),
-                tenantId, snapshot.subjectType(), snapshot.subjectId(), snapshot.version())
-                .forEach(entry -> values.put(entry.getKey(), entry.getValue()));
-        String checksum = DefaultKernel.stateChecksum(new ProjectedState(
-                tenantId, new Subject(snapshot.subjectType(), snapshot.subjectId()), snapshot.version(), values));
-        if (!checksum.equals(snapshot.stateChecksum())) {
-            throw new IllegalArgumentException("Legacy Projected State checksum mismatch");
-        }
-        P projection = canonical.decodeLegacyProjection(values, projectionType);
-        List<LegacyFactEntry> storedFacts = jdbc.query("""
-                SELECT position, fact_type FROM kernel.evaluation_fact
-                WHERE tenant_id = ? AND snapshot_id = ? ORDER BY position
-                """, (result, row) -> new LegacyFactEntry(
-                        result.getInt("position"), result.getString("fact_type")), tenantId, snapshotId);
-        canonical.requireLegacyCollectionSize(storedFacts.size());
-        var derivedFacts = new ArrayList<TypedFact<?>>();
-        for (LegacyFactEntry stored : storedFacts) {
-            Map<String, String> factValues = new LinkedHashMap<>();
-            jdbc.query("""
-                    SELECT name, value FROM kernel.evaluation_fact_value
-                    WHERE tenant_id = ? AND snapshot_id = ? AND fact_position = ? ORDER BY name
-                    """, (result, row) -> Map.entry(result.getString("name"), result.getString("value")),
-                    tenantId, snapshotId, stored.position())
-                    .forEach(entry -> factValues.put(entry.getKey(), entry.getValue()));
-            derivedFacts.add(canonical.decodeLegacyFact(stored.type(), factValues));
-        }
-        FactSet authorisationFacts = factSet(derivedFacts);
-        TypedSubject<I> subject = typedSubject(projectionType.subjectType(), snapshot.subjectId());
-        TypedAuthorisationModel<P> model = cedar.model(projectionType);
-        var fields = new ArrayList<TypedFieldValue<P, ?>>();
-        model.fields().stream()
-                .sorted(Comparator.comparing(io.github.gmcnicol.kernel.application.FieldType::qualifiedName))
-                .filter(field -> cedar.allows(
-                        principal, subject, projectionType, projection, authorisationFacts, field))
-                .forEach(field -> fields.add(fieldValue(field, projection)));
-        List<TypedFact<?>> facts = derivedFacts.stream()
-                .filter(fact -> fact.type().projectionType() == projectionType)
-                .filter(fact -> cedar.allows(
-                        principal, subject, projectionType, projection, authorisationFacts, fact.type()))
-                .toList();
-        return new TypedAuthorisationEnvelope<>(snapshotId, snapshot.evaluatedAt(), snapshot.semanticPackId(),
-                subject, projectionType, fields, facts, List.of());
-    }
-
-    Optional<AuthorisationEnvelope> authorise(
-            String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt) {
-        return transactions.execute(status -> {
-            TenantContext.use(jdbc, tenantId);
-            List<TypedSnapshot> snapshots = jdbc.query("""
-                    SELECT subject_type, subject_id, state_version, state_checksum,
-                           projection_type, projection_contract_version
-                    FROM kernel.typed_evaluation_snapshot WHERE tenant_id = ? AND id = ?
-                    """, (result, row) -> new TypedSnapshot(
-                            result.getString("subject_type"), result.getString("subject_id"),
-                            result.getLong("state_version"), result.getString("state_checksum"),
-                            result.getString("projection_type"), result.getInt("projection_contract_version")),
-                    tenantId, snapshotId);
-            if (snapshots.isEmpty()) return Optional.empty();
-            if (principal == null || authorisedAt == null) throw new io.github.gmcnicol.kernel.application.AuthorisationDeniedException();
-            TypedSnapshot snapshot = snapshots.getFirst();
-            Subject subject = new Subject(snapshot.subjectType(), snapshot.subjectId());
-            UUID correlation = UUID.randomUUID();
-            List<ActionOffer> offers = jdbc.query("""
-                    SELECT action_id, policy_id FROM kernel.typed_evaluation_applicable_action
-                    WHERE tenant_id = ? AND snapshot_id = ? ORDER BY position
-                    """, (result, row) -> Map.entry(result.getString("action_id"), result.getString("policy_id")),
-                    tenantId, snapshotId).stream()
-                    .filter(entry -> cedar.allows(principal, subject, entry.getKey()))
-                    .map(entry -> persistOffer(
-                            tenantId, snapshotId, snapshot, principal, entry.getKey(), entry.getValue(),
-                            authorisedAt, correlation))
-                    .toList();
-            return Optional.of(new AuthorisationEnvelope(snapshotId, Map.of(), List.of(), offers));
-        });
-    }
-
-    private ActionOffer persistOffer(
+    private UUID persistOffer(
             String tenantId,
             UUID snapshotId,
             TypedSnapshot snapshot,
@@ -520,7 +349,7 @@ final class TypedActionService {
                 tenantId, snapshotId);
         telemetry.actionOffer(tenantId, new Subject(snapshot.subjectType(), snapshot.subjectId()), snapshotId, id,
                 correlation);
-        return new ActionOffer(id, actionId);
+        return id;
     }
 
     <C> Intent accept(UUID offerId, UUID intentId, TypedCandidatePayload<C> payload) {
@@ -839,9 +668,8 @@ final class TypedActionService {
     private boolean currentlyApplicable(
             ActionType<?, ?, ?> action, String policyId, Object projection, FactSet facts) {
         TypedApplicabilityPolicy<Object> policy = (TypedApplicabilityPolicy<Object>) policies.stream()
-                .filter(candidate -> candidate.target().equals(action.qualifiedName())
-                        && candidate.id().equals(policyId)
-                        && candidate.projectionType() == action.projectionType())
+                .filter(candidate -> candidate.actionType() == action
+                        && policyId.equals(action.qualifiedName() + ".applicability"))
                 .findFirst().orElse(null);
         return policy != null && policy.isApplicable(projection, facts);
     }
@@ -985,9 +813,10 @@ final class TypedActionService {
             UUID intent, String tenant, int sequence, IntentStatus from, IntentStatus to, Instant at, String reason) {
         jdbc.update("""
                 INSERT INTO kernel.typed_intent_audit
-                    (intent_id, tenant_id, sequence, from_status, to_status, occurred_at, reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, intent, tenant, sequence, from == null ? null : from.name(), to.name(), Timestamp.from(at), reason);
+                    (id, intent_id, tenant_id, sequence, from_status, to_status, occurred_at, reason, correlation)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, UUID.randomUUID(), intent, tenant, sequence, from == null ? null : from.name(), to.name(),
+                Timestamp.from(at), reason, intent);
     }
 
     private int nextAudit(UUID intent) {
@@ -1031,8 +860,7 @@ final class TypedActionService {
         FactType source = Optional.ofNullable(factTypes.get(
                         evidence.qualifiedType() + "@" + evidence.contractVersion()))
                 .orElseThrow(() -> new IllegalArgumentException("Unregistered generated Fact evidence"));
-        FactType type = (FactType) canonical.current(source);
-        return new TypedFact<>(type, canonical.decode(type, evidence));
+        return new TypedFact<>(source, canonical.decode(source, evidence));
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -1113,25 +941,7 @@ final class TypedActionService {
             return new TypedSnapshot(subjectType, subjectId, version, stateChecksum, projectionType, projectionVersion);
         }
     }
-    private record LegacyAuthorisationSnapshot(
-            String subjectType,
-            String subjectId,
-            long version,
-            String stateChecksum,
-            Instant evaluatedAt,
-            String semanticPackId) {}
-    private record LegacyFactEntry(int position, String type) {}
-    private record LegacyIntentEvidence(
-            UUID offerId,
-            String actionId,
-            String type,
-            int version,
-            String requestChecksum,
-            String traceparent,
-            String tracestate,
-            UUID priorIntentId) {}
     private record StoredCanonicalCandidate(String actionId, CanonicalEvidence evidence) {}
-    private record LegacyEventEvidence(UUID id, String type, int version) {}
     private record ActionEntry(String actionId, String policyId) {}
     private record TypedOffer(
             UUID snapshotId, String subjectType, String subjectId, String actionId, String policyId,

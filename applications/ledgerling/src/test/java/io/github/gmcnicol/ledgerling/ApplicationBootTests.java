@@ -9,11 +9,28 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import io.github.gmcnicol.kernel.application.Kernel;
+import io.github.gmcnicol.kernel.application.TypedProjectedState;
+import io.github.gmcnicol.kernel.application.TypedSubject;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.FilingId;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.FilingProjection;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.LedgerlingActions;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.RecordRecordsReceivedCandidateV1;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalManagementPort;
+import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -27,6 +44,7 @@ import org.testcontainers.utility.DockerImageName;
 
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = "management.server.port=0")
+@Import(ApplicationBootTests.TestUsers.class)
 class ApplicationBootTests {
 
     @Container
@@ -45,9 +63,54 @@ class ApplicationBootTests {
     }
 
     @LocalManagementPort int managementPort;
+    @LocalServerPort int serverPort;
     @Autowired JdbcTemplate runtimeJdbc;
     @Autowired PlatformTransactionManager transactionManager;
     @Autowired LedgerlingFilingQueries filings;
+    @Autowired Kernel kernel;
+
+    @Test
+    void authenticatedHttpPresentationAcceptsGeneratedCandidate() throws Exception {
+        Instant dueAt = Instant.parse("2042-08-15T09:00:00Z");
+        new JdbcTemplate(new DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())).update("""
+                INSERT INTO ledger_filing_projection
+                    (tenant_id, filing_id, request_id, client_reference, filing_due_at,
+                     records_outstanding, preparation_started)
+                VALUES ('tenant-http', 'http-filing', 'http-request', 'HTTP Ltd', ?, true, false)
+                """, java.sql.Timestamp.from(dueAt));
+        FilingProjection projection = filings.projection("tenant-http", "http-filing");
+        var snapshot = kernel.evaluate(new TypedProjectedState<>("tenant-http",
+                new TypedSubject<>(FilingId.TYPE, projection.filingId()), 1,
+                FilingProjection.TYPE, projection), dueAt);
+        var client = HttpClient.newHttpClient();
+        URI page = URI.create("http://localhost:" + serverPort
+                + "/presentation/ledgerling?snapshotId=" + snapshot.id());
+
+        assertThat(client.send(HttpRequest.newBuilder(page).build(), HttpResponse.BodyHandlers.ofString())
+                .statusCode()).isEqualTo(401);
+        var rendered = client.send(HttpRequest.newBuilder(page).header("Authorization", basic("accountant"))
+                .build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(rendered.statusCode()).isEqualTo(200);
+        var match = Pattern.compile("/presentation/intents/([0-9a-f-]{36})").matcher(rendered.body());
+        assertThat(match.find()).isTrue();
+        UUID offer = UUID.fromString(match.group(1));
+        UUID intent = UUID.randomUUID();
+        String form = form(Map.of(
+                "intentId", intent.toString(),
+                "actionType", LedgerlingActions.RECORD_RECORDS_RECEIVED.qualifiedName(),
+                "payloadType", RecordRecordsReceivedCandidateV1.TYPE.qualifiedName(),
+                "payloadVersion", "1",
+                "receivedAt", dueAt.plusSeconds(1).toString()));
+        var accepted = client.send(HttpRequest.newBuilder(
+                        URI.create("http://localhost:" + serverPort + "/presentation/intents/" + offer))
+                .header("Authorization", basic("accountant"))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(form)).build(), HttpResponse.BodyHandlers.ofString());
+
+        assertThat(accepted.statusCode()).isEqualTo(200);
+        assertThat(accepted.body()).contains(intent.toString());
+    }
 
     @Test
     void bootsKernelAndBothMigrationStreams() {
@@ -65,21 +128,21 @@ class ApplicationBootTests {
     void servesOutstandingFilingsFromApplicationOwnedIndexedProjectionWithoutKernelEvaluation() {
         var admin = new JdbcTemplate(new DriverManagerDataSource(
                 postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
-        int snapshotsBefore = admin.queryForObject("SELECT count(*) FROM kernel.evaluation_snapshot", Integer.class);
+        int snapshotsBefore = admin.queryForObject("SELECT count(*) FROM kernel.typed_evaluation_snapshot", Integer.class);
         admin.update("""
                 INSERT INTO ledger_filing_projection
-                    (tenant_id, filing_id, client_reference, filing_due_at,
+                    (tenant_id, filing_id, request_id, client_reference, filing_due_at,
                      records_outstanding, preparation_started)
                 VALUES
-                    (?, ?, ?, ?, true, false),
-                    (?, ?, ?, ?, true, false),
-                    (?, ?, ?, ?, true, false)
+                    (?, ?, ?, ?, ?, true, false),
+                    (?, ?, ?, ?, ?, true, false),
+                    (?, ?, ?, ?, ?, true, false)
                 """,
-                "tenant-hot-query", "filing-a", "ACME",
+                "tenant-hot-query", "filing-a", "request-a", "ACME",
                 java.sql.Timestamp.from(Instant.parse("2026-08-20T09:00:00Z")),
-                "tenant-hot-query", "filing-b", "Example Ltd",
+                "tenant-hot-query", "filing-b", "request-b", "Example Ltd",
                 java.sql.Timestamp.from(Instant.parse("2026-08-20T09:30:00Z")),
-                "tenant-other", "filing-hidden", "Hidden Ltd",
+                "tenant-other", "filing-hidden", "request-hidden", "Hidden Ltd",
                 java.sql.Timestamp.from(Instant.parse("2026-08-20T08:00:00Z")));
 
         var firstPage = filings.outstandingBy(
@@ -102,7 +165,7 @@ class ApplicationBootTests {
                     Integer.class);
         });
         assertThat(crossTenantRows).isZero();
-        assertThat(admin.queryForObject("SELECT count(*) FROM kernel.evaluation_snapshot", Integer.class))
+        assertThat(admin.queryForObject("SELECT count(*) FROM kernel.typed_evaluation_snapshot", Integer.class))
                 .isEqualTo(snapshotsBefore);
     }
 
@@ -146,5 +209,26 @@ class ApplicationBootTests {
         assertThat(authorisedMetrics.statusCode()).isEqualTo(200);
         assertThat(authorisedMigrations.statusCode()).isEqualTo(200);
         assertThat(authorisedInfo.body()).contains("application", "kernel", "semanticPack", "checksum");
+    }
+
+    private static String basic(String user) {
+        return "Basic " + Base64.getEncoder().encodeToString(
+                (user + ":test-password").getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String form(java.util.Map<String, String> values) {
+        return values.entrySet().stream().map(entry -> java.net.URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8)
+                + "=" + java.net.URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8))
+                .collect(java.util.stream.Collectors.joining("&"));
+    }
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class TestUsers {
+        @Bean
+        UserDetailsService users() {
+            return new InMemoryUserDetailsManager(User.withUsername("accountant")
+                    .password("{noop}test-password")
+                    .roles("TENANT_tenant-http", "PRINCIPAL_Staff").build());
+        }
     }
 }

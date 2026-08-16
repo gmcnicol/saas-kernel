@@ -7,6 +7,8 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -48,6 +50,7 @@ final class TaxiJavaGenerator {
     private static final String FACT = "io.github.gmcnicol.kernel.taxi.Fact";
     private static final String EVENT = "io.github.gmcnicol.kernel.taxi.Event";
     private static final String ACTION_SERVICE = "io.github.gmcnicol.kernel.taxi.ActionService";
+    private static final String PUBLISHED = "io.github.gmcnicol.kernel.taxi.Published";
     private static final Set<String> JAVA_KEYWORDS = Set.of(
             "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
             "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
@@ -72,19 +75,41 @@ final class TaxiJavaGenerator {
     private TaxiJavaGenerator() {}
 
     static Result generate(Path sourceDirectory, Path outputDirectory, String basePackage) throws IOException {
+        String version = TaxiJavaGenerator.class.getPackage().getImplementationVersion();
+        return generate(sourceDirectory, outputDirectory, basePackage, version == null ? "development" : version);
+    }
+
+    static Result generate(
+            Path sourceDirectory, Path outputDirectory, String basePackage, String generatorVersion) throws IOException {
+        return generate(sourceDirectory, outputDirectory, basePackage, generatorVersion, List.of());
+    }
+
+    static Result generate(
+            Path sourceDirectory,
+            Path outputDirectory,
+            String basePackage,
+            String generatorVersion,
+            List<ImportedSource> imports) throws IOException {
         validateQualifiedIdentifier(basePackage, "base package");
         if (!Files.isDirectory(sourceDirectory)) {
             throw new IllegalArgumentException("Taxi source directory does not exist: " + sourceDirectory);
         }
         var sources = readSources(sourceDirectory);
+        List<ImportedSource> sortedImports = imports.stream()
+                .sorted(Comparator.comparing(ImportedSource::coordinate).thenComparing(ImportedSource::resource))
+                .toList();
+        sortedImports.forEach(imported -> sources.add(new SourceCode(
+                imported.sourceName(), imported.content(), Path.of(imported.sourceName()), "taxi")));
         var authoredSources = sources.stream().map(SourceCode::getSourceName).collect(java.util.stream.Collectors.toSet());
         TaxiDocument document;
         List<String> warnings;
+        String standardSchema;
         try (InputStream stream = TaxiJavaGenerator.class.getResourceAsStream(STANDARD_SCHEMA)) {
             if (stream == null) throw new IllegalStateException("Kernel Taxi standard schema is missing");
+            standardSchema = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
             sources.add(0, new SourceCode(
                     STANDARD_SCHEMA,
-                    new String(stream.readAllBytes(), StandardCharsets.UTF_8),
+                    standardSchema,
                     Path.of(STANDARD_SCHEMA),
                     "taxi"));
             var compilation = new Compiler(sources, List.of(), new CompilerConfig()).compileWithMessages();
@@ -100,6 +125,12 @@ final class TaxiJavaGenerator {
 
         validate(document, authoredSources);
         var generated = render(document, basePackage, authoredSources);
+        sortedImports.forEach(imported -> generated.put(Path.of(imported.sourceName()), imported.content()));
+        generated.putAll(renderPublication(
+                document, sources, authoredSources, sortedImports, generatorVersion, standardSchema));
+        generated.put(Path.of("META-INF/saas-kernel/semantic-index.properties"),
+                renderIndex(document, sourceDirectory, basePackage, generatorVersion, standardSchema,
+                        authoredSources, sortedImports, generated.keySet()));
         replaceOutput(outputDirectory, generated);
         return new Result(warnings);
     }
@@ -283,7 +314,6 @@ final class TaxiJavaGenerator {
                     fail(type, "@ProjectedState may only annotate a model");
                 }
                 contractVersion(type);
-                contractFamily(type);
                 String subjectName = annotationString(type, PROJECTED_STATE, "subject");
                 Type subjectType;
                 try {
@@ -308,7 +338,6 @@ final class TaxiJavaGenerator {
                     fail(type, "@Fact may only annotate a model");
                 }
                 contractVersion(type);
-                contractFamily(type);
                 String projectionName = annotationString(type, FACT, "projection");
                 Type projectionType;
                 try {
@@ -328,7 +357,6 @@ final class TaxiJavaGenerator {
                     fail(type, "@Event may only annotate a model");
                 }
                 contractVersion(type);
-                contractFamily(type);
             }
         }
         List<Service> actionServices = document.getServices().stream()
@@ -390,7 +418,6 @@ final class TaxiJavaGenerator {
                 fail(candidate, "generated field-descriptor collision for 'TYPE'");
             }
             contractVersion(candidate);
-            contractFamily(candidate);
             if (!(operation.getReturnType() instanceof ArrayType)) {
                 fail(operation, "Action must return a non-empty Event array");
             }
@@ -403,7 +430,6 @@ final class TaxiJavaGenerator {
                     fail(operation, "Action return must contain one @Event model or closed Event union");
                 }
                 contractVersion(eventModel);
-                contractFamily(eventModel);
             }
         }
     }
@@ -467,14 +493,6 @@ final class TaxiJavaGenerator {
             fail(type, "@Contract version must be a positive integer");
         }
         return ((Number) value).intValue();
-    }
-
-    private static String contractFamily(Type type) {
-        Object value = annotation(type, CONTRACT).parameter("family");
-        String family = value == null ? type.getQualifiedName() : value.toString();
-        if (family.isBlank()) fail(type, "@Contract family must be a qualified type name");
-        validateQualifiedIdentifier(family, location(type));
-        return family;
     }
 
     private static void validateServiceMember(ServiceMember member, boolean actionService) {
@@ -569,17 +587,6 @@ final class TaxiJavaGenerator {
         var candidateNames = actionServices.stream().flatMap(service -> service.getOperations().stream())
                 .map(operation -> operation.getParameters().getFirst().getType().getQualifiedName())
                 .collect(java.util.stream.Collectors.toSet());
-        var candidateFamilies = candidateNames.stream()
-                .map(document::type)
-                .map(TaxiJavaGenerator::contractFamily)
-                .collect(java.util.stream.Collectors.toSet());
-        authoredTypes.stream().filter(type -> type instanceof ObjectType object
-                        && object.getTypeKind() == TypeKind.Model && annotated(type, CONTRACT))
-                .filter(type -> !annotated(type, PROJECTED_STATE)
-                        && !annotated(type, FACT) && !annotated(type, EVENT))
-                .filter(type -> candidateFamilies.contains(contractFamily(type)))
-                .map(Type::getQualifiedName)
-                .forEach(candidateNames::add);
         var actionUnions = actionServices.stream().flatMap(service -> service.getOperations().stream())
                 .map(Operation::getReturnType).map(ArrayType.class::cast).map(ArrayType::getMemberType)
                 .filter(ObjectType.class::isInstance).map(ObjectType.class::cast)
@@ -647,17 +654,12 @@ final class TaxiJavaGenerator {
                         .map(operation -> basePackage + "." + service.getQualifiedName() + "."
                                 + constantName(operation.getName())))
                 .collect(java.util.stream.Collectors.joining(", "));
-        String legacyDecoders = java.util.stream.Stream.of(projections, facts, candidates, events)
-                .flatMap(List::stream)
-                .map(type -> basePackage + "." + type.getQualifiedName() + ".LEGACY_DECODER")
-                .collect(java.util.stream.Collectors.joining(", "));
         return "package " + basePackage + ";\n\n"
                 + "public final class GeneratedSemanticBindings {\n"
                 + "    public static final io.github.gmcnicol.kernel.semanticpack.SemanticBindings INSTANCE = new "
                 + "io.github.gmcnicol.kernel.semanticpack.SemanticBindings(java.util.List.of(" + projectionTypes
                 + "), java.util.List.of(" + factTypes + "), java.util.List.of(" + candidateTypes
-                + "), java.util.List.of(" + eventTypes + "), java.util.List.of(" + actionTypes
-                + "), java.util.List.of(" + legacyDecoders + "));\n\n"
+                + "), java.util.List.of(" + eventTypes + "), java.util.List.of(" + actionTypes + "));\n\n"
                 + "    private GeneratedSemanticBindings() {}\n"
                 + "}\n";
     }
@@ -679,6 +681,344 @@ final class TaxiJavaGenerator {
                 + "GeneratedSemanticBindings.INSTANCE, java.util.List.of(" + decoders + "));\n\n"
                 + "    private GeneratedSemanticRegistry() {}\n"
                 + "}\n";
+    }
+
+    private static Map<Path, String> renderPublication(
+            TaxiDocument document,
+            List<SourceCode> sources,
+            Set<String> authoredSources,
+            List<ImportedSource> imports,
+            String generatorVersion,
+            String standardSchema) {
+        List<Type> publishedTypes = document.getTypes().stream()
+                .filter(type -> authored(type, authoredSources) && annotated(type, PUBLISHED))
+                .sorted(Comparator.comparing(Type::getQualifiedName)).toList();
+        List<Service> publishedServices = document.getServices().stream()
+                .filter(service -> authored(service, authoredSources) && serviceAnnotated(service, PUBLISHED))
+                .sorted(Comparator.comparing(Service::getQualifiedName)).toList();
+        if (publishedTypes.isEmpty() && publishedServices.isEmpty()) return Map.of();
+
+        for (Type root : publishedTypes) validatePublishedDependencies(document, root, root, new HashSet<>());
+        for (Service root : publishedServices) {
+            var visited = new HashSet<String>();
+            root.getMembers().forEach(member -> {
+                validatePublishedDependency(document, root, member.getReturnType(), visited);
+                member.getParameters().forEach(parameter ->
+                        validatePublishedDependency(document, root, parameter.getType(), visited));
+            });
+            if (serviceAnnotated(root, ACTION_SERVICE)) {
+                validatePublishedDependency(document, root,
+                        document.type(serviceAnnotationString(root, ACTION_SERVICE, "projection")), visited);
+            }
+        }
+
+        Set<String> selectedSources = Stream.concat(
+                        publishedTypes.stream().flatMap(type -> sourceNames(type).stream()),
+                        publishedServices.stream().flatMap(service -> sourceNames(service).stream()))
+                .filter(authoredSources::contains).collect(java.util.stream.Collectors.toSet());
+        document.getTypes().stream().filter(type -> authored(type, selectedSources) && !annotated(type, PUBLISHED))
+                .findFirst().ifPresent(type -> fail(type,
+                        "publication source leaks unpublished type " + type.getQualifiedName()));
+        document.getServices().stream()
+                .filter(service -> authored(service, selectedSources) && !serviceAnnotated(service, PUBLISHED))
+                .findFirst().ifPresent(service -> fail(service,
+                        "publication source leaks unpublished service " + service.getQualifiedName()));
+
+        Map<String, SourceCode> sourceByName = sources.stream()
+                .filter(source -> selectedSources.contains(source.getSourceName()))
+                .collect(java.util.stream.Collectors.toMap(SourceCode::getSourceName, source -> source));
+        var files = new HashMap<Path, String>();
+        var lines = new ArrayList<String>();
+        lines.add("format-version=1");
+        lines.add("generator-version=" + generatorVersion);
+        String compilerVersion = Compiler.class.getPackage().getImplementationVersion();
+        lines.add("taxi-compiler-version=" + (compilerVersion == null ? "1.70.0" : compilerVersion));
+        Path standardPath = Path.of("META-INF/saas-kernel/publication/sources/000-standard.taxi");
+        files.put(standardPath, standardSchema);
+        lines.add("source.0=" + standardPath.toString().replace('\\', '/') + "|"
+                + sha256(standardSchema.getBytes(StandardCharsets.UTF_8)));
+        List<SourceCode> selected = sourceByName.values().stream()
+                .sorted(Comparator.comparing(SourceCode::getSourceName)).toList();
+        for (int index = 0; index < selected.size(); index++) {
+            SourceCode source = selected.get(index);
+            Path path = Path.of("META-INF/saas-kernel/publication/sources/"
+                    + String.format(java.util.Locale.ROOT, "%03d.taxi", index + 1));
+            files.put(path, source.getContent());
+            lines.add("source." + (index + 1) + "=" + path.toString().replace('\\', '/') + "|"
+                    + sha256(source.getContent().getBytes(StandardCharsets.UTF_8)));
+        }
+        List<ImportedSource> selectedImports = imports.stream()
+                .filter(imported -> selectedSources.contains(imported.sourceName())).toList();
+        for (int index = 0; index < selectedImports.size(); index++) {
+            ImportedSource imported = selectedImports.get(index);
+            lines.add("dependency." + index + "=" + imported.coordinate() + "|" + imported.resource()
+                    + "|" + imported.checksum());
+        }
+        for (int index = 0; index < publishedTypes.size(); index++) {
+            Type type = publishedTypes.get(index);
+            lines.add("type." + index + "=" + type.getQualifiedName() + "|" + definitionChecksum(type));
+        }
+        for (int index = 0; index < publishedServices.size(); index++) {
+            Service service = publishedServices.get(index);
+            lines.add("service." + index + "=" + service.getQualifiedName() + "|"
+                    + (serviceAnnotated(service, ACTION_SERVICE) ? "ACTION" : "SERVICE") + "|"
+                    + definitionChecksum(service));
+        }
+        String canonical = String.join("\n", lines) + "\n";
+        files.put(Path.of("META-INF/saas-kernel/publication/manifest.properties"),
+                canonical + "publication-checksum=" + sha256(canonical.getBytes(StandardCharsets.UTF_8)) + "\n");
+        return files;
+    }
+
+    private static void validatePublishedDependencies(
+            TaxiDocument document, Compiled root, Type type, Set<String> visited) {
+        validatePublishedDependency(document, root, type, visited);
+        if (annotated(type, PROJECTED_STATE)) {
+            validatePublishedDependency(document, root,
+                    document.type(annotationString(type, PROJECTED_STATE, "subject")), visited);
+        }
+        if (annotated(type, FACT)) {
+            validatePublishedDependency(document, root,
+                    document.type(annotationString(type, FACT, "projection")), visited);
+        }
+    }
+
+    private static void validatePublishedDependency(
+            TaxiDocument document, Compiled root, Type type, Set<String> visited) {
+        while (type instanceof ArrayType array) type = array.getMemberType();
+        if (type instanceof PrimitiveType || !visited.add(type.getQualifiedName())) return;
+        if (type instanceof UnionType union) {
+            union.getTypes().forEach(member -> validatePublishedDependency(document, root, member, visited));
+            return;
+        }
+        if (!annotated(type, PUBLISHED)) {
+            fail(root, "published root " + qualifiedName(root)
+                    + " leaks unpublished type " + type.getQualifiedName());
+        }
+        if (type instanceof ObjectType object && isEventUnion(object)) {
+            validatePublishedDependency(document, root, ((TypeExpression) object.getExpression()).getType(), visited);
+        } else if (type instanceof ObjectType object && object.getTypeKind() == TypeKind.Model) {
+            object.getFields().forEach(field -> validatePublishedDependency(document, root, field.getType(), visited));
+        }
+        validatePublishedDependencies(document, root, type, visited);
+    }
+
+    private static String qualifiedName(Compiled compiled) {
+        if (compiled instanceof Type type) return type.getQualifiedName();
+        if (compiled instanceof Service service) return service.getQualifiedName();
+        return compiled.toString();
+    }
+
+    private static Set<String> sourceNames(Compiled compiled) {
+        return compiled.getCompilationUnits().stream().map(unit -> unit.getSource().getSourceName())
+                .collect(java.util.stream.Collectors.toSet());
+    }
+
+    private static String definitionChecksum(Compiled compiled) {
+        String annotations = compiled instanceof lang.taxi.types.Annotatable annotatable
+                ? annotatable.getAnnotations().stream().map(Object::toString).sorted()
+                        .collect(java.util.stream.Collectors.joining(","))
+                : "";
+        String definition;
+        if (compiled instanceof Type type) {
+            definition = "type|" + type.getQualifiedName() + "|" + type.getClass().getName()
+                    + "|" + annotations + "|" + typeShape(type);
+        } else if (compiled instanceof Service service) {
+            definition = "service|" + service.getQualifiedName() + "|" + annotations + "|"
+                    + service.getOperations().stream().sorted(Comparator.comparing(Operation::getName))
+                            .map(operation -> operation.getName() + "("
+                                    + operation.getParameters().stream()
+                                            .map(parameter -> parameter.getName() + ":" + indexType(parameter.getType()))
+                                            .collect(java.util.stream.Collectors.joining(","))
+                                    + "):" + indexType(operation.getReturnType()))
+                            .collect(java.util.stream.Collectors.joining(";"));
+        } else {
+            throw new IllegalArgumentException("Unsupported published definition: " + compiled);
+        }
+        return sha256(definition.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String renderIndex(
+            TaxiDocument document,
+            Path sourceDirectory,
+            String basePackage,
+            String generatorVersion,
+            String standardSchema,
+            Set<String> authoredSources,
+            List<ImportedSource> imports,
+            Set<Path> generatedFiles) throws IOException {
+        var allTypes = document.getTypes().stream()
+                .filter(type -> authored(type, authoredSources))
+                .sorted(Comparator.comparing(Type::getQualifiedName))
+                .toList();
+        Set<String> aliasedUnions = allTypes.stream().filter(ObjectType.class::isInstance)
+                .map(ObjectType.class::cast).filter(TaxiJavaGenerator::isEventUnion)
+                .map(type -> ((TypeExpression) type.getExpression()).getType().getQualifiedName())
+                .collect(java.util.stream.Collectors.toSet());
+        var types = allTypes.stream()
+                .filter(type -> !(type instanceof UnionType) || !aliasedUnions.contains(type.getQualifiedName()))
+                .toList();
+        var services = document.getServices().stream()
+                .filter(service -> authored(service, authoredSources) && serviceAnnotated(service, ACTION_SERVICE))
+                .sorted(Comparator.comparing(Service::getQualifiedName))
+                .toList();
+        Set<String> candidates = services.stream().flatMap(service -> service.getOperations().stream())
+                .map(operation -> operation.getParameterType(0).getQualifiedName())
+                .collect(java.util.stream.Collectors.toSet());
+        var lines = new ArrayList<String>();
+        lines.add("format-version=1");
+        lines.add("kernel-version=" + generatorVersion);
+        lines.add("generator-version=" + generatorVersion);
+        String compilerVersion = Compiler.class.getPackage().getImplementationVersion();
+        lines.add("taxi-compiler-version=" + (compilerVersion == null ? "1.70.0" : compilerVersion));
+        lines.add("standard-schema=META-INF/saas-kernel/standard.taxi|" + sha256(standardSchema.getBytes(StandardCharsets.UTF_8)));
+        lines.add("dependency.0=io.github.gmcnicol:saas-kernel:" + generatorVersion + "|"
+                + sha256(standardSchema.getBytes(StandardCharsets.UTF_8)));
+        try (Stream<Path> paths = Files.walk(sourceDirectory)) {
+            List<Path> sources = paths.filter(path -> path.toString().endsWith(".taxi")).sorted().toList();
+            for (int index = 0; index < sources.size(); index++) {
+                Path path = sources.get(index);
+                String resource = sourceDirectory.getFileName() + "/"
+                        + sourceDirectory.relativize(path).toString().replace('\\', '/');
+                lines.add("source." + index + "=" + resource + "|" + sha256(Files.readAllBytes(path)));
+            }
+        }
+        int sourceIndex;
+        try (Stream<Path> paths = Files.walk(sourceDirectory)) {
+            sourceIndex = (int) paths.filter(path -> path.toString().endsWith(".taxi")).count();
+        }
+        for (int index = 0; index < imports.size(); index++) {
+            ImportedSource imported = imports.get(index);
+            lines.add("source." + (sourceIndex + index) + "=" + imported.sourceName() + "|" + imported.checksum());
+            lines.add("dependency." + (index + 1) + "=" + imported.coordinate() + "|" + imported.checksum());
+        }
+        int typeIndex = 0;
+        for (Type type : types) {
+            String role = semanticRole(type, candidates);
+            int version = durable(role) ? contractVersion(type) : 0;
+            lines.add("type." + typeIndex++ + "=" + type.getQualifiedName() + "|" + role + "|" + version
+                    + "|" + basePackage + "." + type.getQualifiedName() + "|"
+                    + typeRelationship(type, role) + "|" + typeShape(type));
+        }
+        var actions = services.stream().flatMap(service -> service.getOperations().stream()
+                        .map(operation -> Map.entry(service, operation)))
+                .sorted(Comparator.comparing(entry -> actionName(entry.getKey(), entry.getValue())))
+                .toList();
+        for (int index = 0; index < actions.size(); index++) {
+            Service service = actions.get(index).getKey();
+            Operation operation = actions.get(index).getValue();
+            lines.add("action." + index + "=" + actionName(service, operation) + "|"
+                    + serviceAnnotationString(service, ACTION_SERVICE, "projection") + "|"
+                    + operation.getParameterType(0).getQualifiedName() + "|"
+                    + operationEvents(operation).stream().map(Type::getQualifiedName)
+                            .collect(java.util.stream.Collectors.joining(",")));
+        }
+        List<String> slots = implementationSlots(types, actions, candidates).stream().sorted().toList();
+        for (int index = 0; index < slots.size(); index++) lines.add("slot." + index + "=" + slots.get(index));
+        List<String> generatedContent = generatedFiles.stream()
+                .filter(path -> path.toString().endsWith(".java"))
+                .map(path -> path.toString().replace('\\', '/').replaceFirst("\\.java$", ".class"))
+                .sorted()
+                .toList();
+        for (int index = 0; index < generatedContent.size(); index++) {
+            lines.add("generated-content." + index + "=" + generatedContent.get(index));
+        }
+        String canonical = String.join("\n", lines) + "\n";
+        return canonical + "index-checksum=" + sha256(canonical.getBytes(StandardCharsets.UTF_8)) + "\n";
+    }
+
+    private static Set<String> implementationSlots(
+            List<Type> types,
+            List<Map.Entry<Service, Operation>> actions,
+            Set<String> candidates) {
+        Set<String> currentNames = types.stream()
+                .filter(type -> annotated(type, PROJECTED_STATE) || annotated(type, FACT)
+                        || annotated(type, EVENT) || candidates.contains(type.getQualifiedName()))
+                .map(Type::getQualifiedName).collect(java.util.stream.Collectors.toSet());
+        var slots = new HashSet<String>();
+        types.stream().filter(type -> annotated(type, FACT) && currentNames.contains(type.getQualifiedName()))
+                .forEach(type -> slots.add("DERIVATION|" + type.getQualifiedName()));
+        for (Map.Entry<Service, Operation> action : actions) {
+            Service service = action.getKey();
+            Operation operation = action.getValue();
+            if (!currentNames.contains(serviceAnnotationString(service, ACTION_SERVICE, "projection"))
+                    || !currentNames.contains(operation.getParameterType(0).getQualifiedName())
+                    || operationEvents(operation).stream()
+                            .anyMatch(event -> !currentNames.contains(event.getQualifiedName()))) {
+                continue;
+            }
+            String name = actionName(service, operation);
+            slots.add("APPLICABILITY|" + name);
+            slots.add("HANDLER|" + name);
+            operationEvents(operation).forEach(event -> slots.add("PROJECTOR|" + event.getQualifiedName()));
+        }
+        return Set.copyOf(slots);
+    }
+
+    private static List<ObjectType> operationEvents(Operation operation) {
+        Type member = ((ArrayType) operation.getReturnType()).getMemberType();
+        ObjectType model = (ObjectType) member;
+        return isEventUnion(model) ? eventModels(model) : List.of(model);
+    }
+
+    private static String actionName(Service service, Operation operation) {
+        return service.getQualifiedName() + "." + operation.getName();
+    }
+
+    private static boolean durable(String role) {
+        return Set.of("PROJECTION", "FACT", "CANDIDATE", "EVENT").contains(role);
+    }
+
+    private static String semanticRole(Type type, Set<String> candidates) {
+        if (annotated(type, SUBJECT)) return "SUBJECT";
+        if (annotated(type, PROJECTED_STATE)) return "PROJECTION";
+        if (annotated(type, FACT)) return "FACT";
+        if (annotated(type, EVENT)) return "EVENT";
+        if (candidates.contains(type.getQualifiedName())) return "CANDIDATE";
+        if (type instanceof ObjectType object && isEventUnion(object)) return "EVENT_UNION";
+        if (type instanceof EnumType) return "ENUM";
+        if (type instanceof ObjectType object && object.getTypeKind() == TypeKind.Type) return "SCALAR";
+        return "MODEL";
+    }
+
+    private static String typeShape(Type type) {
+        if (type instanceof EnumType enumType) {
+            return enumType.getValues().stream().map(value -> value.getName())
+                    .collect(java.util.stream.Collectors.joining(","));
+        }
+        if (type instanceof ObjectType object && isEventUnion(object)) {
+            return eventModels(object).stream().map(Type::getQualifiedName)
+                    .collect(java.util.stream.Collectors.joining(","));
+        }
+        if (type instanceof ObjectType object && object.getTypeKind() == TypeKind.Model) {
+            return object.getFields().stream()
+                    .map(field -> field.getName() + ":" + indexType(field.getType()) + (field.getNullable() ? "?" : ""))
+                    .collect(java.util.stream.Collectors.joining(","));
+        }
+        if (type instanceof ObjectType object && object.getTypeKind() == TypeKind.Type) {
+            return primitive(object).getQualifiedName();
+        }
+        return "";
+    }
+
+    private static String typeRelationship(Type type, String role) {
+        return switch (role) {
+            case "PROJECTION" -> annotationString(type, PROJECTED_STATE, "subject");
+            case "FACT" -> annotationString(type, FACT, "projection");
+            default -> "";
+        };
+    }
+
+    private static String indexType(Type type) {
+        return type instanceof ArrayType array ? indexType(array.getMemberType()) + "[]" : type.getQualifiedName();
+    }
+
+    private static String sha256(byte[] content) {
+        try {
+            return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 unavailable", exception);
+        }
     }
 
     private static String formValue(Field field, String basePackage) {
@@ -797,8 +1137,7 @@ final class TaxiJavaGenerator {
                     .append(basePackage).append(".").append(subjectName).append(", ").append(name)
                     .append("> TYPE = new ")
                     .append("io.github.gmcnicol.kernel.application.ProjectionType<>(\"")
-                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", \"")
-                    .append(contractFamily(type)).append("\", ")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
                     .append(basePackage).append(".").append(subjectName).append(".TYPE, ")
                     .append(name).append(".class, java.util.List.of(")
                     .append(fields.stream().map(field -> constantName(field.getName())).collect(java.util.stream.Collectors.joining(", ")))
@@ -808,8 +1147,7 @@ final class TaxiJavaGenerator {
             String projectionName = annotationString(type, FACT, "projection");
             descriptors.append("    public static final io.github.gmcnicol.kernel.application.FactType<")
                     .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.FactType<>(\"")
-                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", \"")
-                    .append(contractFamily(type)).append("\", ")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
                     .append(basePackage).append(".").append(projectionName).append(".TYPE, ")
                     .append(name).append(".class, java.util.List.of(")
                     .append(fields.stream().map(field -> constantName(field.getName()))
@@ -822,8 +1160,7 @@ final class TaxiJavaGenerator {
         if (annotated(type, EVENT)) {
             descriptors.append("    public static final io.github.gmcnicol.kernel.application.EventType<")
                     .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.EventType<>(\"")
-                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", \"")
-                    .append(contractFamily(type)).append("\", ")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
                     .append(name).append(".class, java.util.List.of(")
                     .append(fields.stream().map(field -> constantName(field.getName()))
                             .collect(java.util.stream.Collectors.joining(", ")))
@@ -831,23 +1168,11 @@ final class TaxiJavaGenerator {
         } else if (candidate) {
             descriptors.append("    public static final io.github.gmcnicol.kernel.application.CandidateType<")
                     .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.CandidateType<>(\"")
-                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", \"")
-                    .append(contractFamily(type)).append("\", ")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
                     .append(name).append(".class, java.util.List.of(")
                     .append(fields.stream().map(field -> constantName(field.getName()))
                             .collect(java.util.stream.Collectors.joining(", ")))
                     .append("));\n");
-        }
-        if (annotated(type, PROJECTED_STATE) || annotated(type, FACT) || candidate || annotated(type, EVENT)) {
-            String fieldNames = fields.stream().map(field -> "\"" + field.getName() + "\"")
-                    .collect(java.util.stream.Collectors.joining(", "));
-            String arguments = fields.stream().map(field -> legacyValue(field, basePackage))
-                    .collect(java.util.stream.Collectors.joining(", "));
-            descriptors.append("    public static final io.github.gmcnicol.kernel.semanticpack.LegacySemanticDecoder<")
-                    .append(name).append("> LEGACY_DECODER = ")
-                    .append("io.github.gmcnicol.kernel.semanticpack.LegacySemanticDecoder.of(TYPE, java.util.Set.of(")
-                    .append(fieldNames).append("), fields -> new ").append(name).append("(")
-                    .append(arguments).append("));\n");
         }
         if (!descriptors.isEmpty()) descriptors.append("\n");
         String implemented = unionInterfaces.isEmpty() ? "" : " implements " + unionInterfaces.stream()
@@ -892,12 +1217,6 @@ final class TaxiJavaGenerator {
 
     private static String constantName(String fieldName) {
         return fieldName.replaceAll("([a-z0-9])([A-Z])", "$1_$2").toUpperCase(java.util.Locale.ROOT);
-    }
-
-    private static String legacyValue(Field field, String basePackage) {
-        String method = field.getNullable() ? "optional" : "required";
-        return "fields." + method + "(\"" + field.getName() + "\", "
-                + formParser(field.getType(), basePackage) + ")";
     }
 
     private static String immutableList(ArrayType array, String expression) {
@@ -1122,6 +1441,23 @@ final class TaxiJavaGenerator {
 
     private static String format(CompilationError error) {
         return error.getSourceName() + ":" + error.getLine() + ":" + error.getChar() + ": " + error.getDetailMessage();
+    }
+
+    record ImportedSource(String coordinate, String resource, String content, String checksum) {
+        ImportedSource {
+            if (coordinate == null || coordinate.isBlank() || resource == null || resource.isBlank()
+                    || content == null || checksum == null || !checksum.matches("[0-9a-f]{64}")) {
+                throw new IllegalArgumentException("Imported Taxi source requires coordinate, resource and SHA-256");
+            }
+            String actual = sha256(content.getBytes(StandardCharsets.UTF_8));
+            if (!actual.equals(checksum)) {
+                throw new IllegalArgumentException("Imported Taxi checksum mismatch: " + coordinate + ":" + resource);
+            }
+        }
+
+        String sourceName() {
+            return "META-INF/saas-kernel/imports/" + checksum + ".taxi";
+        }
     }
 
     record Result(List<String> warnings) {}

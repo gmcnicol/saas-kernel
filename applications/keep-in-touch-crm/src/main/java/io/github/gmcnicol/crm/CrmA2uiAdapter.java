@@ -1,6 +1,5 @@
 package io.github.gmcnicol.crm;
 
-import io.github.gmcnicol.kernel.application.PresentationEnvelope;
 import io.github.gmcnicol.kernel.application.TypedPresentationEnvelope;
 import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.ContactId;
 import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpProjection;
@@ -42,12 +41,6 @@ final class CrmA2uiAdapter {
     CrmA2uiAdapter(ObjectMapper json, ObservationRegistry observations) {
         this.json = json;
         this.observations = observations;
-    }
-
-    PresentationResult render(PresentationEnvelope envelope, String source) {
-        return observed(envelope.actionOffers().stream()
-                .map(offer -> new OfferView(
-                        offer.id(), offer.actionId(), offer.inputType(), 2, Set.of())).toList(), source);
     }
 
     PresentationResult render(TypedPresentationEnvelope<ContactId, FollowUpProjection> envelope, String source) {

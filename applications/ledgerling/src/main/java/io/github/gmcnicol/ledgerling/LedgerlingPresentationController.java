@@ -1,15 +1,16 @@
 package io.github.gmcnicol.ledgerling;
 
-import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.Principal;
+import io.github.gmcnicol.kernel.application.SemanticRegistry;
 import io.github.gmcnicol.kernel.application.W3cTraceContext;
-import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
+import io.github.gmcnicol.kernel.presentationpack.TypedPresentationPack;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.FilingId;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.FilingProjection;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -25,73 +26,59 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 final class LedgerlingPresentationController {
-
     private final Kernel kernel;
-    private final PresentationPack pack;
+    private final TypedPresentationPack<FilingId, FilingProjection> presentation;
+    private final SemanticRegistry registry;
     private final Clock clock;
 
-    LedgerlingPresentationController(Kernel kernel, PresentationPack pack, Clock clock) {
+    LedgerlingPresentationController(
+            Kernel kernel,
+            TypedPresentationPack<FilingId, FilingProjection> presentation,
+            SemanticRegistry registry,
+            Clock clock) {
         this.kernel = kernel;
-        this.pack = pack;
+        this.presentation = presentation;
+        this.registry = registry;
         this.clock = clock;
     }
 
     @GetMapping(path = "/presentation/ledgerling", produces = MediaType.TEXT_HTML_VALUE)
-    String html(
-            Authentication authentication,
-            @RequestParam UUID snapshotId) {
-        return shell(render(caller(authentication), snapshotId).html());
+    String html(Authentication authentication, @RequestParam UUID snapshotId) {
+        Caller caller = caller(authentication);
+        return presentation.render(kernel.present(
+                caller.tenant(), snapshotId, new Principal(caller.type(), caller.id()),
+                Instant.now(clock), FilingProjection.TYPE)).html();
     }
 
-    @GetMapping(path = "/presentation/ledgerling/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    String events(
-            Authentication authentication,
-            @RequestParam UUID snapshotId) {
-        return render(caller(authentication), snapshotId).eventStream();
-    }
-
-    @PostMapping(
-            path = "/presentation/intents/{offerId}",
+    @PostMapping(path = "/presentation/intents/{offerId}",
             consumes = MediaType.APPLICATION_FORM_URLENCODED_VALUE,
             produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     ResponseEntity<String> invoke(
             @PathVariable UUID offerId,
+            Authentication authentication,
             @RequestParam MultiValueMap<String, String> form,
             @RequestHeader(name = "traceparent", required = false) String traceparent,
             @RequestHeader(name = "tracestate", required = false) String tracestate) {
+        Caller caller = caller(authentication);
         UUID intentId = UUID.fromString(single(form, "intentId"));
-        String payloadType = single(form, "payloadType");
-        int payloadVersion = Integer.parseInt(single(form, "payloadVersion"));
-        Map<String, String> values = new LinkedHashMap<>();
-        form.forEach((name, entries) -> {
-            if (!name.equals("intentId") && !name.equals("payloadType") && !name.equals("payloadVersion")) {
-                if (entries.size() != 1) throw new IllegalArgumentException("Duplicate payload field");
-                values.put(name, entries.getFirst());
-            }
-        });
-        var intent = kernel.accept(offerId, intentId, new CandidatePayload(
-                payloadType, payloadVersion, values, trace(traceparent, tracestate), Optional.empty()));
-        String html = "<section id=\"intent-result\"><p>Intent " + intent.id()
-                + " accepted: " + intent.status() + "</p></section>";
-        return ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM)
-                .body("event: datastar-patch-elements\ndata: elements " + html + "\n\n");
-    }
-
-    private io.github.gmcnicol.kernel.presentationpack.PresentationResult render(
-            Caller caller,
-            UUID snapshotId) {
-        return pack.render(kernel.present(
-                caller.tenantId(), snapshotId, new Principal(caller.principalType(), caller.principalId()),
-                Instant.now(clock)));
+        var payload = registry.decodeForm(
+                single(form, "actionType"), single(form, "payloadType"),
+                Integer.parseInt(single(form, "payloadVersion")), form,
+                Set.of("intentId", "actionType", "payloadType", "payloadVersion"),
+                traceparent == null && tracestate == null
+                        ? Optional.empty() : Optional.of(new W3cTraceContext(traceparent, tracestate)),
+                Optional.empty());
+        var intent = kernel.accept(caller.tenant(), new Principal(caller.type(), caller.id()),
+                offerId, intentId, payload);
+        return ResponseEntity.ok("event: accepted\ndata: " + intent.id() + "\n\n");
     }
 
     private static Caller caller(Authentication authentication) {
         if (authentication == null || !authentication.isAuthenticated()) {
             throw new AccessDeniedException("Authenticated caller required");
         }
-        return new Caller(
-                authority(authentication, "ROLE_TENANT_"), authority(authentication, "ROLE_PRINCIPAL_"),
-                authentication.getName());
+        return new Caller(authority(authentication, "ROLE_TENANT_"),
+                authority(authentication, "ROLE_PRINCIPAL_"), authentication.getName());
     }
 
     private static String authority(Authentication authentication, String prefix) {
@@ -103,25 +90,11 @@ final class LedgerlingPresentationController {
         return values.getFirst().substring(prefix.length());
     }
 
-    private record Caller(String tenantId, String principalType, String principalId) {}
-
-    private static String shell(String body) {
-        return "<!doctype html><html><head><script type=\"module\" "
-                + "src=\"https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.2/bundles/datastar.js\" "
-                + "integrity=\"sha384-SnyFlWTdFL3c8+9/1WsPuMFBq6AQOGC1LmS9upY4YkM3En3wZr5q2UvydHaMgOVG\" "
-                + "crossorigin=\"anonymous\">"
-                + "</script></head><body>" + body + "</body></html>";
-    }
-
     private static String single(MultiValueMap<String, String> form, String name) {
         var values = form.get(name);
         if (values == null || values.size() != 1) throw new IllegalArgumentException("Missing or duplicate " + name);
         return values.getFirst();
     }
 
-    private static Optional<W3cTraceContext> trace(String traceparent, String tracestate) {
-        return traceparent == null && tracestate == null
-                ? Optional.empty()
-                : Optional.of(new W3cTraceContext(traceparent, tracestate));
-    }
+    private record Caller(String tenant, String type, String id) {}
 }

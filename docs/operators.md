@@ -13,7 +13,7 @@ one least-privilege role inside each transaction. Use separate privileged Flyway
 Use `/actuator/health/liveness` for liveness and `/actuator/health/readiness` for readiness on the
 private management port. Liveness deliberately excludes PostgreSQL and exporters. Readiness
 includes Spring readiness, PostgreSQL, completed Kernel and Application migrations, validated
-assembly, both workers, semantic deployment compatibility, and fatal invariant state. Backlog and
+assembly, both workers, and semantic deployment compatibility. Backlog and
 ordinary failed Intent do not affect readiness.
 
 On termination Spring first refuses readiness and HTTP traffic. Both workers stop new claims and
@@ -29,7 +29,6 @@ zero and wait for their readiness endpoints to disappear before starting the new
 
 Applications must alert on:
 
-- fatal invariant count above zero;
 - sustained readiness failure or repeated startup/migration failure;
 - oldest due Intent and reevaluation age;
 - growing Intent or reevaluation backlog;
@@ -53,9 +52,9 @@ rebuild only Projected State. A valid recovery preserves together:
   Projected State versions, and reevaluation requests;
 - Application tables referenced by Projected State or Event handling;
 - tenant RLS policies, protected roles, grants, constraints, and lease state;
-- Application, Kernel, Semantic Pack, Authorisation Bundle, and Presentation Pack provenance.
+- Application, Kernel, Semantic Pack, and Authorisation Bundle provenance.
 
 After restore, start the exact Application artefact recorded by restored provenance, let both
 migration streams validate, and confirm private info, Flyway, readiness, and backlog metrics before
 serving traffic. Do not edit stored checksums, status, Events, audit, or applied migrations to make
-startup pass. Restore a correct backup or ship a forward migration or compatibility adapter.
+startup pass. Restore a correct backup or ship a forward migration.

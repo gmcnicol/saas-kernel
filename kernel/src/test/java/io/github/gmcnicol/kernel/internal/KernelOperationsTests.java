@@ -42,12 +42,12 @@ class KernelOperationsTests {
                 .schemas("kernel")
                 .defaultSchema("kernel")
                 .table("flyway_kernel_schema_history")
-                .target("8")
+                .target("2")
                 .load()
                 .migrate();
         assertThat(new JdbcTemplate(dataSource).queryForObject(
                         "SELECT max(version) FROM kernel.flyway_kernel_schema_history WHERE success", String.class))
-                .isEqualTo("8");
+                .isEqualTo("2");
         Flyway.configure()
                 .dataSource(dataSource)
                 .locations("classpath:db/kernel/migration")
@@ -146,11 +146,11 @@ class KernelOperationsTests {
         assertThat(Set.copyOf(jdbc.queryForList("""
                 SELECT indexname FROM pg_indexes
                 WHERE schemaname = 'kernel' AND indexname IN (
-                    'intent_pending_due', 'intent_retry_due', 'intent_claimed_expiry',
-                    'intent_tenant_history', 'reevaluation_unleased_due', 'reevaluation_lease_expiry')
+                    'typed_intent_pending_due', 'typed_intent_retry_due', 'typed_intent_claimed_expiry',
+                    'typed_intent_tenant_history', 'typed_reevaluation_due')
                 """, String.class))).containsExactlyInAnyOrder(
-                "intent_pending_due", "intent_retry_due", "intent_claimed_expiry",
-                "intent_tenant_history", "reevaluation_unleased_due", "reevaluation_lease_expiry");
+                "typed_intent_pending_due", "typed_intent_retry_due", "typed_intent_claimed_expiry",
+                "typed_intent_tenant_history", "typed_reevaluation_due");
     }
 
     @Test

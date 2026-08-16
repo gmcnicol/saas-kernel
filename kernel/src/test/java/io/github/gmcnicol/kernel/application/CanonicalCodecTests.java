@@ -108,6 +108,26 @@ class CanonicalCodecTests {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void readersAndWritersArePreparedOnceAndReused() throws ReflectiveOperationException {
+        var codec = new CanonicalCodec(List.of(TYPE));
+        var readers = field(codec, "readers");
+        var writers = field(codec, "writers");
+        var evidence = codec.encode(TYPE, example(List.of(1)));
+
+        codec.decode(TYPE, evidence);
+        codec.encode(TYPE, example(List.of(2)));
+
+        assertThat(field(codec, "readers")).isSameAs(readers);
+        assertThat(field(codec, "writers")).isSameAs(writers);
+    }
+
+    private static Object field(CanonicalCodec codec, String name) throws ReflectiveOperationException {
+        var field = CanonicalCodec.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(codec);
+    }
+
     private static Example example(List<Integer> order) {
         return new Example(
                 new Identifier("x"), Optional.empty(), order, BigDecimal.ONE, Status.Active, Instant.EPOCH);

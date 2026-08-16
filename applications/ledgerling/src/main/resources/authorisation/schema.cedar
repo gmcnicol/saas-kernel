@@ -1,28 +1,33 @@
 entity Staff;
 entity Client;
-entity Filing;
+entity FilingId = {
+    clientReference: String,
+    filingDueAt: String,
+    FilingDueSoon?: { filingDueAt: String },
+    RecordsOutstanding?: { requestId: String }
+};
 
-action "io.github.gmcnicol.ledgerling.Filing.status" appliesTo {
+action "typed/v1/io.github.gmcnicol.ledgerling.FilingProjection.clientReference" appliesTo {
     principal: [Staff, Client],
-    resource: [Filing]
+    resource: [FilingId]
 };
-action "io.github.gmcnicol.ledgerling.Filing.staffNote" appliesTo {
+action "typed/v1/io.github.gmcnicol.ledgerling.FilingProjection.filingDueAt" appliesTo {
     principal: [Staff, Client],
-    resource: [Filing]
+    resource: [FilingId]
 };
-action "io.github.gmcnicol.ledgerling.FilingDueSoon" appliesTo {
+action "typed/v1/io.github.gmcnicol.ledgerling.FilingDueSoon" appliesTo {
     principal: [Staff, Client],
-    resource: [Filing]
+    resource: [FilingId]
 };
-action "io.github.gmcnicol.ledgerling.RecordsOutstanding" appliesTo {
+action "typed/v1/io.github.gmcnicol.ledgerling.RecordsOutstanding" appliesTo {
     principal: [Staff, Client],
-    resource: [Filing]
+    resource: [FilingId]
 };
-action "io.github.gmcnicol.ledgerling.LedgerlingActions.recordRecordsReceived" appliesTo {
+action "typed/v1/io.github.gmcnicol.ledgerling.LedgerlingActions.recordRecordsReceived" appliesTo {
     principal: [Staff, Client],
-    resource: [Filing]
+    resource: [FilingId]
 };
-action "io.github.gmcnicol.ledgerling.LedgerlingActions.startPreparation" appliesTo {
+action "typed/v1/io.github.gmcnicol.ledgerling.LedgerlingActions.startPreparation" appliesTo {
     principal: [Staff, Client],
-    resource: [Filing]
+    resource: [FilingId]
 };

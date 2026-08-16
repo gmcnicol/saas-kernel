@@ -14,6 +14,10 @@ assert !generated.text.contains('io.github.gmcnicol.kernel.internal')
 assert wrapper.text.contains('@JsonValue')
 assert wrapper.text.contains('JsonCreator.Mode.DELEGATING')
 assert new File(basedir, 'build.log').text.contains('linter rule no-primitive-types-on-models')
+def imported = new File(basedir,
+        'target/classes/META-INF/saas-kernel/imports/179b47ce873f35fe0bc948e05cc8fa40923fa48bc85c99193567e29957293f66.taxi')
+assert imported.isFile()
+assert new File(basedir, 'target/classes/META-INF/saas-kernel/publication/manifest.properties').isFile()
 
 def hashes = {
     def digest = java.security.MessageDigest.getInstance('SHA-256')

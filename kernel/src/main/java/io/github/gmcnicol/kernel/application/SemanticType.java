@@ -7,9 +7,5 @@ public interface SemanticType<T> {
 
     int contractVersion();
 
-    default String contractFamily() {
-        return qualifiedName();
-    }
-
     Class<T> javaType();
 }

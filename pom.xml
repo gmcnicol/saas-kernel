@@ -43,6 +43,7 @@
     <modules>
         <module>kernel</module>
         <module>taxi-generator</module>
+        <module>acceptance-contract</module>
         <module>applications/keep-in-touch-crm</module>
         <module>applications/ledgerling</module>
     </modules>
@@ -54,6 +55,7 @@
         <taxi.version>1.70.0</taxi.version>
         <cedar-java.version>4.2.3</cedar-java.version>
         <maven-antrun-plugin.version>3.2.0</maven-antrun-plugin.version>
+        <central-publishing-maven-plugin.version>0.9.0</central-publishing-maven-plugin.version>
         <kotlin.version>2.2.21</kotlin.version>
         <maven.deploy.skip>true</maven.deploy.skip>
     </properties>
@@ -133,4 +135,35 @@
             </plugins>
         </pluginManagement>
     </build>
+
+    <profiles>
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.8</version>
+                        <executions>
+                            <execution>
+                                <id>sign-release</id>
+                                <phase>verify</phase>
+                                <goals><goal>sign</goal></goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>${central-publishing-maven-plugin.version}</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

@@ -1,0 +1,8 @@
+import io.github.gmcnicol.kernel.taxi.Published
+import shared.SharedEmail
+
+namespace customer.publication
+
+@Published model PublishedCustomer {
+    email: SharedEmail
+}

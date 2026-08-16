@@ -9,12 +9,28 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.regex.Pattern;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpProjection;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.ContactId;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.RecordInteractionCandidateV1;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.TypedCrmActions;
+import io.github.gmcnicol.kernel.application.Kernel;
+import io.github.gmcnicol.kernel.application.TypedProjectedState;
+import io.github.gmcnicol.kernel.application.TypedSubject;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalManagementPort;
+import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -28,6 +44,7 @@ import org.testcontainers.utility.DockerImageName;
 
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = "management.server.port=0")
+@Import(ApplicationBootTests.TestUsers.class)
 class ApplicationBootTests {
 
     @Container
@@ -46,9 +63,53 @@ class ApplicationBootTests {
     }
 
     @LocalManagementPort int managementPort;
+    @LocalServerPort int serverPort;
     @Autowired JdbcTemplate runtimeJdbc;
     @Autowired PlatformTransactionManager transactionManager;
     @Autowired CrmContactQueries contacts;
+    @Autowired Kernel kernel;
+
+    @Test
+    void authenticatedHttpPresentationAcceptsGeneratedCandidate() throws Exception {
+        Instant dueAt = Instant.parse("2020-08-15T09:00:00Z");
+        new JdbcTemplate(new DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())).update("""
+                INSERT INTO crm_contact_engagement_projection
+                    (tenant_id, contact_id, display_name, next_contact_due_at, open_follow_up_id)
+                VALUES ('tenant-http', 'http-contact', 'HTTP Contact', ?, ?)
+                """, java.sql.Timestamp.from(dueAt), UUID.randomUUID());
+        FollowUpProjection projection = contacts.projection("tenant-http", "http-contact");
+        var snapshot = kernel.evaluate(new TypedProjectedState<>("tenant-http",
+                new TypedSubject<>(ContactId.TYPE, projection.contactId()), 1,
+                FollowUpProjection.TYPE, projection), dueAt.plusSeconds(1));
+        var client = HttpClient.newHttpClient();
+        URI page = URI.create("http://localhost:" + serverPort
+                + "/presentation/crm/desktop?snapshotId=" + snapshot.id());
+
+        assertThat(client.send(HttpRequest.newBuilder(page).build(), HttpResponse.BodyHandlers.ofString())
+                .statusCode()).isEqualTo(401);
+        var rendered = client.send(HttpRequest.newBuilder(page).header("Authorization", basic("gareth"))
+                .build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(rendered.statusCode()).isEqualTo(200);
+        var match = Pattern.compile("/presentation/intents/([0-9a-f-]{36})").matcher(rendered.body());
+        assertThat(match.find()).isTrue();
+        UUID offer = UUID.fromString(match.group(1));
+        UUID intent = UUID.randomUUID();
+        String form = form(Map.of(
+                "intentId", intent.toString(),
+                "actionType", TypedCrmActions.RECORD_INTERACTION.qualifiedName(),
+                "payloadType", RecordInteractionCandidateV1.TYPE.qualifiedName(),
+                "payloadVersion", "1",
+                "note", "HTTP workflow"));
+        var accepted = client.send(HttpRequest.newBuilder(
+                        URI.create("http://localhost:" + serverPort + "/presentation/intents/" + offer))
+                .header("Authorization", basic("gareth"))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(form)).build(), HttpResponse.BodyHandlers.ofString());
+
+        assertThat(accepted.statusCode()).isEqualTo(200);
+        assertThat(accepted.body()).contains(intent.toString(), "PENDING");
+    }
 
     @Test
     void bootsKernelAndBothMigrationStreams() {
@@ -66,7 +127,7 @@ class ApplicationBootTests {
     void servesDueContactsFromApplicationOwnedIndexedProjectionWithoutKernelEvaluation() {
         var admin = new JdbcTemplate(new DriverManagerDataSource(
                 postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
-        int snapshotsBefore = admin.queryForObject("SELECT count(*) FROM kernel.evaluation_snapshot", Integer.class);
+        int snapshotsBefore = admin.queryForObject("SELECT count(*) FROM kernel.typed_evaluation_snapshot", Integer.class);
         admin.update("""
                 INSERT INTO crm_contact_engagement_projection
                     (tenant_id, contact_id, display_name, next_contact_due_at, open_follow_up_id)
@@ -102,7 +163,7 @@ class ApplicationBootTests {
                     Integer.class);
         });
         assertThat(crossTenantRows).isZero();
-        assertThat(admin.queryForObject("SELECT count(*) FROM kernel.evaluation_snapshot", Integer.class))
+        assertThat(admin.queryForObject("SELECT count(*) FROM kernel.typed_evaluation_snapshot", Integer.class))
                 .isEqualTo(snapshotsBefore);
     }
 
@@ -145,5 +206,26 @@ class ApplicationBootTests {
         assertThat(authorisedMetrics.statusCode()).isEqualTo(200);
         assertThat(authorisedMigrations.statusCode()).isEqualTo(200);
         assertThat(authorisedInfo.body()).contains("application", "kernel", "semanticPack", "checksum");
+    }
+
+    private static String basic(String user) {
+        return "Basic " + Base64.getEncoder().encodeToString(
+                (user + ":test-password").getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String form(java.util.Map<String, String> values) {
+        return values.entrySet().stream().map(entry -> java.net.URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8)
+                + "=" + java.net.URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8))
+                .collect(java.util.stream.Collectors.joining("&"));
+    }
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class TestUsers {
+        @Bean
+        UserDetailsService users() {
+            return new InMemoryUserDetailsManager(User.withUsername("gareth")
+                    .password("{noop}test-password")
+                    .roles("TENANT_tenant-http", "PRINCIPAL_Owner").build());
+        }
     }
 }

@@ -1,57 +1,59 @@
 package io.github.gmcnicol.ledgerling;
 
-import io.github.gmcnicol.kernel.application.PresentationActionOffer;
-import io.github.gmcnicol.kernel.application.PresentationEnvelope;
-import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
+import io.github.gmcnicol.kernel.application.TypedActionOffer;
+import io.github.gmcnicol.kernel.application.TypedPresentationEnvelope;
 import io.github.gmcnicol.kernel.presentationpack.PresentationResult;
-import java.util.Map;
+import io.github.gmcnicol.kernel.presentationpack.TypedPresentationPack;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.FilingId;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.FilingProjection;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.LedgerlingActions;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.RecordRecordsReceivedCandidateV1;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.StartPreparationCandidateV1;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import org.springframework.web.util.HtmlUtils;
 
 final class LedgerlingPresentation {
-
-    private static final Map<String, String> LABELS = Map.of(
-            "recordRecordsReceived", "Record records received",
-            "startPreparation", "Start preparation");
-
     private LedgerlingPresentation() {}
 
-    static PresentationPack defaultPack() {
-        return PresentationPack.of("presentation/default.properties", LedgerlingPresentation::render);
+    static TypedPresentationPack<FilingId, FilingProjection> typed() {
+        return envelope -> render(envelope);
     }
 
-    private static PresentationResult render(PresentationEnvelope envelope) {
-        String status = escape(envelope.fields().getOrDefault(
-                "io.github.gmcnicol.ledgerling.Filing.status", "Filing"));
+    private static PresentationResult render(TypedPresentationEnvelope<FilingId, FilingProjection> envelope) {
+        String reference = escape(envelope.field(FilingProjection.CLIENT_REFERENCE)
+                .map(value -> value.value()).orElse(envelope.subject().externalId()));
         String controls = envelope.actionOffers().stream()
-                .map(LedgerlingPresentation::control)
-                .collect(Collectors.joining());
-        String html = "<main id=\"ledgerling-work-queue\"><header><p>Filing operations</p><h1>"
-                + status + "</h1></header><dl><dt>Open facts</dt><dd>" + envelope.facts().size()
-                + "</dd></dl><section class=\"work-controls\">" + controls + "</section></main>";
-        return new PresentationResult(html, patch(html), envelope.actionOffers().stream()
-                .map(PresentationActionOffer::id).collect(Collectors.toSet()));
+                .map(LedgerlingPresentation::control).collect(Collectors.joining());
+        String html = "<main id=\"ledgerling-work-queue\"><h1>" + reference
+                + "</h1><p>Open facts: " + envelope.facts().size() + "</p>" + controls + "</main>";
+        return new PresentationResult(html,
+                "event: datastar-patch-elements\ndata: elements " + html + "\n\n",
+                envelope.actionOffers().stream().map(TypedActionOffer::id).collect(Collectors.toSet()));
     }
 
-    private static String control(PresentationActionOffer offer) {
-        String action = offer.actionId().substring(offer.actionId().lastIndexOf('.') + 1);
-        String field = action.equals("recordRecordsReceived")
-                ? "<input name=\"receivedAt\" required>"
-                : "<input type=\"hidden\" name=\"confirmed\" value=\"true\">";
-        return "<form method=\"post\" action=\"/presentation/intents/" + offer.id()
-                + "\" data-on:submit=\"@post('/presentation/intents/" + offer.id()
-                + "', {contentType: 'form'})\">"
+    private static String control(TypedActionOffer<FilingProjection, ?, ?> offer) {
+        String field;
+        String label;
+        if (offer.actionType() == LedgerlingActions.RECORD_RECORDS_RECEIVED) {
+            field = "<input name=\"" + RecordRecordsReceivedCandidateV1.RECEIVED_AT.name() + "\" required>";
+            label = "Record records received";
+        } else if (offer.actionType() == LedgerlingActions.START_PREPARATION) {
+            field = "<input type=\"hidden\" name=\"" + StartPreparationCandidateV1.CONFIRMED.name()
+                    + "\" value=\"true\">";
+            label = "Start preparation";
+        } else {
+            return "";
+        }
+        return "<form method=\"post\" action=\"/presentation/intents/" + offer.id() + "\">"
                 + "<input type=\"hidden\" name=\"intentId\" value=\"" + UUID.randomUUID() + "\">"
+                + "<input type=\"hidden\" name=\"actionType\" value=\""
+                + escape(offer.actionType().qualifiedName()) + "\">"
                 + "<input type=\"hidden\" name=\"payloadType\" value=\""
-                + escape(offer.inputType()) + "\">"
-                + "<input type=\"hidden\" name=\"payloadVersion\" value=\"2\">" + field
-                + "<button type=\"submit\">" + escape(LABELS.getOrDefault(action, action)) + "</button></form>";
-    }
-
-    private static String patch(String html) {
-        return "event: datastar-patch-elements\ndata: elements "
-                + html.replace("\n", "\ndata: elements ") + "\n\n";
+                + escape(offer.actionType().candidateType().qualifiedName()) + "\">"
+                + "<input type=\"hidden\" name=\"payloadVersion\" value=\""
+                + offer.actionType().candidateType().contractVersion() + "\">"
+                + field + "<button type=\"submit\">" + label + "</button></form>";
     }
 
     private static String escape(String value) {

@@ -114,6 +114,10 @@
     </dependencies>
 
     <build>
+        <resources>
+            <resource><directory>src/main/resources</directory></resource>
+            <resource><directory>src/main/resources-filtered</directory><filtering>true</filtering></resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
@@ -131,55 +135,6 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-antrun-plugin</artifactId>
             </plugin>
-            <plugin>
-                <groupId>com.github.siom79.japicmp</groupId>
-                <artifactId>japicmp-maven-plugin</artifactId>
-                <version>0.26.1</version>
-                <configuration>
-                    <oldVersion>
-                        <dependency>
-                            <groupId>${project.groupId}</groupId>
-                            <artifactId>${project.artifactId}</artifactId>
-                            <version>${japicmp.oldVersion}</version>
-                        </dependency>
-                    </oldVersion>
-                    <newVersion>
-                        <file><path>${project.build.directory}/${project.build.finalName}.jar</path></file>
-                    </newVersion>
-                    <parameter>
-                        <accessModifier>public</accessModifier>
-                        <includes>
-                            <include>io.github.gmcnicol.kernel.application.*</include>
-                            <include>io.github.gmcnicol.kernel.presentationpack.*</include>
-                            <include>io.github.gmcnicol.kernel.semanticpack.*</include>
-                        </includes>
-                        <breakBuildOnBinaryIncompatibleModifications>${japicmp.breakBinary}</breakBuildOnBinaryIncompatibleModifications>
-                        <ignoreMissingClasses>true</ignoreMissingClasses>
-                    </parameter>
-                </configuration>
-            </plugin>
         </plugins>
     </build>
-
-    <profiles>
-        <profile>
-            <id>release</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-gpg-plugin</artifactId>
-                        <version>3.2.8</version>
-                        <executions>
-                            <execution>
-                                <id>sign-release</id>
-                                <phase>verify</phase>
-                                <goals><goal>sign</goal></goals>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-    </profiles>
 </project>

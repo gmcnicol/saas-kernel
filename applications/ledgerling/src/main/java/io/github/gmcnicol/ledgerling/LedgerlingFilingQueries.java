@@ -1,5 +1,9 @@
 package io.github.gmcnicol.ledgerling;
 
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.ClientReference;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.DocumentRequestId;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.FilingId;
+import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.FilingProjection;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -18,6 +22,28 @@ final class LedgerlingFilingQueries {
     LedgerlingFilingQueries(JdbcTemplate jdbc, PlatformTransactionManager transactionManager) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(transactionManager);
+    }
+
+    FilingProjection projection(String tenantId, String filingId) {
+        if (tenantId == null || tenantId.isBlank() || filingId == null || filingId.isBlank()) {
+            throw new IllegalArgumentException("Filing projection requires tenant and filing");
+        }
+        return transactions.execute(status -> {
+            jdbc.execute("SET LOCAL ROLE kernel_runtime");
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, tenantId);
+            return jdbc.queryForObject("""
+                    SELECT filing_id, request_id, client_reference, filing_due_at,
+                           records_outstanding, preparation_started
+                    FROM ledger_filing_projection
+                    WHERE tenant_id = ? AND filing_id = ?
+                    """, (result, row) -> new FilingProjection(
+                            new FilingId(result.getString("filing_id")),
+                            new DocumentRequestId(result.getString("request_id")),
+                            new ClientReference(result.getString("client_reference")),
+                            result.getTimestamp("filing_due_at").toInstant(),
+                            result.getBoolean("records_outstanding"),
+                            result.getBoolean("preparation_started")), tenantId, filingId);
+        });
     }
 
     List<FilingOutstanding> outstandingBy(

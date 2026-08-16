@@ -20,6 +20,14 @@ _Avoid_: Product pack, domain plugin
 The generated Java representation of a semantic type or operation declared in Taxi. Taxi remains the source of meaning.
 _Avoid_: Canonical schema, hand-written DTO, domain model
 
+**Semantic Index**:
+The deterministic inventory connecting one Semantic Pack's Taxi meaning, Taxi Java Bindings, required Semantic Implementations, package dependencies, and generation versions.
+_Avoid_: Deployment manifest, runtime registry
+
+**Semantic Implementation**:
+The single Application-authored behaviour filling one generated derivation, applicability, handler, or concrete Event projector slot.
+_Avoid_: Taxi Java Binding, generated behaviour
+
 **Presentation Pack**:
 An extension defining how semantic capabilities appear and behave for a particular audience or workflow.
 _Avoid_: UI theme, semantic pack
@@ -49,10 +57,6 @@ _Avoid_: Evidence graph, decision log
 **Canonical Evidence**:
 The exact versioned UTF-8 JSON and checksum persisted for one typed Projected State, Fact, Candidate Payload, or Event. It protects semantic history and is not an Application business model or query store.
 _Avoid_: Source of truth, business JSON, relational projection
-
-**Contract Family**:
-The stable qualified lineage identity shared by renamed versions of one durable Taxi role. Each family has one current contract and explicit forward adapters from historical versions.
-_Avoid_: Simple type name, Java class hierarchy
 
 **Authorisation Envelope**:
 A principal-specific projection containing only Cedar-authorised fields, Facts, and Action Offers for one Evaluation Snapshot.
@@ -89,3 +93,9 @@ _Avoid_: Intent, notification
 **Business Workflow**:
 The product-specific progression of work as Projected State changes and new Actions become applicable. A Business Workflow may use explicit domain concepts, but is not a universal stage-and-transition graph.
 _Avoid_: Intent lifecycle, workflow engine
+
+## Publication
+
+**Publication Bundle**:
+The deterministic, checksummed set of explicitly published Taxi definitions and safe dependencies made available for external schema tooling.
+_Avoid_: Runtime registry, authority endpoint
