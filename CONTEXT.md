@@ -4,6 +4,10 @@ A reusable core for products whose current facts determine which human actions a
 
 ## Language
 
+**Application**:
+The deployable product owning its domain semantics, data, Business Workflow, authorisation, presentation, and external integrations while using Kernel mechanisms.
+_Avoid_: Host, pack assembly
+
 **Kernel**:
 The product-neutral contracts and mechanisms shared by every semantic workflow product.
 _Avoid_: Platform, framework, core kernel
@@ -12,9 +16,17 @@ _Avoid_: Platform, framework, core kernel
 An extension defining a product domain through semantic types, facts, actions, policies, and action handling.
 _Avoid_: Product pack, domain plugin
 
+**Taxi Java Binding**:
+The generated Java representation of a semantic type or operation declared in Taxi. Taxi remains the source of meaning.
+_Avoid_: Canonical schema, hand-written DTO, domain model
+
 **Presentation Pack**:
 An extension defining how semantic capabilities appear and behave for a particular audience or workflow.
 _Avoid_: UI theme, semantic pack
+
+**Authorisation Bundle**:
+The versioned Cedar schema and policy set governing principal-specific access for an application.
+_Avoid_: Cedar pack, policy pack, semantic pack
 
 **Acceptance Fixture**:
 A product-shaped scenario that validates the Kernel contract. Acceptance Fixtures are contrasting peers, not levels in a complexity ladder.
