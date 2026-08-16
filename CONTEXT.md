@@ -50,6 +50,10 @@ _Avoid_: Evidence graph, decision log
 The exact versioned UTF-8 JSON and checksum persisted for one typed Projected State, Fact, Candidate Payload, or Event. It protects semantic history and is not an Application business model or query store.
 _Avoid_: Source of truth, business JSON, relational projection
 
+**Contract Family**:
+The stable qualified lineage identity shared by renamed versions of one durable Taxi role. Each family has one current contract and explicit forward adapters from historical versions.
+_Avoid_: Simple type name, Java class hierarchy
+
 **Authorisation Envelope**:
 A principal-specific projection containing only Cedar-authorised fields, Facts, and Action Offers for one Evaluation Snapshot.
 _Avoid_: Authorised Evaluation, Evaluation Snapshot

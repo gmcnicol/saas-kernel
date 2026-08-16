@@ -25,7 +25,7 @@ Application persistence remains separate and Application-owned. Generator produc
 
 Exact authored Taxi remains the future Orbital publication source. Publication will expose only explicit `@Published` roots and their safe dependency closure. This decision adds no Orbital runtime, endpoint, or direct Action invocation path.
 
-Compatibility is explicit. Historical durable Taxi types remain available. Breaking durable shape changes use a new qualified type and contract version. Typed adapters convert historical Taxi Java Bindings to current bindings without rewriting stored evidence.
+Compatibility is explicit. Historical durable Taxi types remain available. `@Contract.family` gives renamed versions of one durable role a stable qualified lineage identity; when omitted, the authored qualified type is its family. Breaking durable shape changes use a new qualified type and increasing contract version within that family. Typed adapters convert historical Taxi Java Bindings to the single current binding without rewriting stored evidence. Candidate Payload roles come from authored Action inputs; generated lineage retains later contracts in the same family.
 
 ## Consequences
 

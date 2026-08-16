@@ -1,0 +1,6 @@
+import io.github.gmcnicol.kernel.taxi.Subject
+
+namespace io.github.gmcnicol.crm
+
+@Subject
+type CompatibilityContactId inherits String

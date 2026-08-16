@@ -4,6 +4,7 @@ annotation Subject
 
 annotation Contract {
     version: Int
+    family: String?
 }
 
 annotation ProjectedState {

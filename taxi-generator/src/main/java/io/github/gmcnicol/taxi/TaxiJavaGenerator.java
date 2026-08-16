@@ -141,7 +141,8 @@ final class TaxiJavaGenerator {
                 .map(Type::getQualifiedName)
                 .collect(java.util.stream.Collectors.toSet());
         boolean bindingsGenerated = authoredTypes.stream()
-                .anyMatch(type -> annotated(type, PROJECTED_STATE) || annotated(type, FACT))
+                .anyMatch(type -> annotated(type, PROJECTED_STATE) || annotated(type, FACT)
+                        || annotated(type, EVENT))
                 || !actionServices.isEmpty();
         if (bindingsGenerated) {
             for (String generated : actionServices.isEmpty()
@@ -213,7 +214,7 @@ final class TaxiJavaGenerator {
                             fail(field, "generated field-descriptor collision for '" + constantName(field.getName()) + "'");
                         }
                     }
-                    if ((annotated(type, PROJECTED_STATE) || annotated(type, FACT) || annotated(type, EVENT))
+                    if (annotated(type, CONTRACT)
                             && generatedMembers.contains("TYPE")) {
                         fail(type, "generated field-descriptor collision for 'TYPE'");
                     }
@@ -269,7 +270,8 @@ final class TaxiJavaGenerator {
             boolean projection = annotated(type, PROJECTED_STATE);
             boolean fact = annotated(type, FACT);
             boolean event = annotated(type, EVENT);
-            if ((subject ? 1 : 0) + (projection ? 1 : 0) + (fact ? 1 : 0) + (event ? 1 : 0) > 1) {
+            if ((subject ? 1 : 0) + (projection ? 1 : 0) + (fact ? 1 : 0)
+                    + (event ? 1 : 0) > 1) {
                 fail(type, "semantic role annotations cannot be combined");
             }
             if (subject && (!(type instanceof ObjectType objectType)
@@ -281,6 +283,7 @@ final class TaxiJavaGenerator {
                     fail(type, "@ProjectedState may only annotate a model");
                 }
                 contractVersion(type);
+                contractFamily(type);
                 String subjectName = annotationString(type, PROJECTED_STATE, "subject");
                 Type subjectType;
                 try {
@@ -294,9 +297,10 @@ final class TaxiJavaGenerator {
                         || !annotated(subjectType, SUBJECT)) {
                     fail(type, "@ProjectedState subject must reference one @Subject scalar: " + subjectName);
                 }
-                ObjectType previous = projections.putIfAbsent(subjectName, (ObjectType) type);
+                String projectionKey = subjectName + "@" + contractVersion(type);
+                ObjectType previous = projections.putIfAbsent(projectionKey, (ObjectType) type);
                 if (previous != null) {
-                    fail(type, "only one @ProjectedState is allowed for @Subject " + subjectName);
+                    fail(type, "only one @ProjectedState contract version is allowed for @Subject " + subjectName);
                 }
             }
             if (fact) {
@@ -304,6 +308,7 @@ final class TaxiJavaGenerator {
                     fail(type, "@Fact may only annotate a model");
                 }
                 contractVersion(type);
+                contractFamily(type);
                 String projectionName = annotationString(type, FACT, "projection");
                 Type projectionType;
                 try {
@@ -323,6 +328,7 @@ final class TaxiJavaGenerator {
                     fail(type, "@Event may only annotate a model");
                 }
                 contractVersion(type);
+                contractFamily(type);
             }
         }
         List<Service> actionServices = document.getServices().stream()
@@ -384,6 +390,7 @@ final class TaxiJavaGenerator {
                 fail(candidate, "generated field-descriptor collision for 'TYPE'");
             }
             contractVersion(candidate);
+            contractFamily(candidate);
             if (!(operation.getReturnType() instanceof ArrayType)) {
                 fail(operation, "Action must return a non-empty Event array");
             }
@@ -396,6 +403,7 @@ final class TaxiJavaGenerator {
                     fail(operation, "Action return must contain one @Event model or closed Event union");
                 }
                 contractVersion(eventModel);
+                contractFamily(eventModel);
             }
         }
     }
@@ -459,6 +467,14 @@ final class TaxiJavaGenerator {
             fail(type, "@Contract version must be a positive integer");
         }
         return ((Number) value).intValue();
+    }
+
+    private static String contractFamily(Type type) {
+        Object value = annotation(type, CONTRACT).parameter("family");
+        String family = value == null ? type.getQualifiedName() : value.toString();
+        if (family.isBlank()) fail(type, "@Contract family must be a qualified type name");
+        validateQualifiedIdentifier(family, location(type));
+        return family;
     }
 
     private static void validateServiceMember(ServiceMember member, boolean actionService) {
@@ -553,6 +569,17 @@ final class TaxiJavaGenerator {
         var candidateNames = actionServices.stream().flatMap(service -> service.getOperations().stream())
                 .map(operation -> operation.getParameters().getFirst().getType().getQualifiedName())
                 .collect(java.util.stream.Collectors.toSet());
+        var candidateFamilies = candidateNames.stream()
+                .map(document::type)
+                .map(TaxiJavaGenerator::contractFamily)
+                .collect(java.util.stream.Collectors.toSet());
+        authoredTypes.stream().filter(type -> type instanceof ObjectType object
+                        && object.getTypeKind() == TypeKind.Model && annotated(type, CONTRACT))
+                .filter(type -> !annotated(type, PROJECTED_STATE)
+                        && !annotated(type, FACT) && !annotated(type, EVENT))
+                .filter(type -> candidateFamilies.contains(contractFamily(type)))
+                .map(Type::getQualifiedName)
+                .forEach(candidateNames::add);
         var actionUnions = actionServices.stream().flatMap(service -> service.getOperations().stream())
                 .map(Operation::getReturnType).map(ArrayType.class::cast).map(ArrayType::getMemberType)
                 .filter(ObjectType.class::isInstance).map(ObjectType.class::cast)
@@ -620,12 +647,17 @@ final class TaxiJavaGenerator {
                         .map(operation -> basePackage + "." + service.getQualifiedName() + "."
                                 + constantName(operation.getName())))
                 .collect(java.util.stream.Collectors.joining(", "));
+        String legacyDecoders = java.util.stream.Stream.of(projections, facts, candidates, events)
+                .flatMap(List::stream)
+                .map(type -> basePackage + "." + type.getQualifiedName() + ".LEGACY_DECODER")
+                .collect(java.util.stream.Collectors.joining(", "));
         return "package " + basePackage + ";\n\n"
                 + "public final class GeneratedSemanticBindings {\n"
                 + "    public static final io.github.gmcnicol.kernel.semanticpack.SemanticBindings INSTANCE = new "
                 + "io.github.gmcnicol.kernel.semanticpack.SemanticBindings(java.util.List.of(" + projectionTypes
                 + "), java.util.List.of(" + factTypes + "), java.util.List.of(" + candidateTypes
-                + "), java.util.List.of(" + eventTypes + "), java.util.List.of(" + actionTypes + "));\n\n"
+                + "), java.util.List.of(" + eventTypes + "), java.util.List.of(" + actionTypes
+                + "), java.util.List.of(" + legacyDecoders + "));\n\n"
                 + "    private GeneratedSemanticBindings() {}\n"
                 + "}\n";
     }
@@ -765,7 +797,8 @@ final class TaxiJavaGenerator {
                     .append(basePackage).append(".").append(subjectName).append(", ").append(name)
                     .append("> TYPE = new ")
                     .append("io.github.gmcnicol.kernel.application.ProjectionType<>(\"")
-                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", \"")
+                    .append(contractFamily(type)).append("\", ")
                     .append(basePackage).append(".").append(subjectName).append(".TYPE, ")
                     .append(name).append(".class, java.util.List.of(")
                     .append(fields.stream().map(field -> constantName(field.getName())).collect(java.util.stream.Collectors.joining(", ")))
@@ -775,7 +808,8 @@ final class TaxiJavaGenerator {
             String projectionName = annotationString(type, FACT, "projection");
             descriptors.append("    public static final io.github.gmcnicol.kernel.application.FactType<")
                     .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.FactType<>(\"")
-                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", \"")
+                    .append(contractFamily(type)).append("\", ")
                     .append(basePackage).append(".").append(projectionName).append(".TYPE, ")
                     .append(name).append(".class, java.util.List.of(")
                     .append(fields.stream().map(field -> constantName(field.getName()))
@@ -788,16 +822,32 @@ final class TaxiJavaGenerator {
         if (annotated(type, EVENT)) {
             descriptors.append("    public static final io.github.gmcnicol.kernel.application.EventType<")
                     .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.EventType<>(\"")
-                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
-                    .append(name).append(".class);\n");
-        } else if (candidate) {
-            descriptors.append("    public static final io.github.gmcnicol.kernel.application.CandidateType<")
-                    .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.CandidateType<>(\"")
-                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", \"")
+                    .append(contractFamily(type)).append("\", ")
                     .append(name).append(".class, java.util.List.of(")
                     .append(fields.stream().map(field -> constantName(field.getName()))
                             .collect(java.util.stream.Collectors.joining(", ")))
                     .append("));\n");
+        } else if (candidate) {
+            descriptors.append("    public static final io.github.gmcnicol.kernel.application.CandidateType<")
+                    .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.CandidateType<>(\"")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", \"")
+                    .append(contractFamily(type)).append("\", ")
+                    .append(name).append(".class, java.util.List.of(")
+                    .append(fields.stream().map(field -> constantName(field.getName()))
+                            .collect(java.util.stream.Collectors.joining(", ")))
+                    .append("));\n");
+        }
+        if (annotated(type, PROJECTED_STATE) || annotated(type, FACT) || candidate || annotated(type, EVENT)) {
+            String fieldNames = fields.stream().map(field -> "\"" + field.getName() + "\"")
+                    .collect(java.util.stream.Collectors.joining(", "));
+            String arguments = fields.stream().map(field -> legacyValue(field, basePackage))
+                    .collect(java.util.stream.Collectors.joining(", "));
+            descriptors.append("    public static final io.github.gmcnicol.kernel.semanticpack.LegacySemanticDecoder<")
+                    .append(name).append("> LEGACY_DECODER = ")
+                    .append("io.github.gmcnicol.kernel.semanticpack.LegacySemanticDecoder.of(TYPE, java.util.Set.of(")
+                    .append(fieldNames).append("), fields -> new ").append(name).append("(")
+                    .append(arguments).append("));\n");
         }
         if (!descriptors.isEmpty()) descriptors.append("\n");
         String implemented = unionInterfaces.isEmpty() ? "" : " implements " + unionInterfaces.stream()
@@ -842,6 +892,12 @@ final class TaxiJavaGenerator {
 
     private static String constantName(String fieldName) {
         return fieldName.replaceAll("([a-z0-9])([A-Z])", "$1_$2").toUpperCase(java.util.Locale.ROOT);
+    }
+
+    private static String legacyValue(Field field, String basePackage) {
+        String method = field.getNullable() ? "optional" : "required";
+        return "fields." + method + "(\"" + field.getName() + "\", "
+                + formParser(field.getType(), basePackage) + ")";
     }
 
     private static String immutableList(ArrayType array, String expression) {

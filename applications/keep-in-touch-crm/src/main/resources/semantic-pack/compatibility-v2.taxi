@@ -1,0 +1,51 @@
+import io.github.gmcnicol.kernel.taxi.Contract
+import io.github.gmcnicol.kernel.taxi.ProjectedState
+import io.github.gmcnicol.kernel.taxi.Fact
+import io.github.gmcnicol.kernel.taxi.Event
+import io.github.gmcnicol.kernel.taxi.ActionService
+
+namespace io.github.gmcnicol.crm.compatibility.v2
+
+@Contract(version = 2, family = "io.github.gmcnicol.crm.compatibility.ContactProjection")
+@ProjectedState(subject = "io.github.gmcnicol.crm.CompatibilityContactId")
+model ContactProjection {
+    contactId: io.github.gmcnicol.crm.CompatibilityContactId
+    displayName: String
+    preferredName: String?
+}
+
+@Contract(version = 2, family = "io.github.gmcnicol.crm.compatibility.ContactEngagementSignal")
+@Fact(projection = "io.github.gmcnicol.crm.compatibility.v2.ContactProjection")
+model ContactEngagementSignal {
+    contactId: io.github.gmcnicol.crm.CompatibilityContactId
+    signal: String
+    detail: String?
+}
+
+@Contract(version = 2, family = "io.github.gmcnicol.crm.compatibility.RecordContactEngagement")
+model RecordContactEngagementRequest {
+    note: String
+    channel: String?
+}
+
+@Contract(version = 2, family = "io.github.gmcnicol.crm.compatibility.ContactEngagementRecorded")
+@Event
+closed model ContactEngagementRecorded {
+    contactId: io.github.gmcnicol.crm.CompatibilityContactId
+    label: String?
+}
+
+@Contract(version = 2, family = "io.github.gmcnicol.crm.compatibility.ContactEngagementDeferred")
+@Event
+closed model ContactEngagementDeferred {
+    contactId: io.github.gmcnicol.crm.CompatibilityContactId
+    reason: String?
+}
+
+closed model ContactEngagementOutcome = ContactEngagementRecorded | ContactEngagementDeferred
+
+@ActionService(projection = "io.github.gmcnicol.crm.compatibility.v1.ContactProjection")
+service ContactEngagementEvidence {
+    operation recordEngagement(input: RecordContactEngagementRequest): ContactEngagementOutcome[]
+    operation recordEngagementAgain(input: RecordContactEngagementRequest): ContactEngagementOutcome[]
+}

@@ -13,10 +13,20 @@ public record SemanticBindings(
         List<FactType<?>> facts,
         List<CandidateType<?>> candidates,
         List<EventType<?>> events,
-        List<ActionType<?, ?, ?>> actions) {
+        List<ActionType<?, ?, ?>> actions,
+        List<LegacySemanticDecoder<?>> legacyDecoders) {
 
     public SemanticBindings(List<ProjectionType<?, ?>> projections, List<FactType<?>> facts) {
-        this(projections, facts, List.of(), List.of(), List.of());
+        this(projections, facts, List.of(), List.of(), List.of(), List.of());
+    }
+
+    public SemanticBindings(
+            List<ProjectionType<?, ?>> projections,
+            List<FactType<?>> facts,
+            List<CandidateType<?>> candidates,
+            List<EventType<?>> events,
+            List<ActionType<?, ?, ?>> actions) {
+        this(projections, facts, candidates, events, actions, List.of());
     }
 
     public SemanticBindings {
@@ -25,5 +35,6 @@ public record SemanticBindings(
         candidates = List.copyOf(candidates);
         events = List.copyOf(events);
         actions = List.copyOf(actions);
+        legacyDecoders = List.copyOf(legacyDecoders);
     }
 }

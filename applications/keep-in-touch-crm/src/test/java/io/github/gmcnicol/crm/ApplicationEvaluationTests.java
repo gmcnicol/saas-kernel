@@ -24,6 +24,7 @@ import io.github.gmcnicol.kernel.application.TypedSubject;
 import io.github.gmcnicol.kernel.application.TypedTransitionProvenance;
 import io.github.gmcnicol.kernel.semanticpack.TypedFactDerivation;
 import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.ContactId;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.CompatibilityContactId;
 import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpDue;
 import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpProjection;
 import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.InteractionRecordedEventV1;
@@ -34,6 +35,7 @@ import io.github.gmcnicol.kernel.semanticpack.SemanticBindings;
 import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.TypedEventProjector;
 import io.github.gmcnicol.kernel.semanticpack.TypedIntentHandler;
+import io.github.gmcnicol.kernel.semanticpack.TypedSemanticAdapter;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.presentationpack.TypedPresentationPack;
 import io.github.gmcnicol.kernel.application.AuthorisationModel;
@@ -47,6 +49,7 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -255,6 +258,347 @@ class ApplicationEvaluationTests {
     }
 
     @Test
+    void readsHistoricalProjectionAsCurrentWithoutRewritingDurableEvidence() {
+        var id = new CompatibilityContactId("compatible-alex");
+        UUID historicalSnapshot = UUID.randomUUID();
+        String historicalJson = "{\"contactId\":\"compatible-alex\",\"displayName\":\"Alex\"}";
+        String historicalChecksum = sha256(historicalJson.getBytes(StandardCharsets.UTF_8));
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            useTenant();
+            jdbc.update("""
+                    INSERT INTO kernel.typed_projected_state
+                        (tenant_id, subject_type, subject_id, state_version, projection_type,
+                         contract_version, format_version, content, checksum)
+                    VALUES ('tenant-one', ?, ?, 7, ?, 1, 1, ?, ?)
+                    """, CompatibilityContactId.TYPE.qualifiedName(), id.value(),
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1
+                            .ContactProjection.TYPE.qualifiedName(), historicalJson, historicalChecksum);
+            jdbc.update("""
+                    INSERT INTO kernel.typed_evaluation_snapshot
+                        (id, tenant_id, subject_type, subject_id, state_version, projection_type,
+                         projection_contract_version, state_checksum, evaluated_at, application_id,
+                         application_version, kernel_version, semantic_pack_id, semantic_pack_checksum)
+                    VALUES (?, 'tenant-one', ?, ?, 7, ?, 1, ?, ?, 'io.github.gmcnicol.crm',
+                            '0.1.0-SNAPSHOT', '0.1.0-SNAPSHOT', ?, ?)
+                    """, historicalSnapshot, CompatibilityContactId.TYPE.qualifiedName(), id.value(),
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1
+                            .ContactProjection.TYPE.qualifiedName(), historicalChecksum,
+                    java.sql.Timestamp.from(Instant.parse("2026-08-16T09:00:00Z")),
+                    semanticPack.id(), semanticPack.checksum());
+        });
+
+        var current = new io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                .ContactProjection(id, "Alex", Optional.of("Al"));
+        kernel.evaluate(new TypedProjectedState<>(
+                "tenant-one", new TypedSubject<>(CompatibilityContactId.TYPE, id), 7,
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactProjection.TYPE,
+                current), Instant.parse("2026-08-16T10:00:00Z"));
+        var authorised = kernel.authorise(
+                "tenant-one", historicalSnapshot, new Principal("Owner", "gareth"),
+                Instant.parse("2026-08-16T10:01:00Z"),
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactProjection.TYPE);
+
+        assertThat(authorised.field(
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactProjection.DISPLAY_NAME)).contains("Alex");
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            useTenant();
+            assertThat(jdbc.queryForObject("""
+                    SELECT count(*) FROM kernel.typed_projected_state
+                    WHERE tenant_id = 'tenant-one' AND subject_type = ? AND subject_id = ? AND state_version = 7
+                    """, Integer.class, CompatibilityContactId.TYPE.qualifiedName(), id.value())).isEqualTo(2);
+            assertThat(jdbc.queryForMap("""
+                    SELECT content, checksum FROM kernel.typed_projected_state
+                    WHERE tenant_id = 'tenant-one' AND subject_type = ? AND subject_id = ? AND state_version = 7
+                      AND projection_type = ? AND contract_version = 1
+                    """, CompatibilityContactId.TYPE.qualifiedName(), id.value(),
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1
+                            .ContactProjection.TYPE.qualifiedName()))
+                    .containsEntry("content", historicalJson)
+                    .containsEntry("checksum", historicalChecksum);
+        });
+    }
+
+    @Test
+    void readsOriginalLegacyDurableShapesWithoutChangingTheirRows() {
+        var admin = new JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        UUID snapshot = UUID.randomUUID();
+        UUID offer = UUID.randomUUID();
+        UUID intent = UUID.randomUUID();
+        UUID event = UUID.randomUUID();
+        UUID deferredEvent = UUID.randomUUID();
+        String checksum = "3a3072c0fc97dcd0864b994599f58127b80a788dae4aa05152b1816be329fc0e";
+        Instant at = Instant.parse("2026-08-16T11:00:00Z");
+        String candidateType = io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1
+                .RecordContactInteractionRequest.TYPE.qualifiedName();
+        String actionId = io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                .ContactEngagementEvidence.RECORD_ENGAGEMENT.qualifiedName();
+        String requestChecksum = legacyRequestChecksum(
+                offer, candidateType, 1, Map.of("note", "Call Alex"));
+        admin.update("""
+                INSERT INTO kernel.projected_state_version
+                    (tenant_id, subject_type, subject_id, version, checksum)
+                VALUES ('tenant-one', ?, 'legacy-alex', 8, ?)
+                """, CompatibilityContactId.TYPE.qualifiedName(), checksum);
+        admin.batchUpdate("""
+                INSERT INTO kernel.projected_state_value
+                    (tenant_id, subject_type, subject_id, version, name, value)
+                VALUES ('tenant-one', ?, 'legacy-alex', 8, ?, ?)
+                """, List.of(
+                new Object[] {CompatibilityContactId.TYPE.qualifiedName(), "contactId", "legacy-alex"},
+                new Object[] {CompatibilityContactId.TYPE.qualifiedName(), "displayName", "Alex"}));
+        admin.update("""
+                INSERT INTO kernel.evaluation_snapshot
+                    (id, tenant_id, subject_type, subject_id, state_version, state_checksum, evaluated_at,
+                     application_id, application_version, kernel_version, semantic_pack_id, semantic_pack_checksum)
+                VALUES (?, 'tenant-one', ?, 'legacy-alex', 8, ?, ?, 'app', '1', '1', ?, ?)
+                """, snapshot, CompatibilityContactId.TYPE.qualifiedName(), checksum,
+                java.sql.Timestamp.from(at), semanticPack.id(), semanticPack.checksum());
+        admin.update("""
+                INSERT INTO kernel.evaluation_fact
+                    (snapshot_id, tenant_id, position, fact_type, derivation_id)
+                VALUES (?, 'tenant-one', 0, ?, 'legacy')
+                """, snapshot, io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1
+                        .FollowUpSignal.TYPE.qualifiedName());
+        admin.batchUpdate("""
+                INSERT INTO kernel.evaluation_fact_value
+                    (snapshot_id, tenant_id, fact_position, name, value)
+                VALUES (?, 'tenant-one', 0, ?, ?)
+                """, List.of(new Object[] {snapshot, "contactId", "legacy-alex"},
+                        new Object[] {snapshot, "signal", "known"}));
+        admin.update("""
+                INSERT INTO kernel.action_offer
+                    (id, tenant_id, evaluation_snapshot_id, principal_type, principal_id, subject_type,
+                     subject_id, action_id, applicability_policy_id, state_version, semantic_pack_id,
+                     semantic_pack_checksum, authorisation_bundle_id, authorisation_bundle_checksum,
+                     authorised_at, decision_correlation)
+                VALUES (?, 'tenant-one', ?, 'Owner', 'gareth', ?, 'legacy-alex', ?, 'legacy', 8,
+                        ?, ?, 'bundle', ?, ?, ?)
+                """, offer, snapshot, CompatibilityContactId.TYPE.qualifiedName(), actionId, semanticPack.id(),
+                semanticPack.checksum(), checksum, java.sql.Timestamp.from(at), UUID.randomUUID());
+        admin.update("""
+                INSERT INTO kernel.intent
+                    (id, tenant_id, action_offer_id, evaluation_snapshot_id, subject_type, subject_id,
+                     action_id, applicability_policy_id, principal_type, principal_id, expected_state_version,
+                     expected_state_checksum, application_id, application_version, kernel_version,
+                     semantic_pack_id, semantic_pack_checksum, authorisation_bundle_id,
+                     authorisation_bundle_checksum, authorised_at, authorisation_correlation, payload_type,
+                     payload_version, request_checksum, envelope_checksum, accepted_at, status)
+                VALUES (?, 'tenant-one', ?, ?, ?, 'legacy-alex', ?, 'legacy', 'Owner', 'gareth', 8,
+                        ?, 'app', '1', '1', ?, ?, 'bundle', ?, ?, ?, ?, 1, ?, ?, ?, 'PENDING')
+                """, intent, offer, snapshot, CompatibilityContactId.TYPE.qualifiedName(), actionId, checksum,
+                semanticPack.id(), semanticPack.checksum(), checksum, java.sql.Timestamp.from(at), UUID.randomUUID(),
+                candidateType, requestChecksum, checksum, java.sql.Timestamp.from(at));
+        admin.update("""
+                INSERT INTO kernel.intent_payload_value (intent_id, tenant_id, name, value)
+                VALUES (?, 'tenant-one', 'note', 'Call Alex')
+                """, intent);
+        admin.update("""
+                INSERT INTO kernel.event
+                    (id, tenant_id, intent_id, sequence, subject_type, subject_id, event_type,
+                     semantic_pack_id, semantic_pack_checksum, payload_version, occurred_at,
+                     resulting_state_version)
+                VALUES (?, 'tenant-one', ?, 1, ?, 'legacy-alex', ?, ?, ?, 1, ?, 8)
+                """, event, intent, CompatibilityContactId.TYPE.qualifiedName(),
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1.ContactInteractionRecorded.TYPE
+                        .qualifiedName(), semanticPack.id(), semanticPack.checksum(), java.sql.Timestamp.from(at));
+        admin.update("""
+                INSERT INTO kernel.event_payload_value (event_id, tenant_id, name, value)
+                VALUES (?, 'tenant-one', 'contactId', 'legacy-alex')
+                """, event);
+        admin.update("""
+                INSERT INTO kernel.event
+                    (id, tenant_id, intent_id, sequence, subject_type, subject_id, event_type,
+                     semantic_pack_id, semantic_pack_checksum, payload_version, occurred_at,
+                     resulting_state_version)
+                VALUES (?, 'tenant-one', ?, 2, ?, 'legacy-alex', ?, ?, ?, 1, ?, 8)
+                """, deferredEvent, intent, CompatibilityContactId.TYPE.qualifiedName(),
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1.ContactFollowUpDeferred.TYPE
+                        .qualifiedName(), semanticPack.id(), semanticPack.checksum(), java.sql.Timestamp.from(at));
+        admin.update("""
+                INSERT INTO kernel.event_payload_value (event_id, tenant_id, name, value)
+                VALUES (?, 'tenant-one', 'contactId', 'legacy-alex')
+                """, deferredEvent);
+
+        Map<String, String> projection = legacyValues(
+                admin, "projected_state_value", "version = 8 AND subject_id = 'legacy-alex'");
+        Map<String, String> fact = legacyValues(admin, "evaluation_fact_value", "snapshot_id = '" + snapshot + "'");
+        Map<String, String> candidate = legacyValues(admin, "intent_payload_value", "intent_id = '" + intent + "'");
+        Map<String, String> eventValues = legacyValues(admin, "event_payload_value", "event_id = '" + event + "'");
+        Map<String, String> deferredEventValues = legacyValues(
+                admin, "event_payload_value", "event_id = '" + deferredEvent + "'");
+        var authorised = kernel.authorise(
+                "tenant-one", snapshot, new Principal("Owner", "gareth"), at.plusSeconds(1),
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactProjection.TYPE);
+        assertThat(authorised.field(
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactProjection.DISPLAY_NAME)).contains("Alex");
+        var evidence = kernel.readIntentEvidence(
+                "tenant-one", intent,
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactEngagementEvidence.RECORD_ENGAGEMENT);
+        assertThat(evidence.candidatePayload().note()).isEqualTo("Call Alex");
+        assertThat(evidence.candidatePayload().channel()).isEmpty();
+        assertThat(evidence.events()).hasSize(2);
+        assertThat(evidence.events().get(0)).isInstanceOfSatisfying(
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactEngagementRecorded.class,
+                decoded -> assertThat(decoded.contactId().value()).isEqualTo("legacy-alex"));
+        assertThat(evidence.events().get(1)).isInstanceOfSatisfying(
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactEngagementDeferred.class,
+                decoded -> assertThat(decoded.contactId().value()).isEqualTo("legacy-alex"));
+        assertThatThrownBy(() -> kernel.readIntentEvidence(
+                "tenant-one", intent,
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactEngagementEvidence.RECORD_ENGAGEMENT_AGAIN))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Action");
+
+        assertThat(legacyValues(admin, "projected_state_value",
+                "version = 8 AND subject_id = 'legacy-alex'")).isEqualTo(projection);
+        assertThat(legacyValues(admin, "evaluation_fact_value", "snapshot_id = '" + snapshot + "'"))
+                .isEqualTo(fact);
+        assertThat(legacyValues(admin, "intent_payload_value", "intent_id = '" + intent + "'"))
+                .isEqualTo(candidate);
+        assertThat(legacyValues(admin, "event_payload_value", "event_id = '" + event + "'"))
+                .isEqualTo(eventValues);
+        assertThat(legacyValues(admin, "event_payload_value", "event_id = '" + deferredEvent + "'"))
+                .isEqualTo(deferredEventValues);
+        assertThat(admin.queryForObject("SELECT count(*) FROM kernel.intent_audit WHERE intent_id = ?",
+                Integer.class, intent)).isZero();
+        admin.update("""
+                UPDATE kernel.projected_state_value SET value = 'Mallory'
+                WHERE tenant_id = 'tenant-one' AND subject_id = 'legacy-alex' AND version = 8
+                  AND name = 'displayName'
+                """);
+        assertThatThrownBy(() -> kernel.authorise(
+                "tenant-one", snapshot, new Principal("Owner", "gareth"), at.plusSeconds(2),
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactProjection.TYPE))
+                .isInstanceOf(io.github.gmcnicol.kernel.application.AuthorisationDeniedException.class);
+        assertThat(admin.queryForObject("SELECT count(*) FROM kernel.intent_audit WHERE intent_id = ?",
+                Integer.class, intent)).isZero();
+        assertThat(admin.queryForObject("""
+                SELECT value FROM kernel.projected_state_value
+                WHERE tenant_id = 'tenant-one' AND subject_id = 'legacy-alex' AND version = 8
+                  AND name = 'displayName'
+                """, String.class)).isEqualTo("Mallory");
+    }
+
+    @Test
+    void readsOrderedCanonicalClosedUnionEventsThroughGeneratedAction() {
+        Instant at = Instant.parse("2026-08-16T12:00:00Z");
+        var id = new CompatibilityContactId("canonical-alex");
+        var projection = new io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                .ContactProjection(id, "Alex", Optional.empty());
+        var snapshot = kernel.evaluate(new TypedProjectedState<>(
+                "tenant-one", new TypedSubject<>(CompatibilityContactId.TYPE, id), 9,
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactProjection.TYPE,
+                projection), at);
+        var action = io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                .ContactEngagementEvidence.RECORD_ENGAGEMENT;
+        var descriptors = new java.util.ArrayList<io.github.gmcnicol.kernel.application.SemanticType<?>>();
+        descriptors.add(action.candidateType());
+        descriptors.addAll(action.eventTypes());
+        descriptors.add(snapshot.projectionType());
+        var codec = new io.github.gmcnicol.kernel.application.CanonicalCodec(descriptors);
+        var candidate = codec.encode(action.candidateType(),
+                new io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .RecordContactEngagementRequest("Email Alex", Optional.of("email")));
+        var first = codec.encode(
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactEngagementRecorded.TYPE,
+                new io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactEngagementRecorded(id, Optional.of("contacted")));
+        var second = codec.encode(
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactEngagementDeferred.TYPE,
+                new io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactEngagementDeferred(id, Optional.of("tomorrow")));
+        var projected = codec.encode(snapshot.projectionType(), projection);
+        UUID offer = UUID.randomUUID();
+        UUID intent = UUID.randomUUID();
+        var admin = new JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("""
+                INSERT INTO kernel.typed_action_offer
+                    (id, tenant_id, evaluation_snapshot_id, principal_type, principal_id, subject_type,
+                     subject_id, action_id, policy_id, state_version, state_checksum, payload_type,
+                     payload_contract_version, semantic_pack_id, semantic_pack_checksum,
+                     authorisation_bundle_id, authorisation_bundle_checksum, authorised_at, decision_correlation)
+                VALUES (?, 'tenant-one', ?, 'Owner', 'gareth', ?, 'canonical-alex', ?, 'evidence', 9, ?, ?, 2,
+                        ?, ?, 'bundle', ?, ?, ?)
+                """, offer, snapshot.id(), CompatibilityContactId.TYPE.qualifiedName(), action.qualifiedName(),
+                snapshot.projectedStateChecksum(), candidate.qualifiedType(), semanticPack.id(),
+                semanticPack.checksum(), "b".repeat(64), java.sql.Timestamp.from(at), UUID.randomUUID());
+        admin.update("""
+                INSERT INTO kernel.typed_intent
+                    (id, tenant_id, action_offer_id, subject_type, subject_id, action_id, policy_id,
+                     expected_state_version, expected_state_checksum, projection_type,
+                     projection_contract_version, payload_type, payload_contract_version,
+                     payload_format_version, payload_content, payload_checksum, request_checksum,
+                     accepted_at, status)
+                VALUES (?, 'tenant-one', ?, ?, 'canonical-alex', ?, 'evidence', 9, ?, ?, 2, ?, 2, ?, ?, ?, ?, ?,
+                        'SUCCEEDED')
+                """, intent, offer, CompatibilityContactId.TYPE.qualifiedName(), action.qualifiedName(),
+                snapshot.projectedStateChecksum(), snapshot.projectionType().qualifiedName(),
+                candidate.qualifiedType(), candidate.formatVersion(), candidate.canonicalJson(), candidate.checksum(),
+                "c".repeat(64), java.sql.Timestamp.from(at));
+        var events = List.of(first, second);
+        for (int index = 0; index < events.size(); index++) {
+            var event = events.get(index);
+            admin.update("""
+                    INSERT INTO kernel.typed_event
+                        (id, intent_id, tenant_id, sequence, event_type, event_contract_version,
+                         event_format_version, event_content, event_checksum, resulting_state_version,
+                         projection_type, projection_contract_version, projection_format_version,
+                         projection_content, projection_checksum, occurred_at)
+                    VALUES (?, ?, 'tenant-one', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, UUID.randomUUID(), intent, index + 1, event.qualifiedType(), event.contractVersion(),
+                    event.formatVersion(), event.canonicalJson(), event.checksum(), 10 + index,
+                    projected.qualifiedType(), projected.contractVersion(), projected.formatVersion(),
+                    projected.canonicalJson(), projected.checksum(), java.sql.Timestamp.from(at));
+        }
+        List<Map<String, Object>> before = admin.queryForList("""
+                SELECT sequence, event_content, event_checksum FROM kernel.typed_event
+                WHERE intent_id = ? ORDER BY sequence
+                """, intent);
+
+        var evidence = kernel.readIntentEvidence("tenant-one", intent, action);
+
+        assertThat(evidence.candidatePayload().note()).isEqualTo("Email Alex");
+        assertThat(evidence.events()).hasSize(2);
+        assertThat(evidence.events().get(0)).isInstanceOf(
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactEngagementRecorded.class);
+        assertThat(evidence.events().get(1)).isInstanceOf(
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactEngagementDeferred.class);
+        assertThatThrownBy(() -> kernel.readIntentEvidence(
+                "tenant-one", intent,
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                        .ContactEngagementEvidence.RECORD_ENGAGEMENT_AGAIN))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Action");
+        assertThat(admin.queryForList("""
+                SELECT sequence, event_content, event_checksum FROM kernel.typed_event
+                WHERE intent_id = ? ORDER BY sequence
+                """, intent)).isEqualTo(before);
+    }
+
+    private static Map<String, String> legacyValues(JdbcTemplate jdbc, String table, String where) {
+        return jdbc.query("SELECT name, value FROM kernel." + table + " WHERE " + where,
+                result -> {
+                    var values = new java.util.LinkedHashMap<String, String>();
+                    while (result.next()) values.put(result.getString("name"), result.getString("value"));
+                    return Map.copyOf(values);
+                });
+    }
+
+    @Test
     void acceptsAndExecutesGeneratedActionAtomicallyThroughPublicKernel(CapturedOutput output) {
         Instant dueAt = Instant.parse("2040-08-15T09:00:00Z");
         seedOpenContact("typed-action-alex", dueAt);
@@ -285,6 +629,11 @@ class ApplicationEvaluationTests {
         kernel.processNext(dueAt.plusSeconds(31)); // Caller lost the successful acknowledgement and polls again.
 
         assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
+        var durableEvidence = kernel.readIntentEvidence(
+                "tenant-one", intent.id(), TypedCrmActions.RECORD_INTERACTION);
+        assertThat(durableEvidence.candidatePayload()).isEqualTo(payload.value());
+        assertThat(durableEvidence.events()).singleElement()
+                .extracting(event -> event.contactId().value()).isEqualTo("typed-action-alex");
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
             useTenant();
             assertThat(jdbc.queryForObject(
@@ -1783,6 +2132,28 @@ class ApplicationEvaluationTests {
         jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, "tenant-one");
     }
 
+    private static String sha256(byte[] content) {
+        try {
+            return java.util.HexFormat.of().formatHex(
+                    java.security.MessageDigest.getInstance("SHA-256").digest(content));
+        } catch (java.security.NoSuchAlgorithmException exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    private static String legacyRequestChecksum(
+            UUID offerId, String type, int version, Map<String, String> values) {
+        var canonical = new StringBuilder();
+        for (String value : List.of(offerId.toString(), type, Integer.toString(version), "", "", "")) {
+            canonical.append(value.length()).append(':').append(value);
+        }
+        values.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
+            canonical.append(entry.getKey().length()).append(':').append(entry.getKey());
+            canonical.append(entry.getValue().length()).append(':').append(entry.getValue());
+        });
+        return sha256(canonical.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
     @TestConfiguration
     static class TypedEvaluationConfiguration {
         @Bean
@@ -1798,6 +2169,90 @@ class ApplicationEvaluationTests {
         @Bean
         SemanticBindings typedBindings() {
             return GeneratedSemanticBindings.INSTANCE;
+        }
+
+        @Bean
+        TypedSemanticAdapter<
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1.ContactProjection,
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactProjection>
+        compatibilityProjectionV1ToV2() {
+            return TypedSemanticAdapter.of(
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1
+                            .ContactProjection.TYPE,
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                            .ContactProjection.TYPE,
+                    source -> new io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                            .ContactProjection(source.contactId(), source.displayName(), Optional.empty()));
+        }
+
+        @Bean
+        TypedSemanticAdapter<
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1.FollowUpSignal,
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactEngagementSignal>
+                compatibilityFactV1ToV2() {
+            return TypedSemanticAdapter.of(
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1.FollowUpSignal.TYPE,
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactEngagementSignal.TYPE,
+                    source -> new io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactEngagementSignal(
+                            source.contactId(), source.signal(), Optional.empty()));
+        }
+
+        @Bean
+        TypedSemanticAdapter<
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1.RecordContactInteractionRequest,
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.RecordContactEngagementRequest>
+                compatibilityCandidateV1ToV2() {
+            return TypedSemanticAdapter.of(
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1.RecordContactInteractionRequest.TYPE,
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.RecordContactEngagementRequest.TYPE,
+                    source -> new io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.RecordContactEngagementRequest(
+                            source.note(), Optional.empty()));
+        }
+
+        @Bean
+        TypedSemanticAdapter<
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1.ContactInteractionRecorded,
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactEngagementRecorded>
+        compatibilityEventV1ToV2() {
+            return TypedSemanticAdapter.of(
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1.ContactInteractionRecorded.TYPE,
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactEngagementRecorded.TYPE,
+                    source -> new io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactEngagementRecorded(
+                            source.contactId(), Optional.empty()));
+        }
+
+        @Bean
+        TypedSemanticAdapter<
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1.ContactFollowUpDeferred,
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactEngagementDeferred>
+                compatibilityDeferredEventV1ToV2() {
+            return TypedSemanticAdapter.of(
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v1
+                            .ContactFollowUpDeferred.TYPE,
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                            .ContactEngagementDeferred.TYPE,
+                    source -> new io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                            .ContactEngagementDeferred(source.contactId(), Optional.empty()));
+        }
+
+        @Bean
+        TypedFactDerivation<
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactProjection,
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactEngagementSignal>
+                compatibilityFactDerivation() {
+            return io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactEngagementSignal.DERIVATION
+                    .bind((projection, evaluatedAt) -> TypedFactDerivation.Result.none());
+        }
+
+        @Bean
+        io.github.gmcnicol.kernel.application.TypedAuthorisationModel<
+                io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2.ContactProjection>
+                compatibilityAuthorisationModel() {
+            return new io.github.gmcnicol.kernel.application.TypedAuthorisationModel<>(
+                    io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                            .ContactProjection.TYPE,
+                    Set.of(io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.compatibility.v2
+                            .ContactProjection.DISPLAY_NAME), Set.of());
         }
 
         @Bean

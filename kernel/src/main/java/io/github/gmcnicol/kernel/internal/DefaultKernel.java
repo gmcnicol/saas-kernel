@@ -66,7 +66,7 @@ final class DefaultKernel implements Kernel {
     private final List<ApplicabilityPolicy> policies;
     private final List<TypedFactDerivation<?, ?>> typedDerivations;
     private final List<TypedApplicabilityPolicy<?>> typedPolicies;
-    private final CanonicalCodec canonical;
+    private final TypedSemanticCompatibility canonical;
     private final KernelTelemetry telemetry;
     private final AtomicInteger intentQueueTurn = new AtomicInteger();
 
@@ -89,6 +89,32 @@ final class DefaultKernel implements Kernel {
             List<TypedApplicabilityPolicy<?>> typedPolicies,
             List<SemanticBindings> typedBindings,
             CanonicalCodec.Limits canonicalLimits,
+            KernelTelemetry telemetry) {
+        this(jdbc, transactions, authorisation, intents, execution, typedActions, intentQueries, worker, clock,
+                applicationVersion, kernelVersion, semanticPackVersion, derivations, policies, typedDerivations,
+                typedPolicies, typedBindings,
+                new TypedSemanticCompatibility(typedBindings, List.of(), canonicalLimits), telemetry);
+    }
+
+    DefaultKernel(
+            JdbcTemplate jdbc,
+            TransactionOperations transactions,
+            AuthorisationService authorisation,
+            IntentService intents,
+            IntentExecutionService execution,
+            TypedActionService typedActions,
+            IntentQueryService intentQueries,
+            IntentWorkerProperties worker,
+            Clock clock,
+            ApplicationVersion applicationVersion,
+            String kernelVersion,
+            SemanticPackVersion semanticPackVersion,
+            List<FactDerivation> derivations,
+            List<ApplicabilityPolicy> policies,
+            List<TypedFactDerivation<?, ?>> typedDerivations,
+            List<TypedApplicabilityPolicy<?>> typedPolicies,
+            List<SemanticBindings> typedBindings,
+            TypedSemanticCompatibility canonical,
             KernelTelemetry telemetry) {
         this.jdbc = jdbc;
         this.transactions = transactions;
@@ -123,17 +149,12 @@ final class DefaultKernel implements Kernel {
                 .toList();
         var descriptors = new LinkedHashMap<String, SemanticType<?>>();
         var expectedFacts = new LinkedHashMap<String, FactType<?>>();
-        var subjectProjections = new java.util.HashSet<String>();
         typedBindings.forEach(bindings -> bindings.projections().forEach(projection -> {
                 addDescriptor(descriptors, projection);
-                if (!subjectProjections.add(projection.subjectType().qualifiedName())) {
-                    throw new IllegalStateException(
-                            "Multiple active typed Projections for Subject: " + projection.subjectType().qualifiedName());
-                }
             }));
         typedBindings.forEach(bindings -> bindings.facts().forEach(fact -> {
                 addDescriptor(descriptors, fact);
-                if (expectedFacts.putIfAbsent(descriptorKey(fact), fact) != null) {
+                if (canonical.isCurrent(fact) && expectedFacts.putIfAbsent(descriptorKey(fact), fact) != null) {
                     throw new IllegalStateException("Duplicate generated Fact descriptor: " + descriptorKey(fact));
                 }
                 if (descriptors.get(descriptorKey(fact.projectionType())) != fact.projectionType()) {
@@ -151,7 +172,7 @@ final class DefaultKernel implements Kernel {
                         "Typed policy references an unregistered Projection: " + policy.id());
             }
         });
-        this.canonical = new CanonicalCodec(descriptors.values(), canonicalLimits);
+        this.canonical = canonical;
     }
 
     @Override
@@ -169,6 +190,7 @@ final class DefaultKernel implements Kernel {
     private <I, P> TypedEvaluationSnapshot<I, P> evaluateTypedInTransaction(
             TypedProjectedState<I, P> state, Instant evaluatedAt) {
         if (evaluatedAt == null) throw new IllegalArgumentException("Evaluation time must be explicit");
+        canonical.requireCurrent(state.type());
         TenantContext.use(jdbc, state.tenantId());
         var legacySubject = new io.github.gmcnicol.kernel.application.Subject(
                 state.subject().type().qualifiedName(), state.subject().externalId());
@@ -377,6 +399,13 @@ final class DefaultKernel implements Kernel {
             TypedCandidatePayload<?> payload) {
         return telemetry.observe("kernel.intent.acceptance",
                 () -> typedActions.accept(tenantId, principal, actionOfferId, intentId, payload));
+    }
+
+    @Override
+    public <P, C, E> io.github.gmcnicol.kernel.application.TypedIntentEvidence<C, E> readIntentEvidence(
+            String tenantId, UUID intentId,
+            io.github.gmcnicol.kernel.application.ActionType<P, C, E> actionType) {
+        return typedActions.readIntentEvidence(tenantId, intentId, actionType);
     }
 
     @Override

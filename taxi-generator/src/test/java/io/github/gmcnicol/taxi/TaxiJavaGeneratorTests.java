@@ -240,7 +240,7 @@ class TaxiJavaGeneratorTests {
         var duplicate = assertThrows(
                 IllegalArgumentException.class,
                 () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
-        assertTrue(duplicate.getMessage().contains("only one @ProjectedState is allowed for @Subject"),
+        assertTrue(duplicate.getMessage().contains("only one @ProjectedState contract version is allowed for @Subject"),
                 duplicate::getMessage);
 
         Files.writeString(source, """
@@ -339,6 +339,56 @@ class TaxiJavaGeneratorTests {
         assertTrue(changed.contains("implements generated.example.CustomerEvent"), changed);
         assertTrue(registry.contains("SemanticRegistry.generated("), registry);
         assertTrue(registry.contains("SemanticRegistry.formDecoder("), registry);
+    }
+
+    @Test
+    void retainsEveryVersionedDurableModelAndGeneratesLegacyFactories() throws IOException {
+        Path source = temporaryDirectory.resolve("src/versions.taxi");
+        Path output = temporaryDirectory.resolve("target/generated-sources/taxi");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Subject
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                import io.github.gmcnicol.kernel.taxi.Fact
+                import io.github.gmcnicol.kernel.taxi.Event
+                import io.github.gmcnicol.kernel.taxi.ActionService
+                namespace example
+                @Subject type Id inherits String
+                @Contract(version = 1, family = "example.State") @ProjectedState(subject = "example.Id")
+                model State { id: Id, name: String }
+                @Contract(version = 1, family = "example.Known") @Fact(projection = "example.State")
+                model Known { id: Id }
+                @Contract(version = 1, family = "example.ChangeRequest")
+                model Candidate { name: String }
+                @Contract(version = 2, family = "example.ChangeRequest")
+                model CurrentCandidate { name: String, note: String? }
+                @Contract(version = 1, family = "example.Changed") @Event closed model Changed { id: Id }
+                @Contract(version = 1) model Description { text: String }
+                @ActionService(projection = "example.State")
+                service HistoricalActions {
+                    operation change(input: Candidate): Changed[]
+                }
+                """);
+
+        TaxiJavaGenerator.generate(source.getParent(), output, "generated");
+
+        String bindings = Files.readString(output.resolve("generated/GeneratedSemanticBindings.java"));
+        String state = Files.readString(output.resolve("generated/example/State.java"));
+        String candidate = Files.readString(output.resolve("generated/example/Candidate.java"));
+        String currentCandidate = Files.readString(output.resolve("generated/example/CurrentCandidate.java"));
+        String description = Files.readString(output.resolve("generated/example/Description.java"));
+        assertTrue(candidate.contains("CandidateType<Candidate> TYPE"), candidate);
+        assertTrue(candidate.contains("\"example.ChangeRequest\""), candidate);
+        assertTrue(currentCandidate.contains("CandidateType<CurrentCandidate> TYPE"), currentCandidate);
+        assertTrue(state.contains("\"example.State\""), state);
+        assertFalse(description.contains("CandidateType<Description>"), description);
+        assertFalse(description.contains("LEGACY_DECODER"), description);
+        assertTrue(bindings.contains("State.LEGACY_DECODER"), bindings);
+        assertTrue(bindings.contains("Known.LEGACY_DECODER"), bindings);
+        assertTrue(bindings.contains("Candidate.LEGACY_DECODER"), bindings);
+        assertTrue(bindings.contains("CurrentCandidate.LEGACY_DECODER"), bindings);
+        assertTrue(bindings.contains("Changed.LEGACY_DECODER"), bindings);
     }
 
     @Test

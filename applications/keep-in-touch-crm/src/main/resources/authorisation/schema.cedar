@@ -5,6 +5,9 @@ entity ContactId = {
     contactId: String,
     FollowUpDue?: { contactId: String }
 };
+entity CompatibilityContactId = {
+    displayName: String
+};
 
 action "io.github.gmcnicol.crm.Contact.displayName" appliesTo {
     principal: [Owner, Viewer],
@@ -41,4 +44,8 @@ action "typed/v1/io.github.gmcnicol.crm.TypedCrmActions.recordInteraction" appli
 action "typed/v1/io.github.gmcnicol.crm.FollowUpProjection.contactId" appliesTo {
     principal: [Owner, Viewer],
     resource: [ContactId]
+};
+action "typed/v1/io.github.gmcnicol.crm.compatibility.v2.ContactProjection.displayName" appliesTo {
+    principal: [Owner, Viewer],
+    resource: [CompatibilityContactId]
 };

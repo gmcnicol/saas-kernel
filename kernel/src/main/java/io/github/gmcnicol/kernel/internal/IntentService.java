@@ -89,7 +89,7 @@ final class IntentService {
             throw new IntentRejectedException();
         }
         TenantContext.useAfterRole(jdbc, tenantId);
-        String requestChecksum = checksum(canonicalRequest(actionOfferId, payload));
+        String requestChecksum = requestChecksum(actionOfferId, payload);
         Intent existing = existing(tenantId, intentId, requestChecksum);
         if (existing != null) {
             return existing;
@@ -286,6 +286,10 @@ final class IntentService {
                     append(value, entry.getValue());
                 });
         return value.toString();
+    }
+
+    static String requestChecksum(UUID actionOfferId, CandidatePayload payload) {
+        return checksum(canonicalRequest(actionOfferId, payload));
     }
 
     private static String canonicalStrings(String... values) {

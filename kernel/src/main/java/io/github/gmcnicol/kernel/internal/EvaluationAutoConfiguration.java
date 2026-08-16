@@ -14,6 +14,7 @@ import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.SemanticBindings;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
 import io.github.gmcnicol.kernel.semanticpack.SemanticVersionAdapter;
+import io.github.gmcnicol.kernel.semanticpack.TypedSemanticAdapter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
@@ -73,7 +74,7 @@ public class EvaluationAutoConfiguration {
             List<TypedFactDerivation<?, ?>> typedDerivations,
             List<TypedApplicabilityPolicy<?>> typedPolicies,
             List<SemanticBindings> typedBindings,
-            io.github.gmcnicol.kernel.application.CanonicalCodec.Limits canonicalLimits) {
+            TypedSemanticCompatibility typedCompatibility) {
         return new DefaultKernel(
                 jdbc,
                 new TransactionTemplate(transactionManager),
@@ -92,7 +93,7 @@ public class EvaluationAutoConfiguration {
                 typedDerivations,
                 typedPolicies,
                 typedBindings,
-                canonicalLimits,
+                typedCompatibility,
                 telemetry);
     }
 
@@ -279,10 +280,18 @@ public class EvaluationAutoConfiguration {
             List<io.github.gmcnicol.kernel.semanticpack.TypedEventProjector<?, ?>> projectors,
             List<TypedApplicabilityPolicy<?>> policies,
             List<TypedFactDerivation<?, ?>> derivations,
-            io.github.gmcnicol.kernel.application.CanonicalCodec.Limits limits) {
+            TypedSemanticCompatibility compatibility) {
         return new TypedActionService(
                 jdbc, new TransactionTemplate(transactionManager), cedar, worker, clock, telemetry, semanticPack, bindings,
-                handlers, projectors, policies, derivations, limits);
+                handlers, projectors, policies, derivations, compatibility);
+    }
+
+    @Bean
+    TypedSemanticCompatibility typedSemanticCompatibility(
+            List<SemanticBindings> bindings,
+            List<TypedSemanticAdapter<?, ?>> adapters,
+            io.github.gmcnicol.kernel.application.CanonicalCodec.Limits limits) {
+        return new TypedSemanticCompatibility(bindings, adapters, limits);
     }
 
     @Bean
