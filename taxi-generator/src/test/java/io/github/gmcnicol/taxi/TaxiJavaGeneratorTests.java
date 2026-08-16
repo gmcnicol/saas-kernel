@@ -103,6 +103,30 @@ class TaxiJavaGeneratorTests {
         assertTrue(
                 failure.getMessage().matches("(?s).*\\.taxi:[0-9]+:[0-9]+: generated-name collision with a.Foo.*"),
                 failure::getMessage);
+
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Subject
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                import io.github.gmcnicol.kernel.taxi.Event
+                namespace a
+                @Subject type Id inherits String
+                @Contract(version = 1) @ProjectedState(subject = "a.Id") model State {}
+                @Contract(version = 1) model Payload {}
+                @Contract(version = 1) @Event closed model Changed {}
+                model Foo {}
+                """);
+        Files.writeString(source.resolveSibling("nested.taxi"), """
+                import io.github.gmcnicol.kernel.taxi.ActionService
+                namespace a.Foo
+                @ActionService(projection = "a.State") service Actions {
+                    operation act(input: a.Payload): a.Changed[]
+                }
+                """);
+        var actionCollision = assertThrows(
+                IllegalArgumentException.class,
+                () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
+        assertTrue(actionCollision.getMessage().contains("generated-name collision"), actionCollision::getMessage);
     }
 
     @Test
@@ -249,6 +273,113 @@ class TaxiJavaGeneratorTests {
                 () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
         assertTrue(inventoryCollision.getMessage().contains(
                 "generated-name collision with GeneratedSemanticBindings"), inventoryCollision::getMessage);
+    }
+
+    @Test
+    void generatesOnlyMarkedActionsAndClosedEventUnions() throws IOException {
+        Path source = temporaryDirectory.resolve("src/actions.taxi");
+        Path output = temporaryDirectory.resolve("target/generated-sources/taxi");
+        Files.createDirectories(source.getParent());
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Subject
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                import io.github.gmcnicol.kernel.taxi.Event
+                import io.github.gmcnicol.kernel.taxi.ActionService
+                namespace example
+                @Subject type CustomerId inherits String
+                @Contract(version = 1) @ProjectedState(subject = "example.CustomerId")
+                model Customer { id: CustomerId }
+                @Contract(version = 2) model ChangeCustomer {}
+                @Contract(version = 3) @Event closed model CustomerChanged { id: CustomerId }
+                @Contract(version = 4) @Event closed model CustomerSuspended { id: CustomerId }
+                closed model CustomerEvent = CustomerChanged | CustomerSuspended
+                service Descriptions { operation describe(input: ChangeCustomer): CustomerChanged[] }
+                @ActionService(projection = "example.Customer")
+                service CustomerActions {
+                    operation change(input: ChangeCustomer): CustomerChanged[]
+                    operation changeOrSuspend(input: ChangeCustomer): CustomerEvent[]
+                }
+                """);
+
+        TaxiJavaGenerator.generate(source.getParent(), output, "generated");
+
+        assertFalse(Files.exists(output.resolve("generated/example/Descriptions.java")));
+        String actions = Files.readString(output.resolve("generated/example/CustomerActions.java"));
+        String union = Files.readString(output.resolve("generated/example/CustomerEvent.java"));
+        String changed = Files.readString(output.resolve("generated/example/CustomerChanged.java"));
+        assertTrue(actions.contains("example.CustomerActions.change"), actions);
+        assertTrue(actions.contains("ChangeCustomer.TYPE"), actions);
+        assertTrue(actions.contains("CustomerChanged.TYPE"), actions);
+        assertTrue(actions.contains("CustomerSuspended.TYPE"), actions);
+        assertTrue(union.contains("sealed interface CustomerEvent permits"), union);
+        assertTrue(changed.contains("implements generated.example.CustomerEvent"), changed);
+    }
+
+    @Test
+    void rejectsInvalidActionSignatures() throws IOException {
+        Path source = temporaryDirectory.resolve("src/invalid-action.taxi");
+        Path output = temporaryDirectory.resolve("target/generated-sources/taxi");
+        Files.createDirectories(source.getParent());
+        String prelude = """
+                import io.github.gmcnicol.kernel.taxi.Subject
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                import io.github.gmcnicol.kernel.taxi.Event
+                import io.github.gmcnicol.kernel.taxi.ActionService
+                namespace example
+                @Subject type CustomerId inherits String
+                @Contract(version = 1) @ProjectedState(subject = "example.CustomerId") model Customer {}
+                @Contract(version = 1) @Event closed model Changed {}
+                """;
+
+        Files.writeString(source, prelude + "@ActionService(projection = \"example.Customer\") service Actions {\n"
+                + "operation invalid(input: String): Changed[]\n}\n");
+        var primitive = assertThrows(
+                IllegalArgumentException.class,
+                () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
+        assertTrue(primitive.getMessage().contains("exactly one named Candidate Payload model"), primitive::getMessage);
+
+        Files.writeString(source, prelude + "@ActionService(projection = \"example.Customer\") service Actions {\n"
+                + "operation invalid(first: Customer, second: Customer): Changed[]\n}\n");
+        var multiple = assertThrows(
+                IllegalArgumentException.class,
+                () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
+        assertTrue(multiple.getMessage().contains("exactly one named Candidate Payload model"), multiple::getMessage);
+
+        Files.writeString(source, prelude + "@Contract(version = 1) model Payload {}\n"
+                + "@ActionService(projection = \"example.Customer\") service Actions {\n"
+                + "operation invalid(input: Payload): Changed\n}\n");
+        var returnType = assertThrows(
+                IllegalArgumentException.class,
+                () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
+        assertTrue(returnType.getMessage().contains("non-empty Event array"), returnType::getMessage);
+
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Subject
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                import io.github.gmcnicol.kernel.taxi.Event
+                import io.github.gmcnicol.kernel.taxi.ActionService
+                namespace example
+                @Subject type FirstId inherits String
+                @Subject type SecondId inherits String
+                @Contract(version = 1) @ProjectedState(subject = "example.FirstId") model First {}
+                @Contract(version = 1) @ProjectedState(subject = "example.SecondId") model Second {}
+                @Contract(version = 1) model Payload {}
+                @Contract(version = 1) @Event closed model Changed {}
+                @ActionService(projection = "example.First") service FirstActions {
+                    operation change(input: Payload): Changed[]
+                }
+                @ActionService(projection = "example.Second") service SecondActions {
+                    operation change(input: Payload): Changed[]
+                }
+                """);
+        var sharedEvent = assertThrows(
+                IllegalArgumentException.class,
+                () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
+        assertTrue(sharedEvent.getMessage().contains(
+                "Event example.Changed is already owned by Projection example.First"), sharedEvent::getMessage);
     }
 
     private static Map<Path, byte[]> files(Path root) throws IOException {

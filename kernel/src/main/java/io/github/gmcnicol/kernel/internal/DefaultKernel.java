@@ -22,6 +22,7 @@ import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.application.SemanticType;
 import io.github.gmcnicol.kernel.application.TypedEvaluationSnapshot;
 import io.github.gmcnicol.kernel.application.TypedProjectedState;
+import io.github.gmcnicol.kernel.application.TypedCandidatePayload;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
@@ -39,6 +40,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 import java.util.stream.IntStream;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionOperations;
@@ -50,6 +53,7 @@ final class DefaultKernel implements Kernel {
     private final AuthorisationService authorisation;
     private final IntentService intents;
     private final IntentExecutionService execution;
+    private final TypedActionService typedActions;
     private final IntentQueryService intentQueries;
     private final IntentWorkerProperties worker;
     private final Clock clock;
@@ -62,6 +66,7 @@ final class DefaultKernel implements Kernel {
     private final List<TypedApplicabilityPolicy<?>> typedPolicies;
     private final CanonicalCodec canonical;
     private final KernelTelemetry telemetry;
+    private final AtomicInteger intentQueueTurn = new AtomicInteger();
 
     DefaultKernel(
             JdbcTemplate jdbc,
@@ -69,6 +74,7 @@ final class DefaultKernel implements Kernel {
             AuthorisationService authorisation,
             IntentService intents,
             IntentExecutionService execution,
+            TypedActionService typedActions,
             IntentQueryService intentQueries,
             IntentWorkerProperties worker,
             Clock clock,
@@ -87,6 +93,7 @@ final class DefaultKernel implements Kernel {
         this.authorisation = authorisation;
         this.intents = intents;
         this.execution = execution;
+        this.typedActions = typedActions;
         this.intentQueries = intentQueries;
         this.worker = worker;
         this.clock = clock;
@@ -323,7 +330,8 @@ final class DefaultKernel implements Kernel {
     public AuthorisationEnvelope authorise(
             String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt) {
         return telemetry.observe(
-                "kernel.authorisation", () -> authorisation.authorise(tenantId, snapshotId, principal, authorisedAt));
+                "kernel.authorisation", () -> typedActions.authorise(tenantId, snapshotId, principal, authorisedAt)
+                        .orElseGet(() -> authorisation.authorise(tenantId, snapshotId, principal, authorisedAt)));
     }
 
     @Override
@@ -340,13 +348,32 @@ final class DefaultKernel implements Kernel {
     }
 
     @Override
+    public <C> Intent accept(UUID actionOfferId, UUID intentId, TypedCandidatePayload<C> payload) {
+        return telemetry.observe(
+                "kernel.intent.acceptance", () -> typedActions.accept(actionOfferId, intentId, payload));
+    }
+
+    @Override
     public Optional<Intent> processNext(Instant processedAt) {
-        return execution.processNext(processedAt);
+        if ((intentQueueTurn.getAndIncrement() & 1) == 0) {
+            return typedActions.processNext(processedAt).or(() -> execution.processNext(processedAt));
+        }
+        return execution.processNext(processedAt).or(() -> typedActions.processNext(processedAt));
     }
 
     @Override
     public List<Intent> processDue(Instant processedAt) {
-        return execution.processDue(processedAt);
+        return processDue(processedAt, () -> true);
+    }
+
+    List<Intent> processDue(Instant processedAt, BooleanSupplier acceptingWork) {
+        var processed = new java.util.ArrayList<Intent>();
+        while (processed.size() < worker.claimBatchSize() && acceptingWork.getAsBoolean()) {
+            Optional<Intent> next = processNext(processedAt);
+            if (next.isEmpty()) break;
+            processed.add(next.orElseThrow());
+        }
+        return List.copyOf(processed);
     }
 
     @Override

@@ -18,14 +18,22 @@ import io.github.gmcnicol.kernel.application.RetryableIntentException;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.application.Subject;
 import io.github.gmcnicol.kernel.application.TypedProjectedState;
+import io.github.gmcnicol.kernel.application.TypedCandidatePayload;
+import io.github.gmcnicol.kernel.application.TypedStateTransition;
 import io.github.gmcnicol.kernel.application.TypedSubject;
+import io.github.gmcnicol.kernel.application.TypedTransitionProvenance;
 import io.github.gmcnicol.kernel.semanticpack.TypedFactDerivation;
 import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.ContactId;
 import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpDue;
 import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpProjection;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.InteractionRecordedEventV1;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.RecordInteractionCandidateV1;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.TypedCrmActions;
 import io.github.gmcnicol.crm.bindings.GeneratedSemanticBindings;
 import io.github.gmcnicol.kernel.semanticpack.SemanticBindings;
 import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
+import io.github.gmcnicol.kernel.semanticpack.TypedEventProjector;
+import io.github.gmcnicol.kernel.semanticpack.TypedIntentHandler;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
 import io.github.gmcnicol.kernel.application.AuthorisationModel;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
@@ -119,6 +127,11 @@ class ApplicationEvaluationTests {
     @MockitoSpyBean private SemanticPackVersion semanticPack;
     @MockitoSpyBean("recordInteractionHandler") private IntentHandler recordInteractionHandler;
     @MockitoSpyBean("followUpDueDerivation") private FactDerivation followUpDueDerivation;
+    @MockitoSpyBean("typedRecordInteractionHandler")
+    private TypedIntentHandler<FollowUpProjection, RecordInteractionCandidateV1, InteractionRecordedEventV1>
+            typedHandler;
+    @MockitoSpyBean("typedInteractionRecordedProjector")
+    private TypedEventProjector<FollowUpProjection, InteractionRecordedEventV1> typedProjector;
     @MockitoSpyBean private Clock clock;
 
     private void changeCurrentSemanticPack() {
@@ -175,7 +188,8 @@ class ApplicationEvaluationTests {
     @AfterEach
     void restoreCurrentExecutionBasis() {
         org.mockito.Mockito.reset(
-                authorisationModel, semanticPack, recordInteractionHandler, followUpDueDerivation, clock);
+                authorisationModel, semanticPack, recordInteractionHandler, followUpDueDerivation,
+                typedHandler, typedProjector, clock);
     }
 
     @Test
@@ -209,7 +223,7 @@ class ApplicationEvaluationTests {
                 .contains(new FollowUpDue(new ContactId("typed-alex")));
         assertThat(snapshot.applicableActions())
                 .extracting(action -> action.actionId())
-                .containsExactly("io.github.gmcnicol.crm.CrmActions.recordInteraction");
+                .containsExactly(TypedCrmActions.RECORD_INTERACTION.qualifiedName());
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
             useTenant();
             assertThat(jdbc.queryForMap("""
@@ -230,7 +244,283 @@ class ApplicationEvaluationTests {
                     SELECT action_id FROM kernel.typed_evaluation_applicable_action
                     WHERE snapshot_id = ? AND position = 0
                     """, String.class, snapshot.id()))
-                    .isEqualTo("io.github.gmcnicol.crm.CrmActions.recordInteraction");
+                    .isEqualTo(TypedCrmActions.RECORD_INTERACTION.qualifiedName());
+        });
+    }
+
+    @Test
+    void acceptsAndExecutesGeneratedActionAtomicallyThroughPublicKernel(CapturedOutput output) {
+        Instant dueAt = Instant.parse("2040-08-15T09:00:00Z");
+        seedOpenContact("typed-action-alex", dueAt);
+        var projection = new FollowUpProjection(new ContactId("typed-action-alex"), dueAt, false);
+        var snapshot = kernel.evaluate(new TypedProjectedState<>(
+                "tenant-one", new TypedSubject<>(ContactId.TYPE, projection.contactId()), 500,
+                FollowUpProjection.TYPE, projection), dueAt.plusSeconds(1));
+        org.mockito.Mockito.doReturn(dueAt.plusSeconds(2)).when(clock).instant();
+        var offer = kernel.authorise(
+                        "tenant-one", snapshot.id(), new Principal("Owner", "gareth"), dueAt.plusSeconds(2))
+                .actionOffers().getFirst();
+
+        var trace = new W3cTraceContext(
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", "vendor=value");
+        var payload = new TypedCandidatePayload<>(TypedCrmActions.RECORD_INTERACTION,
+                new RecordInteractionCandidateV1("Spoke typed"), Optional.of(trace), Optional.empty());
+        long attemptsBefore = meters.find("kernel.intent.attempt").timer() == null
+                ? 0 : meters.find("kernel.intent.attempt").timer().count();
+        double outcomesBefore = meters.find("kernel.intent.outcomes").tag("outcome", "succeeded").counter() == null
+                ? 0 : meters.find("kernel.intent.outcomes").tag("outcome", "succeeded").counter().count();
+        var intent = kernel.accept(offer.id(), UUID.randomUUID(), payload);
+        assertThatThrownBy(() -> kernel.accept(offer.id(), intent.id(), new TypedCandidatePayload<>(
+                        TypedCrmActions.RECORD_INTERACTION, new RecordInteractionCandidateV1("Spoke typed"),
+                        Optional.of(new W3cTraceContext(
+                                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01", null)), Optional.empty())))
+                .isInstanceOf(IntentConflictException.class);
+        var completed = processUntil(intent.id(), dueAt.plusSeconds(30));
+        kernel.processNext(dueAt.plusSeconds(31)); // Caller lost the successful acknowledgement and polls again.
+
+        assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            useTenant();
+            assertThat(jdbc.queryForObject(
+                    "SELECT count(*) FROM kernel.typed_event WHERE intent_id = ?", Integer.class, intent.id()))
+                    .isEqualTo(1);
+            assertThat(jdbc.queryForMap("""
+                    SELECT traceparent, tracestate FROM kernel.typed_intent WHERE id = ?
+                    """, intent.id()))
+                    .containsEntry("traceparent", trace.traceparent())
+                    .containsEntry("tracestate", trace.tracestate());
+            assertThat(jdbc.queryForObject("""
+                    SELECT open_follow_up_id IS NULL FROM crm_contact_engagement_projection
+                    WHERE tenant_id = 'tenant-one' AND contact_id = 'typed-action-alex'
+                    """, Boolean.class)).isTrue();
+        });
+        assertThat(meters.find("kernel.intent.attempt").timer().count()).isEqualTo(attemptsBefore + 1);
+        assertThat(meters.find("kernel.intent.outcomes").tag("outcome", "succeeded").counter().count())
+                .isEqualTo(outcomesBefore + 1);
+        assertThat(output).contains(
+                "\"action_offer\":\"" + offer.id() + "\"",
+                "\"intent\":\"" + intent.id() + "\"",
+                "\"trace_correlation\":\"4bf92f3577b34da6a3ce929d0e0e4736\"",
+                "\"event\":");
+    }
+
+    @Test
+    void preservesAndValidatesGeneratedIntentLineage() {
+        Instant dueAt = Instant.parse("2040-08-15T10:00:00Z");
+        var firstOffer = typedOffer("typed-lineage-first", 505, dueAt);
+        var first = kernel.accept(firstOffer.id(), UUID.randomUUID(),
+                TypedCrmActions.RECORD_INTERACTION.candidate(new RecordInteractionCandidateV1("first")));
+        var secondOffer = typedOffer("typed-lineage-second", 506, dueAt.plusSeconds(120));
+        assertThatThrownBy(() -> kernel.accept(secondOffer.id(), UUID.randomUUID(), new TypedCandidatePayload<>(
+                        TypedCrmActions.RECORD_INTERACTION, new RecordInteractionCandidateV1("too early"),
+                        Optional.empty(), Optional.of(first.id()))))
+                .isInstanceOf(IntentRejectedException.class);
+
+        assertThat(processUntil(first.id(), dueAt.plusSeconds(30)).status()).isEqualTo(IntentStatus.SUCCEEDED);
+        var linkedId = UUID.randomUUID();
+        var linked = kernel.accept(secondOffer.id(), linkedId, new TypedCandidatePayload<>(
+                TypedCrmActions.RECORD_INTERACTION, new RecordInteractionCandidateV1("linked"),
+                Optional.empty(), Optional.of(first.id())));
+
+        inTenant(() -> assertThat(jdbc.queryForObject(
+                "SELECT prior_intent_id FROM kernel.typed_intent WHERE id = ?", UUID.class, linked.id()))
+                .isEqualTo(first.id()));
+        assertThat(processUntil(linked.id(), dueAt.plusSeconds(150)).status()).isEqualTo(IntentStatus.SUCCEEDED);
+    }
+
+    @Test
+    void rejectsCandidateBoundToAnythingExceptStoredGeneratedAction() {
+        Instant dueAt = Instant.parse("2040-08-16T09:00:00Z");
+        var offer = typedOffer("typed-invalid", 510, dueAt);
+        var copiedDescriptor = new io.github.gmcnicol.kernel.application.ActionType<>(
+                TypedCrmActions.RECORD_INTERACTION.qualifiedName(),
+                TypedCrmActions.RECORD_INTERACTION.projectionType(),
+                TypedCrmActions.RECORD_INTERACTION.candidateType(),
+                TypedCrmActions.RECORD_INTERACTION.eventTypes());
+
+        assertThatThrownBy(() -> kernel.accept(
+                        offer.id(), UUID.randomUUID(), copiedDescriptor.candidate(
+                                new RecordInteractionCandidateV1("invalid"))))
+                .isInstanceOf(IntentRejectedException.class);
+    }
+
+    @Test
+    void marksGeneratedActionStaleWithoutRunningHandler() {
+        Instant dueAt = Instant.parse("2040-08-17T09:00:00Z");
+        long version = 520;
+        var offer = typedOffer("typed-stale", version, dueAt);
+        var intent = kernel.accept(
+                offer.id(), UUID.randomUUID(),
+                TypedCrmActions.RECORD_INTERACTION.candidate(new RecordInteractionCandidateV1("stale")));
+        var projection = new FollowUpProjection(new ContactId("typed-stale"), dueAt, false);
+        kernel.evaluate(new TypedProjectedState<>(
+                "tenant-one", new TypedSubject<>(ContactId.TYPE, projection.contactId()), version + 1,
+                FollowUpProjection.TYPE, projection), dueAt.plusSeconds(3));
+
+        var processed = processUntil(intent.id(), dueAt.plusSeconds(30));
+
+        assertThat(processed.status()).isEqualTo(IntentStatus.STALE);
+        org.mockito.Mockito.verify(typedHandler, org.mockito.Mockito.never()).handle(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void checksSemanticPackStalenessBeforeDecodingHistoricalPayload() {
+        Instant dueAt = Instant.parse("2040-08-17T10:00:00Z");
+        var offer = typedOffer("typed-pack-stale", 525, dueAt);
+        var intent = kernel.accept(
+                offer.id(), UUID.randomUUID(),
+                TypedCrmActions.RECORD_INTERACTION.candidate(new RecordInteractionCandidateV1("stale")));
+        var admin = new JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("UPDATE kernel.typed_intent SET payload_content = '{corrupt' WHERE id = ?", intent.id());
+        changeCurrentSemanticPack();
+
+        assertThat(processUntil(intent.id(), dueAt.plusSeconds(30)).status()).isEqualTo(IntentStatus.STALE);
+        org.mockito.Mockito.verify(typedHandler, org.mockito.Mockito.never()).handle(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void retriesGeneratedActionWithoutDuplicatingEvents() {
+        Instant dueAt = Instant.parse("2040-08-18T09:00:00Z");
+        var offer = typedOffer("typed-retry", 530, dueAt);
+        var intent = kernel.accept(
+                offer.id(), UUID.randomUUID(),
+                TypedCrmActions.RECORD_INTERACTION.candidate(new RecordInteractionCandidateV1("retry")));
+        org.mockito.Mockito.doThrow(new RetryableIntentException("temporary"))
+                .doCallRealMethod().when(typedHandler).handle(
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any());
+
+        assertThat(processUntil(intent.id(), dueAt.plusSeconds(30)).status()).isEqualTo(IntentStatus.RETRY_WAIT);
+        assertThat(processUntil(intent.id(), dueAt.plusSeconds(90)).status()).isEqualTo(IntentStatus.SUCCEEDED);
+        inTenant(() -> {
+            assertThat(jdbc.queryForObject(
+                    "SELECT attempt_count FROM kernel.typed_intent WHERE id = ?", Integer.class, intent.id()))
+                    .isEqualTo(2);
+            assertThat(jdbc.queryForList(
+                    "SELECT sequence FROM kernel.typed_event WHERE intent_id = ? ORDER BY sequence",
+                    Integer.class, intent.id())).containsExactly(1);
+        });
+    }
+
+    @Test
+    void rollsBackProjectorEvidenceStateAndCompletionTogether() {
+        Instant dueAt = Instant.parse("2040-08-19T09:00:00Z");
+        long version = 540;
+        var offer = typedOffer("typed-rollback", version, dueAt);
+        var intent = kernel.accept(
+                offer.id(), UUID.randomUUID(),
+                TypedCrmActions.RECORD_INTERACTION.candidate(new RecordInteractionCandidateV1("rollback")));
+        org.mockito.Mockito.doThrow(new IllegalStateException("projector failed"))
+                .when(typedProjector).project(org.mockito.ArgumentMatchers.any());
+
+        var processed = processUntil(intent.id(), dueAt.plusSeconds(30));
+
+        assertThat(processed.status()).isEqualTo(IntentStatus.FAILED);
+        inTenant(() -> {
+            assertThat(jdbc.queryForObject(
+                    "SELECT count(*) FROM kernel.typed_event WHERE intent_id = ?", Integer.class, intent.id()))
+                    .isZero();
+            assertThat(jdbc.queryForObject("""
+                    SELECT max(state_version) FROM kernel.typed_projected_state
+                    WHERE subject_id = 'typed-rollback'
+                    """, Long.class)).isEqualTo(version);
+            assertThat(jdbc.queryForObject("""
+                    SELECT open_follow_up_id IS NOT NULL FROM crm_contact_engagement_projection
+                    WHERE tenant_id = 'tenant-one' AND contact_id = 'typed-rollback'
+                    """, Boolean.class)).isTrue();
+        });
+    }
+
+    @Test
+    void commitsOrderedGeneratedMultiEventTransitionsWithFullProvenance() {
+        Instant dueAt = Instant.parse("2040-08-20T09:00:00Z");
+        long version = 550;
+        var offer = typedOffer("typed-multi", version, dueAt);
+        var intent = kernel.accept(
+                offer.id(), UUID.randomUUID(),
+                TypedCrmActions.RECORD_INTERACTION.candidate(new RecordInteractionCandidateV1("multi")));
+        var id = new ContactId("typed-multi");
+        org.mockito.Mockito.doReturn(List.of(
+                new TypedStateTransition<>(
+                        new InteractionRecordedEventV1(id), new FollowUpProjection(id, dueAt.plusSeconds(1), false)),
+                new TypedStateTransition<>(
+                        new InteractionRecordedEventV1(id), new FollowUpProjection(id, dueAt.plusSeconds(2), true))))
+                .when(typedHandler).handle(
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any());
+
+        assertThat(processUntil(intent.id(), dueAt.plusSeconds(30)).status()).isEqualTo(IntentStatus.SUCCEEDED);
+
+        @SuppressWarnings("unchecked")
+        var provenance = org.mockito.ArgumentCaptor.forClass(
+                (Class<TypedTransitionProvenance<FollowUpProjection, InteractionRecordedEventV1>>) (Class<?>)
+                        TypedTransitionProvenance.class);
+        org.mockito.Mockito.verify(typedProjector, org.mockito.Mockito.times(2)).project(provenance.capture());
+        assertThat(provenance.getAllValues()).extracting(TypedTransitionProvenance::sequence)
+                .containsExactly(1, 2);
+        assertThat(provenance.getAllValues().getFirst().subject().type()).isSameAs(ContactId.TYPE);
+        assertThat(provenance.getAllValues().getFirst().subject().id()).isEqualTo(id);
+        assertThat(provenance.getAllValues().get(1).previousProjection())
+                .isEqualTo(provenance.getAllValues().get(0).resultingProjection());
+        inTenant(() -> {
+            assertThat(jdbc.queryForList("""
+                    SELECT resulting_state_version FROM kernel.typed_event
+                    WHERE intent_id = ? ORDER BY sequence
+                    """, Long.class, intent.id())).containsExactly(version + 1, version + 2);
+            assertThat(jdbc.queryForObject("""
+                    SELECT count(*) FROM kernel.typed_projected_state
+                    WHERE subject_id = 'typed-multi' AND state_version IN (?, ?)
+                    """, Integer.class, version + 1, version + 2)).isEqualTo(2);
+        });
+    }
+
+    @Test
+    void rollsBackExpiredLeaseThenReclaimsWithoutDuplicateEvents() {
+        Instant dueAt = Instant.parse("2040-08-21T09:00:00Z");
+        long version = 560;
+        var offer = typedOffer("typed-expired-lease", version, dueAt);
+        var intent = kernel.accept(
+                offer.id(), UUID.randomUUID(),
+                TypedCrmActions.RECORD_INTERACTION.candidate(new RecordInteractionCandidateV1("lease")));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            org.mockito.Mockito.doReturn(dueAt.plusSeconds(63)).when(clock).instant();
+            return invocation.callRealMethod();
+        }).when(typedHandler).handle(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
+
+        assertThatThrownBy(() -> kernel.processNext(dueAt.plusSeconds(30)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Typed Intent lease is no longer owned");
+        inTenant(() -> {
+            assertThat(jdbc.queryForObject(
+                    "SELECT count(*) FROM kernel.typed_event WHERE intent_id = ?", Integer.class, intent.id()))
+                    .isZero();
+            assertThat(jdbc.queryForObject("""
+                    SELECT max(state_version) FROM kernel.typed_projected_state
+                    WHERE subject_id = 'typed-expired-lease'
+                    """, Long.class)).isEqualTo(version);
+            assertThat(jdbc.queryForObject("""
+                    SELECT open_follow_up_id IS NOT NULL FROM crm_contact_engagement_projection
+                    WHERE tenant_id = 'tenant-one' AND contact_id = 'typed-expired-lease'
+                    """, Boolean.class)).isTrue();
+        });
+
+        org.mockito.Mockito.reset(typedHandler, clock);
+        org.mockito.Mockito.doReturn(dueAt.plusSeconds(64)).when(clock).instant();
+        assertThat(processUntil(intent.id(), dueAt.plusSeconds(64)).status()).isEqualTo(IntentStatus.SUCCEEDED);
+        inTenant(() -> {
+            assertThat(jdbc.queryForObject(
+                    "SELECT count(*) FROM kernel.typed_event WHERE intent_id = ?", Integer.class, intent.id()))
+                    .isEqualTo(1);
+            assertThat(jdbc.queryForObject(
+                    "SELECT attempt_count FROM kernel.typed_intent WHERE id = ?", Integer.class, intent.id()))
+                    .isEqualTo(2);
         });
     }
 
@@ -1336,6 +1626,28 @@ class ApplicationEvaluationTests {
         return acceptedRecordInteraction(subjectId, version, dueAt, evaluatedAt, Map.of());
     }
 
+    private io.github.gmcnicol.kernel.application.ActionOffer typedOffer(
+            String subjectId, long version, Instant dueAt) {
+        seedOpenContact(subjectId, dueAt);
+        var id = new ContactId(subjectId);
+        var snapshot = kernel.evaluate(new TypedProjectedState<>(
+                "tenant-one", new TypedSubject<>(ContactId.TYPE, id), version,
+                FollowUpProjection.TYPE, new FollowUpProjection(id, dueAt, false)), dueAt.plusSeconds(1));
+        org.mockito.Mockito.doReturn(dueAt.plusSeconds(2)).when(clock).instant();
+        return kernel.authorise(
+                        "tenant-one", snapshot.id(), new Principal("Owner", "gareth"), dueAt.plusSeconds(2))
+                .actionOffers().stream()
+                .filter(offer -> offer.actionId().equals(TypedCrmActions.RECORD_INTERACTION.qualifiedName()))
+                .findFirst().orElseThrow();
+    }
+
+    private void inTenant(Runnable work) {
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            useTenant();
+            work.run();
+        });
+    }
+
     private io.github.gmcnicol.kernel.application.Intent acceptedRecordInteraction(
             String subjectId, long version, String dueAt, String evaluatedAt, Map<String, String> extraState) {
         var state = new java.util.HashMap<>(extraState);
@@ -1432,26 +1744,30 @@ class ApplicationEvaluationTests {
         TypedApplicabilityPolicy<FollowUpProjection> typedRecordInteractionApplicability(
                 @Qualifier("typedPolicyProjectionSeen")
                 AtomicReference<FollowUpProjection> typedPolicyProjectionSeen) {
-            return new TypedApplicabilityPolicy<>() {
-                @Override public io.github.gmcnicol.kernel.application.ProjectionType<?, FollowUpProjection>
-                        projectionType() {
-                    return FollowUpProjection.TYPE;
-                }
-
-                @Override public String target() {
-                    return "io.github.gmcnicol.crm.CrmActions.recordInteraction";
-                }
-
-                @Override public String id() {
-                    return "io.github.gmcnicol.crm.typedFollowUpActions";
-                }
-
-                @Override public boolean isApplicable(
-                        FollowUpProjection projection, io.github.gmcnicol.kernel.application.FactSet facts) {
+            return TypedCrmActions.RECORD_INTERACTION.bindApplicability((projection, facts) -> {
                     typedPolicyProjectionSeen.set(projection);
                     return facts.find(FollowUpDue.TYPE).isPresent();
-                }
-            };
+                });
+        }
+
+        @Bean
+        TypedIntentHandler<FollowUpProjection, RecordInteractionCandidateV1, InteractionRecordedEventV1>
+                typedRecordInteractionHandler() {
+            return TypedCrmActions.RECORD_INTERACTION.bindHandler((intent, payload, projection) -> List.of(
+                    new io.github.gmcnicol.kernel.application.TypedStateTransition<>(
+                            new InteractionRecordedEventV1(projection.contactId()),
+                            new FollowUpProjection(
+                                    projection.contactId(), projection.nextContactDueAt(), true))));
+        }
+
+        @Bean
+        TypedEventProjector<FollowUpProjection, InteractionRecordedEventV1> typedInteractionRecordedProjector(
+                JdbcTemplate jdbc) {
+            return TypedCrmActions.RECORD_INTERACTION.bindProjector(
+                    InteractionRecordedEventV1.TYPE, transition -> jdbc.update("""
+                    UPDATE crm_contact_engagement_projection SET open_follow_up_id = NULL
+                    WHERE tenant_id = ? AND contact_id = ?
+                    """, transition.tenantId(), transition.event().contactId().value()));
         }
     }
 }

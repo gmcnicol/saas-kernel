@@ -2,6 +2,8 @@ import io.github.gmcnicol.kernel.taxi.Subject
 import io.github.gmcnicol.kernel.taxi.Contract
 import io.github.gmcnicol.kernel.taxi.ProjectedState
 import io.github.gmcnicol.kernel.taxi.Fact
+import io.github.gmcnicol.kernel.taxi.Event
+import io.github.gmcnicol.kernel.taxi.ActionService
 
 namespace io.github.gmcnicol.crm
 
@@ -30,6 +32,17 @@ model InteractionRecorded {
     contactId: ContactId
 }
 
+@Contract(version = 1)
+model RecordInteractionCandidateV1 {
+    note: String
+}
+
+@Contract(version = 1)
+@Event
+model InteractionRecordedEventV1 {
+    contactId: ContactId
+}
+
 model SnoozeFollowUpInput {
     until: Instant
 }
@@ -50,4 +63,9 @@ service CrmActions {
     operation recordInteraction(input: RecordInteractionInput): InteractionRecorded
     operation snoozeFollowUp(input: SnoozeFollowUpInput): FollowUpSnoozed
     operation completeFollowUp(input: CompleteFollowUpInput): FollowUpCompleted
+}
+
+@ActionService(projection = "io.github.gmcnicol.crm.FollowUpProjection")
+service TypedCrmActions {
+    operation recordInteraction(input: RecordInteractionCandidateV1): InteractionRecordedEventV1[]
 }

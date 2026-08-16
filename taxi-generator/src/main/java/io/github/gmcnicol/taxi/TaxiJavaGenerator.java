@@ -23,6 +23,8 @@ import lang.taxi.Compiler;
 import lang.taxi.CompilerConfig;
 import lang.taxi.TaxiDocument;
 import lang.taxi.messages.Severity;
+import lang.taxi.services.Operation;
+import lang.taxi.services.Service;
 import lang.taxi.services.ServiceMember;
 import lang.taxi.sources.SourceCode;
 import lang.taxi.types.ArrayType;
@@ -35,6 +37,8 @@ import lang.taxi.types.StreamType;
 import lang.taxi.types.Type;
 import lang.taxi.types.TypeAlias;
 import lang.taxi.types.TypeKind;
+import lang.taxi.types.UnionType;
+import lang.taxi.expressions.TypeExpression;
 
 final class TaxiJavaGenerator {
     private static final String STANDARD_SCHEMA = "/META-INF/saas-kernel/standard.taxi";
@@ -42,6 +46,8 @@ final class TaxiJavaGenerator {
     private static final String CONTRACT = "io.github.gmcnicol.kernel.taxi.Contract";
     private static final String PROJECTED_STATE = "io.github.gmcnicol.kernel.taxi.ProjectedState";
     private static final String FACT = "io.github.gmcnicol.kernel.taxi.Fact";
+    private static final String EVENT = "io.github.gmcnicol.kernel.taxi.Event";
+    private static final String ACTION_SERVICE = "io.github.gmcnicol.kernel.taxi.ActionService";
     private static final Set<String> JAVA_KEYWORDS = Set.of(
             "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const",
             "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float",
@@ -112,18 +118,43 @@ final class TaxiJavaGenerator {
     private static void validate(TaxiDocument document, Set<String> authoredSources) {
         var generatedNames = new HashSet<String>();
         var models = new HashMap<String, ObjectType>();
-        var authoredTypes = document.getTypes().stream()
+        var allAuthoredTypes = document.getTypes().stream()
                 .filter(type -> authored(type, authoredSources))
                 .sorted(Comparator.comparing(Type::getQualifiedName))
                 .toList();
+        var aliasedUnions = allAuthoredTypes.stream().filter(ObjectType.class::isInstance)
+                .map(ObjectType.class::cast).filter(TaxiJavaGenerator::isEventUnion)
+                .map(type -> ((TypeExpression) type.getExpression()).getType().getQualifiedName())
+                .collect(java.util.stream.Collectors.toSet());
+        var authoredTypes = allAuthoredTypes.stream()
+                .filter(type -> !(type instanceof UnionType) || !aliasedUnions.contains(type.getQualifiedName()))
+                .toList();
+        var actionServices = document.getServices().stream()
+                .filter(service -> authored(service, authoredSources) && serviceAnnotated(service, ACTION_SERVICE))
+                .toList();
+        var actionUnionNames = actionServices.stream().flatMap(service -> service.getOperations().stream())
+                .map(Operation::getReturnType)
+                .filter(ArrayType.class::isInstance)
+                .map(ArrayType.class::cast)
+                .map(ArrayType::getMemberType)
+                .filter(type -> type instanceof ObjectType model && isEventUnion(model))
+                .map(Type::getQualifiedName)
+                .collect(java.util.stream.Collectors.toSet());
         boolean bindingsGenerated = authoredTypes.stream()
-                .anyMatch(type -> annotated(type, PROJECTED_STATE) || annotated(type, FACT));
+                .anyMatch(type -> annotated(type, PROJECTED_STATE) || annotated(type, FACT))
+                || !actionServices.isEmpty();
         if (bindingsGenerated) {
             authoredTypes.stream()
                     .filter(type -> type.getQualifiedName().equals("GeneratedSemanticBindings")
                             || type.getQualifiedName().startsWith("GeneratedSemanticBindings."))
                     .findFirst()
                     .ifPresent(type -> fail(type, "generated-name collision with GeneratedSemanticBindings"));
+            actionServices.stream()
+                    .filter(service -> service.getQualifiedName().equals("GeneratedSemanticBindings")
+                            || service.getQualifiedName().startsWith("GeneratedSemanticBindings."))
+                    .findFirst()
+                    .ifPresent(service -> fail(service,
+                            "generated-name collision with GeneratedSemanticBindings"));
         }
         for (Type type : authoredTypes) {
             validateQualifiedIdentifier(type.getQualifiedName(), location(type));
@@ -141,6 +172,19 @@ final class TaxiJavaGenerator {
                     }
                 });
             } else if (type instanceof ObjectType objectType) {
+                if (isEventUnion(objectType)) {
+                    if (!actionUnionNames.contains(type.getQualifiedName())
+                            || !objectType.getModifiers().contains(lang.taxi.types.Modifier.CLOSED)) {
+                        fail(type, "only closed Event unions used by an @ActionService are supported");
+                    }
+                    eventModels(objectType).forEach(event -> {
+                        if (!annotated(event, EVENT)) {
+                            fail(objectType, "closed Event union members must be @Event models");
+                        }
+                        contractVersion(event);
+                    });
+                    continue;
+                }
                 if (objectType.getAnonymous()) fail(type, "anonymous object types are unsupported");
                 if (objectType.isPartialType()) fail(type, "partial models are unsupported");
                 if (objectType.getExpression() != null) fail(type, "computed expressions are unsupported");
@@ -166,7 +210,7 @@ final class TaxiJavaGenerator {
                             fail(field, "generated field-descriptor collision for '" + constantName(field.getName()) + "'");
                         }
                     }
-                    if ((annotated(type, PROJECTED_STATE) || annotated(type, FACT))
+                    if ((annotated(type, PROJECTED_STATE) || annotated(type, FACT) || annotated(type, EVENT))
                             && generatedMembers.contains("TYPE")) {
                         fail(type, "generated field-descriptor collision for 'TYPE'");
                     }
@@ -178,10 +222,21 @@ final class TaxiJavaGenerator {
                 fail(type, "unsupported Taxi construct " + type.getClass().getSimpleName());
             }
         }
+        for (Service service : actionServices) {
+            if (!generatedNames.add(service.getQualifiedName())) fail(service, "generated-name collision");
+        }
         for (Type type : authoredTypes) {
             for (String name : generatedNames) {
-                if (type.getQualifiedName().startsWith(name + ".")) {
+                if (!type.getQualifiedName().equals(name) && type.getQualifiedName().startsWith(name + ".")) {
                     fail(type, "generated-name collision with " + name);
+                }
+            }
+        }
+        for (Service service : actionServices) {
+            for (String name : generatedNames) {
+                if (!service.getQualifiedName().equals(name)
+                        && service.getQualifiedName().startsWith(name + ".")) {
+                    fail(service, "generated-name collision with " + name);
                 }
             }
         }
@@ -189,8 +244,8 @@ final class TaxiJavaGenerator {
                 .filter(service -> service.getCompilationUnits().stream()
                         .map(unit -> unit.getSource().getSourceName())
                         .anyMatch(authoredSources::contains))
-                .flatMap(service -> service.getMembers().stream())
-                .forEach(TaxiJavaGenerator::validateServiceMember);
+                .forEach(service -> service.getMembers().forEach(
+                        member -> validateServiceMember(member, serviceAnnotated(service, ACTION_SERVICE))));
         document.getFunctions().stream()
                 .filter(function -> function.getHasBody() && authored(function, authoredSources))
                 .forEach(function -> fail(function, "computed expressions are unsupported"));
@@ -200,17 +255,18 @@ final class TaxiJavaGenerator {
         document.getExpressions().stream()
                 .filter(expression -> authored(expression, authoredSources))
                 .forEach(expression -> fail(expression, "computed expressions are unsupported"));
-        validateRoles(document, authoredTypes);
+        validateRoles(document, authoredTypes, authoredSources);
         rejectRecursion(models);
     }
 
-    private static void validateRoles(TaxiDocument document, List<Type> authoredTypes) {
+    private static void validateRoles(TaxiDocument document, List<Type> authoredTypes, Set<String> authoredSources) {
         var projections = new HashMap<String, ObjectType>();
         for (Type type : authoredTypes) {
             boolean subject = annotated(type, SUBJECT);
             boolean projection = annotated(type, PROJECTED_STATE);
             boolean fact = annotated(type, FACT);
-            if ((subject ? 1 : 0) + (projection ? 1 : 0) + (fact ? 1 : 0) > 1) {
+            boolean event = annotated(type, EVENT);
+            if ((subject ? 1 : 0) + (projection ? 1 : 0) + (fact ? 1 : 0) + (event ? 1 : 0) > 1) {
                 fail(type, "semantic role annotations cannot be combined");
             }
             if (subject && (!(type instanceof ObjectType objectType)
@@ -259,7 +315,117 @@ final class TaxiJavaGenerator {
                     fail(type, "@Fact projection must reference one @ProjectedState model: " + projectionName);
                 }
             }
+            if (event) {
+                if (!(type instanceof ObjectType objectType) || objectType.getTypeKind() != TypeKind.Model) {
+                    fail(type, "@Event may only annotate a model");
+                }
+                contractVersion(type);
+            }
         }
+        List<Service> actionServices = document.getServices().stream()
+                .filter(service -> authored(service, authoredSources))
+                .filter(service -> serviceAnnotated(service, ACTION_SERVICE))
+                .toList();
+        actionServices.forEach(service -> validateActionService(document, service));
+        var eventProjections = new HashMap<String, String>();
+        for (Service service : actionServices) {
+            String projection = serviceAnnotationString(service, ACTION_SERVICE, "projection");
+            for (Operation operation : service.getOperations()) {
+                Type event = ((ArrayType) operation.getReturnType()).getMemberType();
+                for (ObjectType eventModel : eventModels(event)) {
+                    String previous = eventProjections.putIfAbsent(eventModel.getQualifiedName(), projection);
+                    if (previous != null && !previous.equals(projection)) {
+                        fail(operation, "Event " + eventModel.getQualifiedName()
+                                + " is already owned by Projection " + previous);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void validateActionService(TaxiDocument document, Service service) {
+        validateQualifiedIdentifier(service.getQualifiedName(), location(service));
+        String projectionName = serviceAnnotationString(service, ACTION_SERVICE, "projection");
+        Type projection;
+        try {
+            projection = document.type(projectionName);
+        } catch (RuntimeException exception) {
+            fail(service, "@ActionService projection must reference one @ProjectedState model: " + projectionName);
+            return;
+        }
+        if (!(projection instanceof ObjectType model) || !annotated(model, PROJECTED_STATE)) {
+            fail(service, "@ActionService projection must reference one @ProjectedState model: " + projectionName);
+        }
+        if (service.getOperations().isEmpty()) fail(service, "@ActionService requires at least one operation");
+        var generatedMembers = new HashSet<String>();
+        for (Operation operation : service.getOperations()) {
+            validateIdentifier(operation.getName(), location(operation));
+            if (!generatedMembers.add(constantName(operation.getName()))) {
+                fail(operation, "generated Action-descriptor collision for '" + constantName(operation.getName()) + "'");
+            }
+            if (operation.getParameters().size() != 1) {
+                fail(operation, "Action requires exactly one named Candidate Payload model");
+            }
+            Type input = operation.getParameters().getFirst().getType();
+            if (!(input instanceof ObjectType)
+                    || ((ObjectType) input).getTypeKind() != TypeKind.Model
+                    || ((ObjectType) input).getAnonymous()) {
+                fail(operation, "Action requires exactly one named Candidate Payload model");
+            }
+            ObjectType candidate = (ObjectType) input;
+            if (annotated(candidate, SUBJECT) || annotated(candidate, PROJECTED_STATE)
+                    || annotated(candidate, FACT) || annotated(candidate, EVENT)) {
+                fail(operation, "Candidate Payload model cannot carry another semantic role");
+            }
+            if (candidate.getFields().stream().map(field -> constantName(field.getName())).anyMatch("TYPE"::equals)) {
+                fail(candidate, "generated field-descriptor collision for 'TYPE'");
+            }
+            contractVersion(candidate);
+            if (!(operation.getReturnType() instanceof ArrayType)) {
+                fail(operation, "Action must return a non-empty Event array");
+            }
+            Type event = ((ArrayType) operation.getReturnType()).getMemberType();
+            if (!(event instanceof ObjectType)) {
+                fail(operation, "Action return must contain one @Event model or closed Event union");
+            }
+            for (ObjectType eventModel : eventModels(event)) {
+                if (!annotated(eventModel, EVENT)) {
+                    fail(operation, "Action return must contain one @Event model or closed Event union");
+                }
+                contractVersion(eventModel);
+            }
+        }
+    }
+
+    private static List<ObjectType> eventModels(Type type) {
+        if (type instanceof ObjectType model && isEventUnion(model)) {
+            return eventModels(((TypeExpression) model.getExpression()).getType());
+        }
+        if (type instanceof ObjectType model) return List.of(model);
+        if (type instanceof UnionType union && union.getTypes().stream().allMatch(ObjectType.class::isInstance)) {
+            return union.getTypes().stream().map(ObjectType.class::cast).toList();
+        }
+        fail(type, "closed Event union members must be named models");
+        return List.of();
+    }
+
+    private static boolean isEventUnion(ObjectType model) {
+        return model.getExpression() instanceof TypeExpression expression
+                && expression.getType() instanceof UnionType;
+    }
+
+    private static boolean serviceAnnotated(Service service, String qualifiedName) {
+        return service.getAnnotations().stream().anyMatch(annotation -> annotation.getQualifiedName().equals(qualifiedName));
+    }
+
+    private static String serviceAnnotationString(Service service, String annotation, String parameter) {
+        Object value = service.getAnnotations().stream()
+                .filter(candidate -> candidate.getQualifiedName().equals(annotation))
+                .findFirst().orElseThrow().parameter(parameter);
+        if (!(value instanceof String text) || text.isBlank()) {
+            fail(service, "@" + simpleName(annotation) + " requires " + parameter + " as a qualified type name");
+        }
+        return (String) value;
     }
 
     private static boolean annotated(Type type, String qualifiedName) {
@@ -292,22 +458,24 @@ final class TaxiJavaGenerator {
         return ((Number) value).intValue();
     }
 
-    private static void validateServiceMember(ServiceMember member) {
+    private static void validateServiceMember(ServiceMember member, boolean actionService) {
         if (member instanceof lang.taxi.services.Stream) fail(member, "streams are unsupported");
-        validateServiceType(member, member.getReturnType());
+        validateServiceType(member, member.getReturnType(), actionService);
         for (var parameter : member.getParameters()) {
-            validateServiceType(member, parameter.getType());
+            validateServiceType(member, parameter.getType(), actionService);
             if (!parameter.getConstraints().isEmpty()) fail(member, "constraints are unsupported");
             if (parameter.getDefaultValue() != null) fail(member, "computed expressions are unsupported");
         }
     }
 
-    private static void validateServiceType(ServiceMember member, Type type) {
+    private static void validateServiceType(ServiceMember member, Type type, boolean actionService) {
         if (type instanceof StreamType) fail(member, "streams are unsupported");
-        if (type instanceof ArrayType array) validateServiceType(member, array.getMemberType());
+        if (type instanceof ArrayType array) validateServiceType(member, array.getMemberType(), actionService);
         if (type instanceof lang.taxi.types.MapType) fail(member, "maps are unsupported");
         if (type instanceof lang.taxi.types.IntersectionType) fail(member, "intersections are unsupported");
-        if (type instanceof lang.taxi.types.UnionType) fail(member, "general-purpose unions are unsupported");
+        if ((type instanceof UnionType || type instanceof ObjectType model && isEventUnion(model)) && !actionService) {
+            fail(member, "general-purpose unions are unsupported");
+        }
     }
 
     private static void validateFieldType(Field field, Type type) {
@@ -364,40 +532,93 @@ final class TaxiJavaGenerator {
 
     private static Map<Path, String> render(TaxiDocument document, String basePackage, Set<String> authoredSources) {
         var files = new HashMap<Path, String>();
-        var authoredTypes = document.getTypes().stream()
+        var allAuthoredTypes = document.getTypes().stream()
                 .filter(type -> authored(type, authoredSources))
                 .sorted(Comparator.comparing(Type::getQualifiedName))
                 .toList();
+        var aliasedUnions = allAuthoredTypes.stream().filter(ObjectType.class::isInstance)
+                .map(ObjectType.class::cast).filter(TaxiJavaGenerator::isEventUnion)
+                .map(type -> ((TypeExpression) type.getExpression()).getType().getQualifiedName())
+                .collect(java.util.stream.Collectors.toSet());
+        var authoredTypes = allAuthoredTypes.stream()
+                .filter(type -> !(type instanceof UnionType) || !aliasedUnions.contains(type.getQualifiedName()))
+                .toList();
+        var actionServices = document.getServices().stream()
+                .filter(service -> authored(service, authoredSources) && serviceAnnotated(service, ACTION_SERVICE))
+                .sorted(Comparator.comparing(Service::getQualifiedName))
+                .toList();
+        var candidateNames = actionServices.stream().flatMap(service -> service.getOperations().stream())
+                .map(operation -> operation.getParameters().getFirst().getType().getQualifiedName())
+                .collect(java.util.stream.Collectors.toSet());
+        var actionUnions = actionServices.stream().flatMap(service -> service.getOperations().stream())
+                .map(Operation::getReturnType).map(ArrayType.class::cast).map(ArrayType::getMemberType)
+                .filter(ObjectType.class::isInstance).map(ObjectType.class::cast)
+                .filter(TaxiJavaGenerator::isEventUnion).distinct().toList();
+        var eventInterfaces = new HashMap<String, List<String>>();
+        for (ObjectType union : actionUnions) {
+            for (ObjectType event : eventModels(union)) {
+                eventInterfaces.compute(event.getQualifiedName(), (name, unions) -> {
+                    var result = unions == null ? new ArrayList<String>() : new ArrayList<>(unions);
+                    result.add(union.getQualifiedName());
+                    return List.copyOf(result);
+                });
+            }
+        }
         for (Type type : authoredTypes) {
             String source = switch (type) {
+                case ObjectType objectType when isEventUnion(objectType) -> renderUnion(objectType, basePackage);
                 case ObjectType objectType when objectType.getTypeKind() == TypeKind.Type -> renderScalar(objectType, basePackage);
-                case ObjectType objectType -> renderModel(objectType, basePackage);
+                case ObjectType objectType -> renderModel(
+                        objectType, basePackage, candidateNames.contains(type.getQualifiedName()),
+                        eventInterfaces.getOrDefault(type.getQualifiedName(), List.of()));
                 case EnumType enumType -> renderEnum(enumType, basePackage);
                 default -> throw new IllegalStateException("Validated type was not renderable: " + type.getQualifiedName());
             };
             files.put(javaPath(type, basePackage), source);
         }
+        for (Service service : actionServices) {
+            files.put(javaPath(service.getQualifiedName(), basePackage), renderActionService(service, basePackage));
+        }
         var projections = authoredTypes.stream().filter(type -> annotated(type, PROJECTED_STATE)).toList();
         var facts = authoredTypes.stream().filter(type -> annotated(type, FACT)).toList();
-        if (!projections.isEmpty() || !facts.isEmpty()) {
+        var candidates = authoredTypes.stream().filter(type -> candidateNames.contains(type.getQualifiedName())).toList();
+        var events = authoredTypes.stream().filter(type -> annotated(type, EVENT)).toList();
+        if (!projections.isEmpty() || !facts.isEmpty() || !actionServices.isEmpty()) {
             files.put(Path.of(basePackage.replace('.', '/'), "GeneratedSemanticBindings.java"),
-                    renderBindings(basePackage, projections, facts));
+                    renderBindings(basePackage, projections, facts, candidates, events, actionServices));
         }
         return files;
     }
 
-    private static String renderBindings(String basePackage, List<Type> projections, List<Type> facts) {
+    private static String renderBindings(
+            String basePackage,
+            List<Type> projections,
+            List<Type> facts,
+            List<Type> candidates,
+            List<Type> events,
+            List<Service> actionServices) {
         String projectionTypes = projections.stream()
                 .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
                 .collect(java.util.stream.Collectors.joining(", "));
         String factTypes = facts.stream()
                 .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
                 .collect(java.util.stream.Collectors.joining(", "));
+        String candidateTypes = candidates.stream()
+                .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
+                .collect(java.util.stream.Collectors.joining(", "));
+        String eventTypes = events.stream()
+                .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
+                .collect(java.util.stream.Collectors.joining(", "));
+        String actionTypes = actionServices.stream().flatMap(service -> service.getOperations().stream()
+                        .map(operation -> basePackage + "." + service.getQualifiedName() + "."
+                                + constantName(operation.getName())))
+                .collect(java.util.stream.Collectors.joining(", "));
         return "package " + basePackage + ";\n\n"
                 + "public final class GeneratedSemanticBindings {\n"
                 + "    public static final io.github.gmcnicol.kernel.semanticpack.SemanticBindings INSTANCE = new "
                 + "io.github.gmcnicol.kernel.semanticpack.SemanticBindings(java.util.List.of(" + projectionTypes
-                + "), java.util.List.of(" + factTypes + "));\n\n"
+                + "), java.util.List.of(" + factTypes + "), java.util.List.of(" + candidateTypes
+                + "), java.util.List.of(" + eventTypes + "), java.util.List.of(" + actionTypes + "));\n\n"
                 + "    private GeneratedSemanticBindings() {}\n"
                 + "}\n";
     }
@@ -415,7 +636,8 @@ final class TaxiJavaGenerator {
         String descriptor = annotated(type, SUBJECT)
                 ? "    public static final io.github.gmcnicol.kernel.application.SubjectType<" + name + "> TYPE = "
                         + "new io.github.gmcnicol.kernel.application.SubjectType<>(\"" + type.getQualifiedName()
-                        + "\", " + name + ".class, value -> value.value().toString());\n\n"
+                        + "\", " + name + ".class, value -> value.value().toString(), "
+                        + subjectParser(type, name) + ");\n\n"
                 : "";
         return """
                 package %s;
@@ -434,7 +656,8 @@ final class TaxiJavaGenerator {
                 """.formatted(packageName, name, valueType, descriptor.stripTrailing(), name);
     }
 
-    private static String renderModel(ObjectType type, String basePackage) {
+    private static String renderModel(
+            ObjectType type, String basePackage, boolean candidate, List<String> unionInterfaces) {
         String packageName = javaPackage(type, basePackage);
         String name = simpleName(type.getQualifiedName());
         var fields = type.getFields();
@@ -490,9 +713,56 @@ final class TaxiJavaGenerator {
                     .append(basePackage).append(".").append(projectionName).append(", ").append(name)
                     .append("> DERIVATION = new io.github.gmcnicol.kernel.semanticpack.FactDerivationSlot<>(TYPE);\n");
         }
+        if (annotated(type, EVENT)) {
+            descriptors.append("    public static final io.github.gmcnicol.kernel.application.EventType<")
+                    .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.EventType<>(\"")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
+                    .append(name).append(".class);\n");
+        } else if (candidate) {
+            descriptors.append("    public static final io.github.gmcnicol.kernel.application.CandidateType<")
+                    .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.CandidateType<>(\"")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
+                    .append(name).append(".class);\n");
+        }
         if (!descriptors.isEmpty()) descriptors.append("\n");
-        return "package " + packageName + ";\n\npublic record " + name + "(\n" + components + "\n) {\n"
+        String implemented = unionInterfaces.isEmpty() ? "" : " implements " + unionInterfaces.stream()
+                .map(union -> basePackage + "." + union).collect(java.util.stream.Collectors.joining(", "));
+        return "package " + packageName + ";\n\npublic record " + name + "(\n" + components + "\n)" + implemented + " {\n"
                 + descriptors + "    public " + name + " {\n" + body + "    }\n}\n";
+    }
+
+    private static String renderUnion(ObjectType type, String basePackage) {
+        String permitted = eventModels(type).stream()
+                .map(event -> basePackage + "." + event.getQualifiedName())
+                .collect(java.util.stream.Collectors.joining(", "));
+        return "package " + javaPackage(type.getQualifiedName(), basePackage) + ";\n\npublic sealed interface "
+                + simpleName(type.getQualifiedName()) + " permits " + permitted + " {}\n";
+    }
+
+    private static String renderActionService(Service service, String basePackage) {
+        String packageName = javaPackage(service.getQualifiedName(), basePackage);
+        String name = simpleName(service.getQualifiedName());
+        String projectionName = serviceAnnotationString(service, ACTION_SERVICE, "projection");
+        var body = new StringBuilder();
+        for (Operation operation : service.getOperations()) {
+            Type candidate = operation.getParameters().getFirst().getType();
+            Type event = ((ArrayType) operation.getReturnType()).getMemberType();
+            String eventDescriptors = eventModels(event).stream()
+                    .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
+                    .collect(java.util.stream.Collectors.joining(", "));
+            body.append("    public static final io.github.gmcnicol.kernel.application.ActionType<")
+                    .append(basePackage).append(".").append(projectionName).append(", ")
+                    .append(basePackage).append(".").append(candidate.getQualifiedName()).append(", ")
+                    .append(basePackage).append(".").append(event.getQualifiedName()).append("> ")
+                    .append(constantName(operation.getName())).append(" = new ")
+                    .append("io.github.gmcnicol.kernel.application.ActionType<>(\"")
+                    .append(service.getQualifiedName()).append(".").append(operation.getName()).append("\", ")
+                    .append(basePackage).append(".").append(projectionName).append(".TYPE, ")
+                    .append(basePackage).append(".").append(candidate.getQualifiedName()).append(".TYPE, ")
+                    .append("java.util.List.of(").append(eventDescriptors).append("));\n");
+        }
+        return "package " + packageName + ";\n\npublic final class " + name + " {\n" + body
+                + "\n    private " + name + "() {}\n}\n";
     }
 
     private static String constantName(String fieldName) {
@@ -504,6 +774,34 @@ final class TaxiJavaGenerator {
             return expression + ".stream().map(value -> " + immutableList(member, "value") + ").toList()";
         }
         return "java.util.List.copyOf(" + expression + ")";
+    }
+
+    private static String parsePrimitive(PrimitiveType primitive, String value) {
+        return switch (primitive) {
+            case STRING -> value;
+            case BOOLEAN -> "java.lang.Boolean.valueOf(" + value + ")";
+            case INTEGER -> "java.lang.Integer.valueOf(" + value + ")";
+            case LONG -> "java.lang.Long.valueOf(" + value + ")";
+            case DECIMAL -> "new java.math.BigDecimal(" + value + ")";
+            case DOUBLE -> "java.lang.Double.valueOf(" + value + ")";
+            case LOCAL_DATE -> "java.time.LocalDate.parse(" + value + ")";
+            case TIME -> "java.time.LocalTime.parse(" + value + ")";
+            case DATE_TIME -> "java.time.LocalDateTime.parse(" + value + ")";
+            case INSTANT -> "java.time.Instant.parse(" + value + ")";
+            default -> throw new IllegalArgumentException("Unsupported Subject primitive: " + primitive);
+        };
+    }
+
+    private static String subjectParser(ObjectType type, String name) {
+        return switch (primitive(type)) {
+            case BOOLEAN -> "value -> new " + name + "(switch (value) { case \"true\" -> true; "
+                    + "case \"false\" -> false; default -> throw new IllegalArgumentException("
+                    + "\"Invalid Boolean Subject ID\"); })";
+            case DOUBLE -> "value -> { double parsed = java.lang.Double.parseDouble(value); "
+                    + "if (!java.lang.Double.isFinite(parsed)) throw new IllegalArgumentException("
+                    + "\"Invalid Double Subject ID\"); return new " + name + "(parsed); }";
+            default -> "value -> new " + name + "(" + parsePrimitive(primitive(type), "value") + ")";
+        };
     }
 
     private static String renderEnum(EnumType type, String basePackage) {
@@ -525,11 +823,18 @@ final class TaxiJavaGenerator {
     }
 
     private static Path javaPath(Type type, String basePackage) {
-        return Path.of((basePackage + "." + type.getQualifiedName()).replace('.', '/') + ".java");
+        return javaPath(type.getQualifiedName(), basePackage);
+    }
+
+    private static Path javaPath(String qualifiedName, String basePackage) {
+        return Path.of((basePackage + "." + qualifiedName).replace('.', '/') + ".java");
     }
 
     private static String javaPackage(Type type, String basePackage) {
-        String qualifiedName = type.getQualifiedName();
+        return javaPackage(type.getQualifiedName(), basePackage);
+    }
+
+    private static String javaPackage(String qualifiedName, String basePackage) {
         int separator = qualifiedName.lastIndexOf('.');
         return separator < 0 ? basePackage : basePackage + "." + qualifiedName.substring(0, separator);
     }
@@ -612,6 +917,12 @@ final class TaxiJavaGenerator {
     private static String location(Type type) {
         if (type.getCompilationUnits().isEmpty()) return type.getQualifiedName();
         var unit = type.getCompilationUnits().getFirst();
+        return unit.getSource().getSourceName() + ":" + unit.getLocation().getLine() + ":" + unit.getLocation().getChar();
+    }
+
+    private static String location(Compiled compiled) {
+        if (compiled.getCompilationUnits().isEmpty()) return compiled.toString();
+        var unit = compiled.getCompilationUnits().getFirst();
         return unit.getSource().getSourceName() + ":" + unit.getLocation().getLine() + ":" + unit.getLocation().getChar();
     }
 

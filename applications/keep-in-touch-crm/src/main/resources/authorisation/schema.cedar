@@ -22,3 +22,7 @@ action "io.github.gmcnicol.crm.CrmActions.completeFollowUp" appliesTo {
     principal: [Owner, Viewer],
     resource: [Contact]
 };
+action "io.github.gmcnicol.crm.TypedCrmActions.recordInteraction" appliesTo {
+    principal: [Owner, Viewer],
+    resource: [Contact]
+};

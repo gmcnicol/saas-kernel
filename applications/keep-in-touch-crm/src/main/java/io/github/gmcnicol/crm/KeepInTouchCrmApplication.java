@@ -15,6 +15,7 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
@@ -43,6 +44,9 @@ public class KeepInTouchCrmApplication {
     AuthorisationModel crmAuthorisationModel() {
         return new AuthorisationModel() {
             @Override public String subjectType() { return "crm.Contact"; }
+            @Override public Set<String> subjectTypes() {
+                return Set.of(subjectType(), "io.github.gmcnicol.crm.ContactId");
+            }
             @Override public String resourceType() { return "Contact"; }
             @Override public Map<String, String> fields() {
                 return Map.of("io.github.gmcnicol.crm.Contact.displayName", "displayName");

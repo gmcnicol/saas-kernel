@@ -60,9 +60,11 @@ public class EvaluationAutoConfiguration {
             AuthorisationService authorisation,
             IntentService intents,
             IntentExecutionService execution,
+            TypedActionService typedActions,
             IntentQueryService intentQueries,
             IntentWorkerProperties worker,
             Clock clock,
+            KernelTelemetry telemetry,
             SemanticPackVersion semanticPackVersion,
             @Value("${spring.application.name}") String applicationId,
             @Value("${spring.application.version}") String applicationVersion,
@@ -71,14 +73,14 @@ public class EvaluationAutoConfiguration {
             List<TypedFactDerivation<?, ?>> typedDerivations,
             List<TypedApplicabilityPolicy<?>> typedPolicies,
             List<SemanticBindings> typedBindings,
-            io.github.gmcnicol.kernel.application.CanonicalCodec.Limits canonicalLimits,
-            KernelTelemetry telemetry) {
+            io.github.gmcnicol.kernel.application.CanonicalCodec.Limits canonicalLimits) {
         return new DefaultKernel(
                 jdbc,
                 new TransactionTemplate(transactionManager),
                 authorisation,
                 intents,
                 execution,
+                typedActions,
                 intentQueries,
                 worker,
                 clock,
@@ -151,8 +153,8 @@ public class EvaluationAutoConfiguration {
     }
 
     @Bean
-    IntentWorker intentWorker(IntentExecutionService execution, IntentWorkerProperties policy, Clock clock) {
-        return new IntentWorker(execution, policy, clock);
+    IntentWorker intentWorker(DefaultKernel kernel, IntentWorkerProperties policy, Clock clock) {
+        return new IntentWorker(kernel, policy, clock);
     }
 
     @Bean
@@ -259,6 +261,26 @@ public class EvaluationAutoConfiguration {
                 jdbc, new TransactionTemplate(transactionManager), handlers, projectors, payloads,
                 semanticPackVersion, policies, derivations, cedar, worker, invariants, fatalInvariants, clock,
                 telemetry, compatibility);
+    }
+
+    @Bean
+    TypedActionService typedActionService(
+            JdbcTemplate jdbc,
+            PlatformTransactionManager transactionManager,
+            CedarAuthoriser cedar,
+            IntentWorkerProperties worker,
+            Clock clock,
+            KernelTelemetry telemetry,
+            SemanticPackVersion semanticPack,
+            List<SemanticBindings> bindings,
+            List<io.github.gmcnicol.kernel.semanticpack.TypedIntentHandler<?, ?, ?>> handlers,
+            List<io.github.gmcnicol.kernel.semanticpack.TypedEventProjector<?, ?>> projectors,
+            List<TypedApplicabilityPolicy<?>> policies,
+            List<TypedFactDerivation<?, ?>> derivations,
+            io.github.gmcnicol.kernel.application.CanonicalCodec.Limits limits) {
+        return new TypedActionService(
+                jdbc, new TransactionTemplate(transactionManager), cedar, worker, clock, telemetry, semanticPack, bindings,
+                handlers, projectors, policies, derivations, limits);
     }
 
     @Bean

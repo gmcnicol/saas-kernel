@@ -37,7 +37,7 @@ final class CedarAuthoriser {
     }
 
     boolean allows(Principal principal, Subject subject, String operation) {
-        if (!model.subjectType().equals(subject.type())) {
+        if (!model.subjectTypes().contains(subject.type())) {
             return false;
         }
         try {

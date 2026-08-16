@@ -18,6 +18,8 @@ public interface Kernel {
 
     Intent accept(UUID actionOfferId, UUID intentId, CandidatePayload payload);
 
+    <C> Intent accept(UUID actionOfferId, UUID intentId, TypedCandidatePayload<C> payload);
+
     Optional<Intent> processNext(Instant processedAt);
 
     List<Intent> processDue(Instant processedAt);

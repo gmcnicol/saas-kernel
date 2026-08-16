@@ -5,12 +5,12 @@ import java.time.Clock;
 final class IntentWorker extends FixedDelayWorker {
 
     private static final System.Logger LOG = System.getLogger(IntentWorker.class.getName());
-    private final IntentExecutionService execution;
+    private final DefaultKernel kernel;
     private final Clock clock;
 
-    IntentWorker(IntentExecutionService execution, IntentWorkerProperties policy, Clock clock) {
+    IntentWorker(DefaultKernel kernel, IntentWorkerProperties policy, Clock clock) {
         super(policy);
-        this.execution = execution;
+        this.kernel = kernel;
         this.clock = clock;
     }
 
@@ -22,7 +22,7 @@ final class IntentWorker extends FixedDelayWorker {
     @Override
     void poll() {
         try {
-            execution.processDue(clock.instant(), this::isAcceptingWork);
+            kernel.processDue(clock.instant(), this::isAcceptingWork);
         } catch (RuntimeException exception) {
             LOG.log(System.Logger.Level.WARNING, "intent_worker_poll_failed type={0}",
                     exception.getClass().getSimpleName());
