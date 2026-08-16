@@ -273,6 +273,28 @@ class TaxiJavaGeneratorTests {
                 () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
         assertTrue(inventoryCollision.getMessage().contains(
                 "generated-name collision with GeneratedSemanticBindings"), inventoryCollision::getMessage);
+
+        Files.writeString(source, """
+                import io.github.gmcnicol.kernel.taxi.Subject
+                import io.github.gmcnicol.kernel.taxi.Contract
+                import io.github.gmcnicol.kernel.taxi.ProjectedState
+                import io.github.gmcnicol.kernel.taxi.Event
+                import io.github.gmcnicol.kernel.taxi.ActionService
+                namespace GeneratedSemanticRegistry
+                @Subject type CustomerId inherits String
+                @Contract(version = 1) @ProjectedState(subject = "GeneratedSemanticRegistry.CustomerId")
+                model Customer {}
+                @Contract(version = 1) model Payload {}
+                @Contract(version = 1) @Event closed model Changed {}
+                @ActionService(projection = "GeneratedSemanticRegistry.Customer") service Actions {
+                    operation change(input: Payload): Changed[]
+                }
+                """);
+        var registryCollision = assertThrows(
+                IllegalArgumentException.class,
+                () -> TaxiJavaGenerator.generate(source.getParent(), output, "generated"));
+        assertTrue(registryCollision.getMessage().contains(
+                "generated-name collision with GeneratedSemanticRegistry"), registryCollision::getMessage);
     }
 
     @Test
@@ -308,12 +330,15 @@ class TaxiJavaGeneratorTests {
         String actions = Files.readString(output.resolve("generated/example/CustomerActions.java"));
         String union = Files.readString(output.resolve("generated/example/CustomerEvent.java"));
         String changed = Files.readString(output.resolve("generated/example/CustomerChanged.java"));
+        String registry = Files.readString(output.resolve("generated/GeneratedSemanticRegistry.java"));
         assertTrue(actions.contains("example.CustomerActions.change"), actions);
         assertTrue(actions.contains("ChangeCustomer.TYPE"), actions);
         assertTrue(actions.contains("CustomerChanged.TYPE"), actions);
         assertTrue(actions.contains("CustomerSuspended.TYPE"), actions);
         assertTrue(union.contains("sealed interface CustomerEvent permits"), union);
         assertTrue(changed.contains("implements generated.example.CustomerEvent"), changed);
+        assertTrue(registry.contains("SemanticRegistry.generated("), registry);
+        assertTrue(registry.contains("SemanticRegistry.formDecoder("), registry);
     }
 
     @Test

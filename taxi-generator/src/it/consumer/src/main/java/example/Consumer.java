@@ -2,15 +2,19 @@ package example;
 
 import example.bindings.customer.crm.Customer;
 import example.bindings.customer.crm.CustomerActions;
+import example.bindings.customer.crm.ChangeCustomer;
 import example.bindings.customer.crm.CustomerChanged;
 import example.bindings.customer.crm.CustomerEvent;
 import example.bindings.customer.crm.CustomerId;
 import example.bindings.customer.crm.EnabledId;
 import example.bindings.customer.crm.RatioId;
 import example.bindings.customer.crm.Status;
+import example.bindings.GeneratedSemanticRegistry;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 public final class Consumer {
     private Consumer() {}
@@ -32,6 +36,14 @@ public final class Consumer {
         rejects(() -> EnabledId.TYPE.fromExternalId("corrupt"));
         rejects(() -> RatioId.TYPE.fromExternalId("NaN"));
         rejects(() -> RatioId.TYPE.fromExternalId("Infinity"));
+        var decoded = GeneratedSemanticRegistry.INSTANCE.decodeForm(
+                CustomerActions.CHANGE.qualifiedName(), ChangeCustomer.TYPE.qualifiedName(),
+                ChangeCustomer.TYPE.contractVersion(),
+                Map.of("note", List.of("changed")), Set.of(), Optional.empty(), Optional.empty());
+        if (decoded.actionType() != CustomerActions.CHANGE
+                || !decoded.value().equals(new ChangeCustomer("changed"))) {
+            throw new AssertionError("generated registry must decode only its generated Candidate Payload");
+        }
         return customer;
     }
 

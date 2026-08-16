@@ -1,46 +1,58 @@
 package io.github.gmcnicol.crm;
 
-import io.github.gmcnicol.kernel.application.CandidatePayload;
 import io.github.gmcnicol.kernel.application.Kernel;
+import io.github.gmcnicol.kernel.application.IntentConflictException;
+import io.github.gmcnicol.kernel.application.IntentRejectedException;
 import io.github.gmcnicol.kernel.application.Principal;
+import io.github.gmcnicol.kernel.application.SemanticRegistry;
+import io.github.gmcnicol.kernel.application.TypedCandidatePayload;
 import io.github.gmcnicol.kernel.application.W3cTraceContext;
-import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.ContactId;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpProjection;
 import io.github.gmcnicol.kernel.presentationpack.PresentationResult;
+import io.github.gmcnicol.kernel.presentationpack.TypedPresentationPack;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.Authentication;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.ResponseStatus;
 
 @RestController
 final class CrmPresentationController {
 
     private final Kernel kernel;
-    private final PresentationPack desktop;
-    private final PresentationPack mobile;
+    private final TypedPresentationPack<ContactId, FollowUpProjection> desktop;
+    private final TypedPresentationPack<ContactId, FollowUpProjection> mobile;
+    private final SemanticRegistry registry;
     private final Clock clock;
 
     CrmPresentationController(
             Kernel kernel,
-            @Qualifier("crmDesktopPresentationPack") PresentationPack desktop,
-            @Qualifier("crmMobilePresentationPack") PresentationPack mobile,
+            @Qualifier("typedCrmDesktopPresentationPack")
+            TypedPresentationPack<ContactId, FollowUpProjection> desktop,
+            @Qualifier("typedCrmMobilePresentationPack")
+            TypedPresentationPack<ContactId, FollowUpProjection> mobile,
+            SemanticRegistry registry,
             Clock clock) {
         this.kernel = kernel;
         this.desktop = desktop;
         this.mobile = mobile;
+        this.registry = registry;
         this.clock = clock;
     }
 
@@ -66,21 +78,21 @@ final class CrmPresentationController {
             produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     ResponseEntity<String> invoke(
             @PathVariable UUID offerId,
+            Authentication authentication,
             @RequestParam MultiValueMap<String, String> form,
             @RequestHeader(name = "traceparent", required = false) String traceparent,
             @RequestHeader(name = "tracestate", required = false) String tracestate) {
         UUID intentId = UUID.fromString(single(form, "intentId"));
+        String actionType = single(form, "actionType");
         String payloadType = single(form, "payloadType");
         int payloadVersion = Integer.parseInt(single(form, "payloadVersion"));
-        Map<String, String> values = new LinkedHashMap<>();
-        form.forEach((name, entries) -> {
-            if (!name.equals("intentId") && !name.equals("payloadType") && !name.equals("payloadVersion")) {
-                if (entries.size() != 1) throw new IllegalArgumentException("Duplicate payload field");
-                values.put(name, entries.getFirst());
-            }
-        });
-        var intent = kernel.accept(offerId, intentId, new CandidatePayload(
-                payloadType, payloadVersion, values, trace(traceparent, tracestate), Optional.empty()));
+        TypedCandidatePayload<?> payload = registry.decodeForm(
+                actionType, payloadType, payloadVersion, form,
+                Set.of("intentId", "actionType", "payloadType", "payloadVersion"),
+                trace(traceparent, tracestate), Optional.empty());
+        Caller caller = caller(authentication);
+        var intent = kernel.accept(caller.tenantId(),
+                new Principal(caller.principalType(), caller.principalId()), offerId, intentId, payload);
         String html = "<section id=\"intent-result\"><p>Intent " + intent.id()
                 + " accepted: " + intent.status() + "</p></section>";
         return ResponseEntity.ok().contentType(MediaType.TEXT_EVENT_STREAM)
@@ -91,14 +103,14 @@ final class CrmPresentationController {
             String experience,
             Caller caller,
             UUID snapshotId) {
-        PresentationPack pack = switch (experience) {
+        TypedPresentationPack<ContactId, FollowUpProjection> pack = switch (experience) {
             case "desktop" -> desktop;
             case "mobile" -> mobile;
             default -> throw new IllegalArgumentException("Unknown CRM presentation experience");
         };
         return pack.render(kernel.present(
                 caller.tenantId(), snapshotId, new Principal(caller.principalType(), caller.principalId()),
-                Instant.now(clock)));
+                Instant.now(clock), FollowUpProjection.TYPE));
     }
 
     private static Caller caller(Authentication authentication) {
@@ -120,6 +132,10 @@ final class CrmPresentationController {
     }
 
     private record Caller(String tenantId, String principalType, String principalId) {}
+
+    @ExceptionHandler({IllegalArgumentException.class, IntentRejectedException.class, IntentConflictException.class})
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    void invalidRequest() {}
 
     private static String shell(String body) {
         return "<!doctype html><html><head><script type=\"module\" "

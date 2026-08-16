@@ -2,9 +2,16 @@ package io.github.gmcnicol.crm;
 
 import io.github.gmcnicol.kernel.application.AuthorisationBundle;
 import io.github.gmcnicol.kernel.application.AuthorisationModel;
+import io.github.gmcnicol.kernel.application.SemanticRegistry;
+import io.github.gmcnicol.kernel.application.TypedAuthorisationModel;
 import io.github.gmcnicol.kernel.application.Event;
 import io.github.gmcnicol.kernel.application.ProjectedState;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
+import io.github.gmcnicol.kernel.presentationpack.TypedPresentationPack;
+import io.github.gmcnicol.crm.bindings.GeneratedSemanticRegistry;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.ContactId;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpProjection;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpDue;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.EventProjector;
@@ -52,6 +59,17 @@ public class KeepInTouchCrmApplication {
                 return Map.of("io.github.gmcnicol.crm.Contact.displayName", "displayName");
             }
         };
+    }
+
+    @Bean
+    TypedAuthorisationModel<FollowUpProjection> typedCrmAuthorisationModel() {
+        return new TypedAuthorisationModel<>(
+                FollowUpProjection.TYPE, Set.of(FollowUpProjection.CONTACT_ID), Set.of(FollowUpDue.TYPE));
+    }
+
+    @Bean
+    SemanticRegistry crmSemanticRegistry() {
+        return GeneratedSemanticRegistry.INSTANCE;
     }
 
     @Bean
@@ -184,6 +202,16 @@ public class KeepInTouchCrmApplication {
     @Bean
     PresentationPack crmMobilePresentationPack(ObservationRegistry observations) {
         return CrmPresentation.mobile().observed(observations);
+    }
+
+    @Bean
+    TypedPresentationPack<ContactId, FollowUpProjection> typedCrmDesktopPresentationPack() {
+        return CrmPresentation.typedDesktop();
+    }
+
+    @Bean
+    TypedPresentationPack<ContactId, FollowUpProjection> typedCrmMobilePresentationPack() {
+        return CrmPresentation.typedMobile();
     }
 
     @Bean

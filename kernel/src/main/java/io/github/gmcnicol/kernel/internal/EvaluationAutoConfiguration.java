@@ -166,6 +166,7 @@ public class EvaluationAutoConfiguration {
     CedarAuthoriser cedarAuthoriser(
             List<AuthorisationBundle> bundles,
             List<AuthorisationModel> models,
+            List<io.github.gmcnicol.kernel.application.TypedAuthorisationModel<?>> typedModels,
             ResourceLoader resources) {
         Properties manifest = load(resources, bundles.getFirst().manifestResource());
         String schema = read(resources, manifest.getProperty("schema"));
@@ -179,6 +180,7 @@ public class EvaluationAutoConfiguration {
                     Schema.parse(Schema.JsonOrCedar.Cedar, schema),
                     PolicySet.parsePolicies(policies),
                     models.getFirst(),
+                    typedModels,
                     manifest.getProperty("id"),
                     checksum);
         } catch (Exception exception) {

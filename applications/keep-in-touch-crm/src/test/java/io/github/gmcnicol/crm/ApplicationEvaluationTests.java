@@ -35,6 +35,7 @@ import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.TypedEventProjector;
 import io.github.gmcnicol.kernel.semanticpack.TypedIntentHandler;
 import io.github.gmcnicol.kernel.presentationpack.PresentationPack;
+import io.github.gmcnicol.kernel.presentationpack.TypedPresentationPack;
 import io.github.gmcnicol.kernel.application.AuthorisationModel;
 import io.github.gmcnicol.kernel.semanticpack.FactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.IntentHandler;
@@ -78,6 +79,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.httpBasic;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import org.testcontainers.junit.jupiter.Container;
@@ -122,6 +124,10 @@ class ApplicationEvaluationTests {
     @Autowired @Qualifier("typedPolicyProjectionSeen") AtomicReference<FollowUpProjection> typedPolicyProjectionSeen;
     @Autowired @Qualifier("crmDesktopPresentationPack") PresentationPack desktopPresentation;
     @Autowired @Qualifier("crmMobilePresentationPack") PresentationPack mobilePresentation;
+    @Autowired @Qualifier("typedCrmDesktopPresentationPack")
+    TypedPresentationPack<ContactId, FollowUpProjection> typedDesktopPresentation;
+    @Autowired @Qualifier("typedCrmMobilePresentationPack")
+    TypedPresentationPack<ContactId, FollowUpProjection> typedMobilePresentation;
 
     @MockitoSpyBean private AuthorisationModel authorisationModel;
     @MockitoSpyBean private SemanticPackVersion semanticPack;
@@ -834,64 +840,68 @@ class ApplicationEvaluationTests {
 
     @Test
     void rendersDistinctAuthorisedCrmExperiencesAndInvokesOpaqueOffer(CapturedOutput output) throws Exception {
-        var subject = new Subject("crm.Contact", "presented-alex");
-        var evaluatedAt = Instant.parse("2026-08-15T10:00:00Z");
-        var snapshot = kernel.evaluate(new ProjectedState("tenant-one", subject, 20, Map.of(
-                "displayName", "Alex <Morgan>",
-                "privateNote", "never render",
-                "followUpDueAt", "2026-08-15T09:00:00Z",
-                "followUpCompleted", "false")), evaluatedAt);
-        var presentedAt = Instant.parse("2026-08-15T10:01:00Z");
+        Instant dueAt = Instant.parse("2040-08-15T09:00:00Z");
+        String subjectId = "presented-alex";
+        seedOpenContact(subjectId, dueAt);
+        var id = new ContactId(subjectId);
+        var subject = new TypedSubject<>(ContactId.TYPE, id);
+        var snapshot = kernel.evaluate(new TypedProjectedState<>(
+                "tenant-one", subject, 20, FollowUpProjection.TYPE,
+                new FollowUpProjection(id, dueAt, false)), dueAt.plusSeconds(1));
+        var presentedAt = dueAt.plusSeconds(2);
         var envelope = kernel.present(
-                "tenant-one", snapshot.id(), new Principal("Owner", "gareth"), presentedAt);
+                "tenant-one", snapshot.id(), new Principal("Owner", "gareth"), presentedAt,
+                FollowUpProjection.TYPE);
 
         assertThat(envelope.version()).isEqualTo(1);
         assertThat(envelope.subject()).isEqualTo(subject);
         assertThat(envelope.evaluationId()).isEqualTo(snapshot.id());
-        assertThat(envelope.evaluatedAt()).isEqualTo(evaluatedAt);
+        assertThat(envelope.evaluatedAt()).isEqualTo(dueAt.plusSeconds(1));
         assertThat(envelope.semanticPackId()).isEqualTo("io.github.gmcnicol.crm.semantic");
-        assertThat(envelope.fields()).containsOnlyKeys("io.github.gmcnicol.crm.Contact.displayName")
-                .doesNotContainValue("never render");
-        assertThat(envelope.actionOffers()).extracting(offer -> offer.inputType()).containsExactlyInAnyOrder(
-                "io.github.gmcnicol.crm.RecordInteractionInput",
-                "io.github.gmcnicol.crm.SnoozeFollowUpInput",
-                "io.github.gmcnicol.crm.CompleteFollowUpInput");
+        assertThat(envelope.fields()).singleElement().satisfies(field -> {
+            assertThat(field.type()).isSameAs(FollowUpProjection.CONTACT_ID);
+            assertThat(field.value()).isEqualTo(id);
+        });
+        assertThat(envelope.facts()).singleElement().satisfies(fact ->
+                assertThat(fact.type()).isSameAs(FollowUpDue.TYPE));
+        assertThat(envelope.actionOffers()).singleElement().satisfies(offer ->
+                assertThat(offer.actionType()).isSameAs(TypedCrmActions.RECORD_INTERACTION));
 
-        var desktop = desktopPresentation.render(envelope);
-        var mobile = mobilePresentation.render(envelope);
-        assertThat(desktop.html()).contains("Relationship workspace", "Alex &lt;Morgan&gt;", "data-on:submit", "@post(")
-                .doesNotContain("never render");
+        var desktop = typedDesktopPresentation.render(envelope);
+        var mobile = typedMobilePresentation.render(envelope);
+        assertThat(desktop.html()).contains("Relationship workspace", subjectId, "data-on:submit", "@post(")
+                .doesNotContain(dueAt.toString(), "followUpCompleted");
         assertThat(mobile.html()).contains("Next relationship").doesNotContain("Relationship workspace");
         assertThat(desktop.eventStream()).startsWith("event: datastar-patch-elements\n");
         assertThat(desktop.renderedActionOffers()).containsExactlyInAnyOrderElementsOf(
                 envelope.actionOffers().stream().map(offer -> offer.id()).toList());
 
         var viewerEnvelope = kernel.present(
-                "tenant-one", snapshot.id(), new Principal("Viewer", "guest"), presentedAt);
+                "tenant-one", snapshot.id(), new Principal("Viewer", "guest"), presentedAt,
+                FollowUpProjection.TYPE);
         assertThat(viewerEnvelope.actionOffers()).isEmpty();
-        assertThat(mobilePresentation.render(viewerEnvelope).html()).doesNotContain("<form");
+        assertThat(typedMobilePresentation.render(viewerEnvelope).html()).doesNotContain("<form");
 
-        var offer = envelope.actionOffers().stream()
-                .filter(candidate -> candidate.actionId().endsWith("recordInteraction"))
-                .findFirst().orElseThrow();
+        var offer = envelope.actionOffers().getFirst();
         var intentId = UUID.randomUUID();
         String traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+        org.mockito.Mockito.doReturn(presentedAt.plusSeconds(1)).when(clock).instant();
         mvc.perform(post("/presentation/intents/{offerId}", offer.id())
                         .with(httpBasic("gareth", "test-password"))
                         .contentType("application/x-www-form-urlencoded")
                         .header("traceparent", "00-" + traceId + "-00f067aa0ba902b7-01")
                         .header("tracestate", "vendor=value")
                         .param("intentId", intentId.toString())
-                        .param("payloadType", offer.inputType())
-                        .param("payloadVersion", "2")
+                        .param("actionType", TypedCrmActions.RECORD_INTERACTION.qualifiedName())
+                        .param("payloadType", RecordInteractionCandidateV1.TYPE.qualifiedName())
+                        .param("payloadVersion", "1")
                         .param("note", "Spoke through rendered control"))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith("text/event-stream"))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("datastar-patch-elements")));
-        assertThat(kernel.findIntents(new IntentQuery(
-                "tenant-one", Optional.of(IntentStatus.PENDING), Optional.of(subject),
-                Optional.of(intentId), Optional.empty()))).singleElement();
-        assertThat(kernel.processNext(Instant.now().plusSeconds(30)).orElseThrow().status())
+        inTenant(() -> assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM kernel.typed_intent WHERE id = ?", Integer.class, intentId)).isEqualTo(1));
+        assertThat(processUntil(intentId, presentedAt.plusSeconds(30)).status())
                 .isEqualTo(IntentStatus.SUCCEEDED);
         assertThat(meters.find("kernel.evaluation").timer()).isNotNull();
         assertThat(meters.find("kernel.authorisation").timer()).isNotNull();
@@ -912,7 +922,66 @@ class ApplicationEvaluationTests {
                         "\"intent\":\"" + intentId + "\"",
                         "\"trace_correlation\":\"" + traceId + "\"",
                         "\"event\":")
-                .doesNotContain(subject.id(), "Spoke through rendered control", "never render");
+                .doesNotContain(subjectId, "Spoke through rendered control", "never render");
+        int acceptedIntentCount = new TransactionTemplate(transactionManager).execute(status -> {
+            useTenant();
+            return jdbc.queryForObject("SELECT count(*) FROM kernel.typed_intent", Integer.class);
+        });
+
+        mvc.perform(post("/presentation/intents/{offerId}", UUID.randomUUID())
+                        .with(httpBasic("gareth", "test-password"))
+                        .contentType("application/x-www-form-urlencoded")
+                        .param("intentId", UUID.randomUUID().toString())
+                        .param("actionType", TypedCrmActions.RECORD_INTERACTION.qualifiedName())
+                        .param("payloadType", RecordInteractionCandidateV1.TYPE.qualifiedName())
+                        .param("payloadVersion", "1")
+                        .param("note", "forged offer"))
+                .andExpect(status().isBadRequest());
+
+        mvc.perform(post("/presentation/intents/{offerId}", offer.id())
+                        .with(httpBasic("gareth", "test-password"))
+                        .contentType("application/x-www-form-urlencoded")
+                        .param("intentId", UUID.randomUUID().toString())
+                        .param("actionType", TypedCrmActions.RECORD_INTERACTION.qualifiedName())
+                        .param("payloadType", "unknown.Candidate")
+                        .param("payloadVersion", "1")
+                        .param("note", "unknown type"))
+                .andExpect(status().isBadRequest());
+
+        mvc.perform(post("/presentation/intents/{offerId}", offer.id())
+                        .with(httpBasic("gareth", "test-password"))
+                        .contentType("application/x-www-form-urlencoded")
+                        .param("intentId", UUID.randomUUID().toString())
+                        .param("actionType", TypedCrmActions.RECORD_INTERACTION.qualifiedName())
+                        .param("payloadType", RecordInteractionCandidateV1.TYPE.qualifiedName())
+                        .param("payloadVersion", "1")
+                        .param("note", "one", "two"))
+                .andExpect(status().isBadRequest());
+
+        mvc.perform(post("/presentation/intents/{offerId}", offer.id())
+                        .with(httpBasic("gareth", "test-password"))
+                        .contentType("application/x-www-form-urlencoded")
+                        .param("intentId", UUID.randomUUID().toString())
+                        .param("actionType", TypedCrmActions.RECORD_INTERACTION.qualifiedName())
+                        .param("payloadType", RecordInteractionCandidateV1.TYPE.qualifiedName())
+                        .param("payloadVersion", "1")
+                        .param("unknown", "field"))
+                .andExpect(status().isBadRequest());
+
+        mvc.perform(post("/presentation/intents/{offerId}", offer.id())
+                        .with(httpBasic("gareth", "test-password"))
+                        .contentType("application/x-www-form-urlencoded")
+                        .param("intentId", UUID.randomUUID().toString())
+                        .param("actionType", TypedCrmActions.RECORD_INTERACTION.qualifiedName())
+                        .param("payloadType", RecordInteractionCandidateV1.TYPE.qualifiedName())
+                        .param("payloadVersion", "1")
+                        .param("note", "x".repeat(65_537)))
+                .andExpect(status().isBadRequest());
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            useTenant();
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM kernel.typed_intent", Integer.class))
+                    .isEqualTo(acceptedIntentCount);
+        });
 
         mvc.perform(get("/presentation/crm/desktop/events")
                         .header("X-Tenant-Id", "tenant-one")
@@ -934,56 +1003,58 @@ class ApplicationEvaluationTests {
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("integrity=\"sha384-")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("data-on:submit")));
+
+        mvc.perform(get("/presentation/crm/mobile")
+                        .with(user("guest").roles("TENANT_tenant-one", "PRINCIPAL_Viewer"))
+                        .param("snapshotId", snapshot.id().toString()))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.containsString("<form"))));
     }
 
     @Test
     void rendersBoundedA2uiAndAcceptsOnlyCurrentOffer() throws Exception {
-        var subject = new Subject("crm.Contact", "a2ui-contact");
-        var snapshot = kernel.evaluate(new ProjectedState("tenant-one", subject, 300, Map.of(
-                "displayName", "Ada <Lovelace>",
-                "followUpDueAt", "2026-08-15T09:00:00Z",
-                "followUpCompleted", "false")), Instant.parse("2026-08-15T10:00:00Z"));
+        Instant dueAt = Instant.parse("2040-08-16T09:00:00Z");
+        seedOpenContact("a2ui-contact", dueAt);
+        var id = new ContactId("a2ui-contact");
+        var snapshot = kernel.evaluate(new TypedProjectedState<>(
+                "tenant-one", new TypedSubject<>(ContactId.TYPE, id), 300, FollowUpProjection.TYPE,
+                new FollowUpProjection(id, dueAt, false)), dueAt.plusSeconds(1));
         var envelope = kernel.present(
                 "tenant-one", snapshot.id(), new Principal("Owner", "gareth"),
-                Instant.parse("2026-08-15T10:01:00Z"));
-        var offer = envelope.actionOffers().stream()
-                .filter(candidate -> candidate.actionId().endsWith("recordInteraction"))
-                .findFirst().orElseThrow();
+                dueAt.plusSeconds(2), FollowUpProjection.TYPE);
+        var offer = envelope.actionOffers().getFirst();
         String source = a2uiMessages(offer.id());
         var rendered = a2ui.render(envelope, source);
-        var nativeHtml = desktopPresentation.render(envelope).html();
+        var nativeHtml = typedDesktopPresentation.render(envelope).html();
 
         assertThat(rendered.html()).contains(
                 "Ada &lt;Lovelace&gt;", "/presentation/intents/" + offer.id(),
-                "name=\"payloadType\" value=\"" + offer.inputType() + "\"",
-                "name=\"payloadVersion\" value=\"2\"", "name=\"note\" value=\"A2UI contact note\"");
+                "name=\"payloadType\" value=\"" + RecordInteractionCandidateV1.TYPE.qualifiedName() + "\"",
+                "name=\"payloadVersion\" value=\"1\"", "name=\"note\" value=\"A2UI contact note\"");
         assertThat(nativeHtml).contains(
                 "/presentation/intents/" + offer.id(),
-                "name=\"payloadType\" value=\"" + offer.inputType() + "\"",
-                "name=\"payloadVersion\" value=\"2\"");
+                "name=\"payloadType\" value=\"" + RecordInteractionCandidateV1.TYPE.qualifiedName() + "\"",
+                "name=\"payloadVersion\" value=\"1\"");
 
         UUID intentId = UUID.randomUUID();
+        org.mockito.Mockito.doReturn(dueAt.plusSeconds(3)).when(clock).instant();
         mvc.perform(post("/presentation/intents/{offerId}", offer.id())
                         .with(httpBasic("gareth", "test-password"))
                         .contentType("application/x-www-form-urlencoded")
                         .param("intentId", intentId.toString())
-                        .param("payloadType", offer.inputType())
-                        .param("payloadVersion", "2")
+                        .param("actionType", TypedCrmActions.RECORD_INTERACTION.qualifiedName())
+                        .param("payloadType", RecordInteractionCandidateV1.TYPE.qualifiedName())
+                        .param("payloadVersion", "1")
                         .param("note", "A2UI contact note"))
                 .andExpect(status().isOk());
-        assertThat(kernel.findIntents(new IntentQuery(
-                "tenant-one", Optional.of(IntentStatus.PENDING), Optional.of(subject),
-                Optional.of(intentId), Optional.empty()))).singleElement();
-        assertThat(processUntil(intentId, Instant.now().plusSeconds(30)).status())
+        inTenant(() -> assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM kernel.typed_intent WHERE id = ?", Integer.class, intentId)).isEqualTo(1));
+        assertThat(processUntil(intentId, dueAt.plusSeconds(30)).status())
                 .isEqualTo(IntentStatus.SUCCEEDED);
 
-        int beforeForged = kernel.findIntents(new IntentQuery(
-                "tenant-one", Optional.empty(), Optional.of(subject), Optional.empty(), Optional.empty())).size();
         assertThatThrownBy(() -> a2ui.render(envelope, a2uiMessages(UUID.randomUUID())))
                 .isInstanceOf(CrmA2uiAdapter.InvalidSurface.class);
-        assertThat(kernel.findIntents(new IntentQuery(
-                "tenant-one", Optional.empty(), Optional.of(subject), Optional.empty(), Optional.empty())))
-                .hasSize(beforeForged);
 
         var staleSubject = new Subject("crm.Contact", "a2ui-stale");
         var staleSnapshot = kernel.evaluate(new ProjectedState("tenant-one", staleSubject, 310, Map.of(

@@ -305,7 +305,13 @@ final class ApplicationValidator {
                     policyPaths.stream().map(this::readText).collect(Collectors.joining("\n")));
             var response = new BasicAuthorizationEngine().validate(new ValidationRequest(schema, policies));
             if (!response.validationPassed()) {
-                throw new IllegalStateException("Cedar validation failed: " + response);
+                String errors = response.errors.orElseGet(com.google.common.collect.ImmutableList::of).stream()
+                        .map(error -> error.message).collect(Collectors.joining("; "));
+                if (errors.isEmpty()) {
+                    errors = response.success.stream().flatMap(success -> success.validationErrors.stream())
+                            .map(error -> error.getError().message).collect(Collectors.joining("; "));
+                }
+                throw new IllegalStateException("Cedar validation failed: " + errors);
             }
         } catch (IllegalStateException exception) {
             throw exception;

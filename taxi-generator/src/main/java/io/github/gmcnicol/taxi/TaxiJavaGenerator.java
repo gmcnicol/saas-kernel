@@ -144,17 +144,20 @@ final class TaxiJavaGenerator {
                 .anyMatch(type -> annotated(type, PROJECTED_STATE) || annotated(type, FACT))
                 || !actionServices.isEmpty();
         if (bindingsGenerated) {
-            authoredTypes.stream()
-                    .filter(type -> type.getQualifiedName().equals("GeneratedSemanticBindings")
-                            || type.getQualifiedName().startsWith("GeneratedSemanticBindings."))
-                    .findFirst()
-                    .ifPresent(type -> fail(type, "generated-name collision with GeneratedSemanticBindings"));
-            actionServices.stream()
-                    .filter(service -> service.getQualifiedName().equals("GeneratedSemanticBindings")
-                            || service.getQualifiedName().startsWith("GeneratedSemanticBindings."))
-                    .findFirst()
-                    .ifPresent(service -> fail(service,
-                            "generated-name collision with GeneratedSemanticBindings"));
+            for (String generated : actionServices.isEmpty()
+                    ? List.of("GeneratedSemanticBindings")
+                    : List.of("GeneratedSemanticBindings", "GeneratedSemanticRegistry")) {
+                authoredTypes.stream()
+                        .filter(type -> type.getQualifiedName().equals(generated)
+                                || type.getQualifiedName().startsWith(generated + "."))
+                        .findFirst()
+                        .ifPresent(type -> fail(type, "generated-name collision with " + generated));
+                actionServices.stream()
+                        .filter(service -> service.getQualifiedName().equals(generated)
+                                || service.getQualifiedName().startsWith(generated + "."))
+                        .findFirst()
+                        .ifPresent(service -> fail(service, "generated-name collision with " + generated));
+            }
         }
         for (Type type : authoredTypes) {
             validateQualifiedIdentifier(type.getQualifiedName(), location(type));
@@ -587,6 +590,10 @@ final class TaxiJavaGenerator {
             files.put(Path.of(basePackage.replace('.', '/'), "GeneratedSemanticBindings.java"),
                     renderBindings(basePackage, projections, facts, candidates, events, actionServices));
         }
+        if (!actionServices.isEmpty()) {
+            files.put(Path.of(basePackage.replace('.', '/'), "GeneratedSemanticRegistry.java"),
+                    renderRegistry(basePackage, candidates));
+        }
         return files;
     }
 
@@ -621,6 +628,66 @@ final class TaxiJavaGenerator {
                 + "), java.util.List.of(" + eventTypes + "), java.util.List.of(" + actionTypes + "));\n\n"
                 + "    private GeneratedSemanticBindings() {}\n"
                 + "}\n";
+    }
+
+    private static String renderRegistry(String basePackage, List<Type> candidates) {
+        String decoders = candidates.stream().map(type -> {
+            ObjectType candidate = (ObjectType) type;
+            String arguments = candidate.getFields().stream()
+                    .map(field -> formValue(field, basePackage))
+                    .collect(java.util.stream.Collectors.joining(", "));
+            String javaType = basePackage + "." + type.getQualifiedName();
+            return "io.github.gmcnicol.kernel.application.SemanticRegistry.formDecoder("
+                    + javaType + ".TYPE, form -> new " + javaType + "(" + arguments + "))";
+        }).collect(java.util.stream.Collectors.joining(", "));
+        return "package " + basePackage + ";\n\n"
+                + "public final class GeneratedSemanticRegistry {\n"
+                + "    public static final io.github.gmcnicol.kernel.application.SemanticRegistry INSTANCE = "
+                + "io.github.gmcnicol.kernel.application.SemanticRegistry.generated("
+                + "GeneratedSemanticBindings.INSTANCE, java.util.List.of(" + decoders + "));\n\n"
+                + "    private GeneratedSemanticRegistry() {}\n"
+                + "}\n";
+    }
+
+    private static String formValue(Field field, String basePackage) {
+        Type type = field.getType();
+        String method;
+        Type parsedType;
+        if (type instanceof ArrayType array) {
+            method = field.getNullable() ? "optionalList" : "list";
+            parsedType = array.getMemberType();
+        } else {
+            method = field.getNullable() ? "optional" : "required";
+            parsedType = type;
+        }
+        return "form." + method + "(\"" + field.getName() + "\", " + formParser(parsedType, basePackage) + ")";
+    }
+
+    private static String formParser(Type type, String basePackage) {
+        if (type instanceof ArrayType || type instanceof ObjectType object && object.getTypeKind() == TypeKind.Model) {
+            return "value -> { throw new IllegalArgumentException(\"Use JSON for nested Candidate fields\"); }";
+        }
+        if (type instanceof EnumType) {
+            return "value -> " + basePackage + "." + type.getQualifiedName() + ".valueOf(value)";
+        }
+        if (type instanceof ObjectType object) {
+            return "value -> new " + basePackage + "." + type.getQualifiedName()
+                    + "(" + formPrimitive(primitive(object), "value") + ")";
+        }
+        return "value -> " + formPrimitive((PrimitiveType) type, "value");
+    }
+
+    private static String formPrimitive(PrimitiveType primitive, String value) {
+        if (primitive == PrimitiveType.BOOLEAN) {
+            return "switch (" + value + ") { case \"true\" -> true; case \"false\" -> false; "
+                    + "default -> throw new IllegalArgumentException(\"Invalid Boolean\"); }";
+        }
+        if (primitive == PrimitiveType.DOUBLE) {
+            return "java.util.Optional.of(java.lang.Double.valueOf(" + value + "))"
+                    + ".filter(java.lang.Double::isFinite).orElseThrow(() -> "
+                    + "new IllegalArgumentException(\"Invalid Double\"))";
+        }
+        return parsePrimitive(primitive, value);
     }
 
     private static boolean authored(Compiled compiled, Set<String> authoredSources) {
@@ -688,7 +755,9 @@ final class TaxiJavaGenerator {
                     .append("> ").append(constantName(field.getName())).append(" = new ")
                     .append("io.github.gmcnicol.kernel.application.FieldType<>(\"")
                     .append(type.getQualifiedName()).append(".").append(field.getName()).append("\", ")
-                    .append(name).append("::").append(field.getName()).append(");\n");
+                    .append(name).append("::").append(field.getName()).append(", value -> ")
+                    .append(cedarOptionalValue(field.getType(), field.getNullable(), "value", basePackage))
+                    .append(");\n");
         }
         if (annotated(type, PROJECTED_STATE)) {
             String subjectName = annotationString(type, PROJECTED_STATE, "subject");
@@ -708,7 +777,10 @@ final class TaxiJavaGenerator {
                     .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.FactType<>(\"")
                     .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
                     .append(basePackage).append(".").append(projectionName).append(".TYPE, ")
-                    .append(name).append(".class);\n")
+                    .append(name).append(".class, java.util.List.of(")
+                    .append(fields.stream().map(field -> constantName(field.getName()))
+                            .collect(java.util.stream.Collectors.joining(", ")))
+                    .append("));\n")
                     .append("    public static final io.github.gmcnicol.kernel.semanticpack.FactDerivationSlot<")
                     .append(basePackage).append(".").append(projectionName).append(", ").append(name)
                     .append("> DERIVATION = new io.github.gmcnicol.kernel.semanticpack.FactDerivationSlot<>(TYPE);\n");
@@ -722,7 +794,10 @@ final class TaxiJavaGenerator {
             descriptors.append("    public static final io.github.gmcnicol.kernel.application.CandidateType<")
                     .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.CandidateType<>(\"")
                     .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
-                    .append(name).append(".class);\n");
+                    .append(name).append(".class, java.util.List.of(")
+                    .append(fields.stream().map(field -> constantName(field.getName()))
+                            .collect(java.util.stream.Collectors.joining(", ")))
+                    .append("));\n");
         }
         if (!descriptors.isEmpty()) descriptors.append("\n");
         String implemented = unionInterfaces.isEmpty() ? "" : " implements " + unionInterfaces.stream()
@@ -820,6 +895,60 @@ final class TaxiJavaGenerator {
             value = basePackage + "." + type.getQualifiedName();
         }
         return nullable ? "java.util.Optional<" + value + ">" : value;
+    }
+
+    private static String cedarOptionalValue(Type type, boolean nullable, String value, String basePackage) {
+        return nullable
+                ? value + ".map(optionalValue -> " + cedarValue(type, "optionalValue", basePackage) + ")"
+                : "java.util.Optional.of(" + cedarValue(type, value, basePackage) + ")";
+    }
+
+    private static String cedarValue(Type type, String value, String basePackage) {
+        return cedarValue(type, value, basePackage, 0);
+    }
+
+    private static String cedarValue(Type type, String value, String basePackage, int depth) {
+        if (type instanceof ArrayType array) {
+            String item = "item" + depth;
+            return "new com.cedarpolicy.value.CedarList(" + value
+                    + ".stream().<com.cedarpolicy.value.Value>map(" + item + " -> "
+                    + cedarValue(array.getMemberType(), item, basePackage, depth + 1) + ").toList())";
+        }
+        if (type instanceof PrimitiveType primitive) return cedarPrimitive(primitive, value);
+        if (type instanceof EnumType) return "new com.cedarpolicy.value.PrimString(" + value + ".name())";
+        if (type instanceof ObjectType object && object.getTypeKind() == TypeKind.Type) {
+            return cedarPrimitive(primitive(object), value + ".value()");
+        }
+        if (type instanceof ObjectType object) {
+            String entries = object.getFields().stream().map(field -> {
+                String fieldValue = value + "." + field.getName() + "()";
+                String optionalValue = "optionalValue" + depth;
+                String entry = "java.util.Map.entry(\"" + field.getName()
+                        + "\", " + cedarValue(field.getType(),
+                                field.getNullable() ? optionalValue : fieldValue, basePackage, depth + 1)
+                        + ")";
+                return field.getNullable()
+                        ? fieldValue + ".map(" + optionalValue + " -> " + entry + ")"
+                        : "java.util.Optional.of(" + entry + ")";
+            }).collect(java.util.stream.Collectors.joining(", "));
+            return "new com.cedarpolicy.value.CedarMap(java.util.stream.Stream"
+                    + ".<java.util.Optional<java.util.Map.Entry<String, com.cedarpolicy.value.Value>>>of("
+                    + entries + ").flatMap(java.util.Optional::stream).collect(java.util.stream.Collectors"
+                    + ".toUnmodifiableMap(java.util.Map.Entry::getKey, java.util.Map.Entry::getValue)))";
+        }
+        throw new IllegalStateException("Validated type has no Cedar representation: " + type.getQualifiedName());
+    }
+
+    private static String cedarPrimitive(PrimitiveType primitive, String value) {
+        if (primitive == PrimitiveType.STRING) return "new com.cedarpolicy.value.PrimString(" + value + ")";
+        if (primitive == PrimitiveType.BOOLEAN) return "new com.cedarpolicy.value.PrimBool(" + value + ")";
+        if (primitive == PrimitiveType.INTEGER || primitive == PrimitiveType.LONG) {
+            return "new com.cedarpolicy.value.PrimLong(" + value + ".longValue())";
+        }
+        if (primitive == PrimitiveType.DECIMAL || primitive == PrimitiveType.DOUBLE) {
+            return "new com.cedarpolicy.value.Decimal(" + value + ".toString())";
+        }
+        return "new com.cedarpolicy.value.PrimString(" + value + ".toString())";
     }
 
     private static Path javaPath(Type type, String basePackage) {

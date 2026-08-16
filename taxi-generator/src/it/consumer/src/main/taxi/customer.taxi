@@ -34,7 +34,7 @@ model Customer {
 model Removable {}
 
 @Contract(version = 1)
-model ChangeCustomer {}
+model ChangeCustomer { note: String }
 
 @Contract(version = 1) @Event
 closed model CustomerChanged { id: CustomerId }

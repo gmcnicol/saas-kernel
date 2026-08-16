@@ -21,6 +21,8 @@ import io.github.gmcnicol.kernel.application.PresentationEnvelope;
 import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.application.SemanticType;
 import io.github.gmcnicol.kernel.application.TypedEvaluationSnapshot;
+import io.github.gmcnicol.kernel.application.TypedAuthorisationEnvelope;
+import io.github.gmcnicol.kernel.application.TypedPresentationEnvelope;
 import io.github.gmcnicol.kernel.application.TypedProjectedState;
 import io.github.gmcnicol.kernel.application.TypedCandidatePayload;
 import io.github.gmcnicol.kernel.semanticpack.ApplicabilityPolicy;
@@ -335,10 +337,26 @@ final class DefaultKernel implements Kernel {
     }
 
     @Override
+    public <I, P> TypedAuthorisationEnvelope<I, P> authorise(
+            String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt,
+            io.github.gmcnicol.kernel.application.ProjectionType<I, P> projectionType) {
+        return telemetry.observe("kernel.authorisation",
+                () -> typedActions.authorise(tenantId, snapshotId, principal, authorisedAt, projectionType));
+    }
+
+    @Override
     public PresentationEnvelope present(
             String tenantId, UUID snapshotId, Principal principal, Instant presentedAt) {
         return telemetry.observe(
                 "kernel.authorisation", () -> authorisation.present(tenantId, snapshotId, principal, presentedAt));
+    }
+
+    @Override
+    public <I, P> TypedPresentationEnvelope<I, P> present(
+            String tenantId, UUID snapshotId, Principal principal, Instant presentedAt,
+            io.github.gmcnicol.kernel.application.ProjectionType<I, P> projectionType) {
+        return telemetry.observe("kernel.authorisation",
+                () -> typedActions.present(tenantId, snapshotId, principal, presentedAt, projectionType));
     }
 
     @Override
@@ -351,6 +369,14 @@ final class DefaultKernel implements Kernel {
     public <C> Intent accept(UUID actionOfferId, UUID intentId, TypedCandidatePayload<C> payload) {
         return telemetry.observe(
                 "kernel.intent.acceptance", () -> typedActions.accept(actionOfferId, intentId, payload));
+    }
+
+    @Override
+    public Intent accept(
+            String tenantId, Principal principal, UUID actionOfferId, UUID intentId,
+            TypedCandidatePayload<?> payload) {
+        return telemetry.observe("kernel.intent.acceptance",
+                () -> typedActions.accept(tenantId, principal, actionOfferId, intentId, payload));
     }
 
     @Override

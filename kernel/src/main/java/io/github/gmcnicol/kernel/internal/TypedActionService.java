@@ -20,6 +20,12 @@ import io.github.gmcnicol.kernel.application.SemanticPackVersion;
 import io.github.gmcnicol.kernel.application.SemanticType;
 import io.github.gmcnicol.kernel.application.Subject;
 import io.github.gmcnicol.kernel.application.TypedCandidatePayload;
+import io.github.gmcnicol.kernel.application.TypedActionOffer;
+import io.github.gmcnicol.kernel.application.TypedAuthorisationEnvelope;
+import io.github.gmcnicol.kernel.application.TypedAuthorisationModel;
+import io.github.gmcnicol.kernel.application.TypedFact;
+import io.github.gmcnicol.kernel.application.TypedFieldValue;
+import io.github.gmcnicol.kernel.application.TypedPresentationEnvelope;
 import io.github.gmcnicol.kernel.application.TypedStateTransition;
 import io.github.gmcnicol.kernel.application.TypedSubject;
 import io.github.gmcnicol.kernel.application.TypedTransitionProvenance;
@@ -60,6 +66,7 @@ final class TypedActionService {
     private final SemanticPackVersion semanticPack;
     private final CanonicalCodec canonical;
     private final Map<String, ActionType<?, ?, ?>> actions;
+    private final Map<String, FactType<?>> factTypes;
     private final Map<String, TypedIntentHandler<?, ?, ?>> handlers;
     private final Map<String, TypedEventProjector<?, ?>> projectors;
     private final List<TypedApplicabilityPolicy<?>> policies;
@@ -88,6 +95,8 @@ final class TypedActionService {
         this.semanticPack = semanticPack;
         this.actions = bindings.stream().flatMap(binding -> binding.actions().stream())
                 .collect(java.util.stream.Collectors.toUnmodifiableMap(ActionType::qualifiedName, action -> action));
+        this.factTypes = bindings.stream().flatMap(binding -> binding.facts().stream())
+                .collect(java.util.stream.Collectors.toUnmodifiableMap(TypedActionService::key, fact -> fact));
         this.handlers = handlers.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(
                 handler -> handler.actionType().qualifiedName(), handler -> handler));
         this.projectors = projectors.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(
@@ -103,6 +112,7 @@ final class TypedActionService {
         });
         this.canonical = new CanonicalCodec(descriptors.values(), limits);
         this.actions.values().forEach(action -> {
+            cedar.model(action.projectionType());
             requireIdentity(descriptors.get(key(action.projectionType())), action.projectionType(), "Action Projection");
             requireIdentity(descriptors.get(key(action.candidateType())), action.candidateType(), "Action Candidate");
             action.eventTypes().forEach(event ->
@@ -134,6 +144,112 @@ final class TypedActionService {
                             ? this.projectors.get(event.qualifiedName()).eventType() : null,
                     event, "projector Event"));
         });
+    }
+
+    <I, P> TypedAuthorisationEnvelope<I, P> authorise(
+            String tenantId,
+            UUID snapshotId,
+            Principal principal,
+            Instant authorisedAt,
+            ProjectionType<I, P> projectionType) {
+        if (snapshotId == null || principal == null || authorisedAt == null || projectionType == null) {
+            throw new io.github.gmcnicol.kernel.application.AuthorisationDeniedException();
+        }
+        try {
+            return transactions.execute(status -> authoriseTypedInTransaction(
+                    tenantId, snapshotId, principal, authorisedAt, projectionType));
+        } catch (io.github.gmcnicol.kernel.application.AuthorisationDeniedException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            throw new io.github.gmcnicol.kernel.application.AuthorisationDeniedException();
+        }
+    }
+
+    <I, P> TypedPresentationEnvelope<I, P> present(
+            String tenantId,
+            UUID snapshotId,
+            Principal principal,
+            Instant presentedAt,
+            ProjectionType<I, P> projectionType) {
+        TypedAuthorisationEnvelope<I, P> authorised = authorise(
+                tenantId, snapshotId, principal, presentedAt, projectionType);
+        return new TypedPresentationEnvelope<>(
+                1, authorised.subject(), projectionType, authorised.evaluationSnapshotId(),
+                authorised.evaluatedAt(), authorised.semanticPackId(), authorised.fields(), authorised.facts(),
+                authorised.actionOffers());
+    }
+
+    private <I, P> TypedAuthorisationEnvelope<I, P> authoriseTypedInTransaction(
+            String tenantId,
+            UUID snapshotId,
+            Principal principal,
+            Instant authorisedAt,
+            ProjectionType<I, P> projectionType) {
+        TenantContext.use(jdbc, tenantId);
+        AuthorisationSnapshot snapshot = jdbc.queryForObject("""
+                SELECT snapshot.subject_type, snapshot.subject_id, snapshot.state_version,
+                       snapshot.state_checksum, snapshot.projection_type, snapshot.projection_contract_version,
+                       snapshot.evaluated_at, snapshot.semantic_pack_id, snapshot.semantic_pack_checksum,
+                       state.format_version, state.content
+                FROM kernel.typed_evaluation_snapshot snapshot
+                JOIN kernel.typed_projected_state state
+                  ON state.tenant_id = snapshot.tenant_id AND state.subject_type = snapshot.subject_type
+                 AND state.subject_id = snapshot.subject_id AND state.state_version = snapshot.state_version
+                 AND state.projection_type = snapshot.projection_type
+                 AND state.contract_version = snapshot.projection_contract_version
+                 AND state.checksum = snapshot.state_checksum
+                WHERE snapshot.tenant_id = ? AND snapshot.id = ?
+                """, (result, row) -> new AuthorisationSnapshot(
+                        result.getString("subject_type"), result.getString("subject_id"),
+                        result.getLong("state_version"), result.getString("state_checksum"),
+                        result.getString("projection_type"), result.getInt("projection_contract_version"),
+                        result.getTimestamp("evaluated_at").toInstant(), result.getString("semantic_pack_id"),
+                        result.getString("semantic_pack_checksum"), result.getInt("format_version"),
+                        result.getString("content")), tenantId, snapshotId);
+        if (!snapshot.subjectType().equals(projectionType.subjectType().qualifiedName())
+                || !snapshot.projectionType().equals(projectionType.qualifiedName())
+                || snapshot.projectionVersion() != projectionType.contractVersion()) {
+            throw new io.github.gmcnicol.kernel.application.AuthorisationDeniedException();
+        }
+        P projection = canonical.decode(projectionType, new CanonicalEvidence(
+                projectionType.qualifiedName(), projectionType.contractVersion(), snapshot.formatVersion(),
+                snapshot.content().getBytes(StandardCharsets.UTF_8), snapshot.stateChecksum()));
+        TypedSubject<I> subject = typedSubject(projectionType.subjectType(), snapshot.subjectId());
+        TypedAuthorisationModel<P> model = cedar.model(projectionType);
+        List<TypedFact<?>> derivedFacts = jdbc.query("""
+                SELECT fact_type, contract_version, format_version, content, checksum
+                FROM kernel.typed_evaluation_fact
+                WHERE tenant_id = ? AND snapshot_id = ? ORDER BY position
+                """, (result, row) -> decodeFact(new CanonicalEvidence(
+                        result.getString("fact_type"), result.getInt("contract_version"),
+                        result.getInt("format_version"), result.getString("content").getBytes(StandardCharsets.UTF_8),
+                        result.getString("checksum"))), tenantId, snapshotId);
+        FactSet authorisationFacts = factSet(derivedFacts);
+        var fields = new ArrayList<TypedFieldValue<P, ?>>();
+        model.fields().stream()
+                .sorted(Comparator.comparing(io.github.gmcnicol.kernel.application.FieldType::qualifiedName))
+                .filter(field -> cedar.allows(
+                        principal, subject, projectionType, projection, authorisationFacts, field))
+                .forEach(field -> fields.add(fieldValue(field, projection)));
+        List<TypedFact<?>> facts = derivedFacts.stream().filter(fact -> cedar.allows(
+                principal, subject, projectionType, projection, authorisationFacts, fact.type())).toList();
+        UUID correlation = UUID.randomUUID();
+        var offers = new ArrayList<TypedActionOffer<P, ?, ?>>();
+        jdbc.query("""
+                SELECT action_id, policy_id FROM kernel.typed_evaluation_applicable_action
+                WHERE tenant_id = ? AND snapshot_id = ? ORDER BY position
+                """, (result, row) -> new ActionEntry(
+                        result.getString("action_id"), result.getString("policy_id")), tenantId, snapshotId).stream()
+                .map(entry -> Map.entry(entry, actions.get(entry.actionId())))
+                .filter(entry -> entry.getValue() != null && entry.getValue().projectionType() == projectionType)
+                .filter(entry -> cedar.allows(
+                        principal, subject, projectionType, projection, authorisationFacts, entry.getValue()))
+                .map(entry -> typedOffer(persistOffer(
+                        tenantId, snapshotId, snapshot.offerSnapshot(), principal, entry.getKey().actionId(),
+                        entry.getKey().policyId(), authorisedAt, correlation).id(), entry.getValue()))
+                .forEach(offer -> offers.add(castOffer(offer)));
+        return new TypedAuthorisationEnvelope<>(snapshotId, snapshot.evaluatedAt(), snapshot.semanticPackId(),
+                subject, projectionType, fields, facts, offers);
     }
 
     Optional<AuthorisationEnvelope> authorise(
@@ -207,7 +323,7 @@ final class TypedActionService {
         if (offerId == null || intentId == null || payload == null
                 || payload.priorIntentId().filter(intentId::equals).isPresent()) throw new IntentRejectedException();
         try {
-            return transactions.execute(status -> acceptInTransaction(offerId, intentId, payload));
+            return transactions.execute(status -> acceptInTransaction(null, null, offerId, intentId, payload));
         } catch (IntentConflictException | IntentRejectedException exception) {
             throw exception;
         } catch (RuntimeException exception) {
@@ -215,11 +331,32 @@ final class TypedActionService {
         }
     }
 
-    private <C> Intent acceptInTransaction(UUID offerId, UUID intentId, TypedCandidatePayload<C> payload) {
+    Intent accept(
+            String tenantId, Principal principal, UUID offerId, UUID intentId, TypedCandidatePayload<?> payload) {
+        if (tenantId == null || principal == null || offerId == null || intentId == null || payload == null
+                || payload.priorIntentId().filter(intentId::equals).isPresent()) throw new IntentRejectedException();
+        try {
+            return transactions.execute(
+                    status -> acceptInTransaction(tenantId, principal, offerId, intentId, payload));
+        } catch (IntentConflictException | IntentRejectedException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            throw new IntentRejectedException();
+        }
+    }
+
+    private <C> Intent acceptInTransaction(
+            String expectedTenant,
+            Principal expectedPrincipal,
+            UUID offerId,
+            UUID intentId,
+            TypedCandidatePayload<C> payload) {
         TenantContext.assumeRuntimeRole(jdbc);
         String tenantId = jdbc.queryForObject(
                 "SELECT kernel.resolve_typed_action_offer_tenant(?)", String.class, offerId);
-        if (tenantId == null) throw new IntentRejectedException();
+        if (tenantId == null || expectedTenant != null && !expectedTenant.equals(tenantId)) {
+            throw new IntentRejectedException();
+        }
         TenantContext.useAfterRole(jdbc, tenantId);
         TypedOffer offer = jdbc.queryForObject("""
                 SELECT evaluation_snapshot_id, subject_type, subject_id, action_id, policy_id,
@@ -238,6 +375,9 @@ final class TypedActionService {
                         result.getString("authorisation_bundle_id"),
                         result.getString("authorisation_bundle_checksum")),
                 tenantId, offerId);
+        if (expectedPrincipal != null && !expectedPrincipal.equals(offer.principal())) {
+            throw new IntentRejectedException();
+        }
         ActionType<?, C, ?> action = typedAction(payload.actionType());
         if (action != payload.actionType()
                 || !offer.actionId().equals(action.qualifiedName())
@@ -246,10 +386,10 @@ final class TypedActionService {
                 || !currentSemanticPack(offer.semanticPackId(), offer.semanticPackChecksum())
                 || !currentBundle(offer.bundleId(), offer.bundleChecksum())) throw new IntentRejectedException();
         State state = currentState(tenantId, offer.subjectType(), offer.subjectId(), action.projectionType());
+        FactSet authorisationFacts = facts(action.projectionType(), state.value(), clock.instant());
         if (state.version() != offer.stateVersion() || !state.evidence().checksum().equals(offer.stateChecksum())
-                || !currentlyApplicable(action, offer.policyId(), state.value(), clock.instant())
-                || !cedar.allows(offer.principal(),
-                        new Subject(offer.subjectType(), offer.subjectId()), offer.actionId())) {
+                || !currentlyApplicable(action, offer.policyId(), state.value(), authorisationFacts)
+                || !cedarAllows(offer.principal(), offer.subjectId(), action, state.value(), authorisationFacts)) {
             throw new IntentRejectedException();
         }
         CanonicalEvidence evidence = canonical.encode(action.candidateType(), payload.value());
@@ -350,12 +490,13 @@ final class TypedActionService {
         if (state.version() != stored.stateVersion() || !state.evidence().checksum().equals(stored.stateChecksum())) {
             return terminal(stored, token, IntentStatus.STALE, IntentFailureReason.STATE_OR_SEMANTIC_STALE, processedAt);
         }
-        if (!currentlyApplicable(action, stored.policyId(), state.value(), processedAt)) {
+        FactSet authorisationFacts = facts(action.projectionType(), state.value(), processedAt);
+        if (!currentlyApplicable(action, stored.policyId(), state.value(), authorisationFacts)) {
             return terminal(stored, token, IntentStatus.FAILED, IntentFailureReason.NOT_APPLICABLE, processedAt);
         }
         if (!currentBundle(stored.bundleId(), stored.bundleChecksum())
-                || !cedar.allows(stored.principal(),
-                        new Subject(stored.subjectType(), stored.subjectId()), stored.actionId())) {
+                || !cedarAllows(
+                        stored.principal(), stored.subjectId(), action, state.value(), authorisationFacts)) {
             return terminal(stored, token, IntentStatus.FAILED, IntentFailureReason.AUTHORISATION_DENIED, processedAt);
         }
         Intent claimed = new Intent(stored.id(), stored.offerId(), IntentStatus.CLAIMED, stored.acceptedAt());
@@ -489,8 +630,8 @@ final class TypedActionService {
     }
 
     @SuppressWarnings("unchecked")
-    private boolean currentlyApplicable(ActionType<?, ?, ?> action, String policyId, Object projection, Instant at) {
-        FactSet facts = facts(action.projectionType(), projection, at);
+    private boolean currentlyApplicable(
+            ActionType<?, ?, ?> action, String policyId, Object projection, FactSet facts) {
         TypedApplicabilityPolicy<Object> policy = (TypedApplicabilityPolicy<Object>) policies.stream()
                 .filter(candidate -> candidate.target().equals(action.qualifiedName())
                         && candidate.id().equals(policyId)
@@ -508,6 +649,20 @@ final class TypedActionService {
                     typed.derive(projection, at).value().ifPresent(value -> values.put(typed.factType(), value));
                 });
         return FactSet.of(values);
+    }
+
+    private static FactSet factSet(List<TypedFact<?>> facts) {
+        var values = new LinkedHashMap<FactType<?>, Object>();
+        facts.forEach(fact -> values.put(fact.type(), fact.value()));
+        return FactSet.of(values);
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean cedarAllows(
+            Principal principal, String subjectId, ActionType<?, ?, ?> action,
+            Object projection, FactSet facts) {
+        ProjectionType<?, Object> type = (ProjectionType<?, Object>) action.projectionType();
+        return cedar.allows(principal, typedSubject(type, subjectId), type, projection, facts, action);
     }
 
     private State currentState(String tenantId, String subjectType, String subjectId, ProjectionType<?, ?> type) {
@@ -646,6 +801,29 @@ final class TypedActionService {
         return new TypedSubject<>(type, type.fromExternalId(externalId));
     }
 
+    private static <P, V> TypedFieldValue<P, V> fieldValue(
+            io.github.gmcnicol.kernel.application.FieldType<P, V> field, P projection) {
+        return new TypedFieldValue<>(field, field.value(projection));
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private TypedFact<?> decodeFact(CanonicalEvidence evidence) {
+        FactType type = Optional.ofNullable(factTypes.get(
+                        evidence.qualifiedType() + "@" + evidence.contractVersion()))
+                .orElseThrow(() -> new IllegalArgumentException("Unregistered generated Fact evidence"));
+        return new TypedFact<>(type, canonical.decode(type, evidence));
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static <P> TypedActionOffer<P, ?, ?> typedOffer(UUID id, ActionType<?, ?, ?> action) {
+        return new TypedActionOffer(id, action);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <P> TypedActionOffer<P, ?, ?> castOffer(TypedActionOffer<?, ?, ?> offer) {
+        return (TypedActionOffer<P, ?, ?>) offer;
+    }
+
     private static void addDescriptor(Map<String, SemanticType<?>> descriptors, SemanticType<?> descriptor) {
         SemanticType<?> previous = descriptors.putIfAbsent(key(descriptor), descriptor);
         if (previous != null && previous != descriptor) {
@@ -698,6 +876,23 @@ final class TypedActionService {
     private record TypedSnapshot(
             String subjectType, String subjectId, long version, String checksum,
             String projectionType, int projectionVersion) {}
+    private record AuthorisationSnapshot(
+            String subjectType,
+            String subjectId,
+            long version,
+            String stateChecksum,
+            String projectionType,
+            int projectionVersion,
+            Instant evaluatedAt,
+            String semanticPackId,
+            String semanticPackChecksum,
+            int formatVersion,
+            String content) {
+        private TypedSnapshot offerSnapshot() {
+            return new TypedSnapshot(subjectType, subjectId, version, stateChecksum, projectionType, projectionVersion);
+        }
+    }
+    private record ActionEntry(String actionId, String policyId) {}
     private record TypedOffer(
             UUID snapshotId, String subjectType, String subjectId, String actionId, String policyId,
             long stateVersion, String stateChecksum, String payloadType, int payloadVersion,

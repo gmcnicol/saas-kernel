@@ -14,11 +14,23 @@ public interface Kernel {
 
     AuthorisationEnvelope authorise(String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt);
 
+    <I, P> TypedAuthorisationEnvelope<I, P> authorise(
+            String tenantId, UUID snapshotId, Principal principal, Instant authorisedAt,
+            ProjectionType<I, P> projectionType);
+
     PresentationEnvelope present(String tenantId, UUID snapshotId, Principal principal, Instant presentedAt);
+
+    <I, P> TypedPresentationEnvelope<I, P> present(
+            String tenantId, UUID snapshotId, Principal principal, Instant presentedAt,
+            ProjectionType<I, P> projectionType);
 
     Intent accept(UUID actionOfferId, UUID intentId, CandidatePayload payload);
 
     <C> Intent accept(UUID actionOfferId, UUID intentId, TypedCandidatePayload<C> payload);
+
+    Intent accept(
+            String tenantId, Principal principal, UUID actionOfferId, UUID intentId,
+            TypedCandidatePayload<?> payload);
 
     Optional<Intent> processNext(Instant processedAt);
 

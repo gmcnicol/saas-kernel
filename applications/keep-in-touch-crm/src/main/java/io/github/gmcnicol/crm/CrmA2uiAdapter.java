@@ -1,7 +1,9 @@
 package io.github.gmcnicol.crm;
 
-import io.github.gmcnicol.kernel.application.PresentationActionOffer;
 import io.github.gmcnicol.kernel.application.PresentationEnvelope;
+import io.github.gmcnicol.kernel.application.TypedPresentationEnvelope;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.ContactId;
+import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpProjection;
 import io.github.gmcnicol.kernel.presentationpack.PresentationResult;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
@@ -43,14 +45,29 @@ final class CrmA2uiAdapter {
     }
 
     PresentationResult render(PresentationEnvelope envelope, String source) {
+        return observed(envelope.actionOffers().stream()
+                .map(offer -> new OfferView(
+                        offer.id(), offer.actionId(), offer.inputType(), 2, Set.of())).toList(), source);
+    }
+
+    PresentationResult render(TypedPresentationEnvelope<ContactId, FollowUpProjection> envelope, String source) {
+        return observed(envelope.actionOffers().stream().map(offer -> new OfferView(
+                offer.id(), offer.actionType().qualifiedName(), offer.actionType().candidateType().qualifiedName(),
+                offer.actionType().candidateType().contractVersion(),
+                offer.actionType().candidateType().fields().stream()
+                        .map(io.github.gmcnicol.kernel.application.FieldType::name)
+                        .collect(java.util.stream.Collectors.toSet()))).toList(), source);
+    }
+
+    private PresentationResult observed(List<OfferView> offers, String source) {
         Observation observation;
         try {
             observation = Observation.start("kernel.presentation.rendering", observations);
         } catch (RuntimeException exporterFailure) {
-            return renderValidated(envelope, source);
+            return renderValidated(offers, source);
         }
         try {
-            return renderValidated(envelope, source);
+            return renderValidated(offers, source);
         } catch (RuntimeException businessFailure) {
             safe(() -> observation.error(businessFailure));
             throw businessFailure;
@@ -59,15 +76,15 @@ final class CrmA2uiAdapter {
         }
     }
 
-    private PresentationResult renderValidated(PresentationEnvelope envelope, String source) {
+    private PresentationResult renderValidated(List<OfferView> offers, String source) {
         JsonNode messages = read(source);
         if (!messages.isArray() || messages.size() != 3) fail();
 
         String surface = createSurface(messages.get(0));
         Map<String, JsonNode> components = updateComponents(messages.get(1), surface);
         JsonNode data = updateData(messages.get(2), surface);
-        Graph graph = validateGraph(components, envelope, data);
-        String html = render(graph.root(), components, data, envelope, new HashSet<>());
+        Graph graph = validateGraph(components, offers, data);
+        String html = render(graph.root(), components, data, offers, new HashSet<>());
         if (html.getBytes(StandardCharsets.UTF_8).length > MAX_OUTPUT_BYTES) fail();
         return new PresentationResult(html, patch(html), graph.offers());
     }
@@ -132,16 +149,16 @@ final class CrmA2uiAdapter {
     }
 
     private static Graph validateGraph(
-            Map<String, JsonNode> components, PresentationEnvelope envelope, JsonNode data) {
+            Map<String, JsonNode> components, List<OfferView> offers, JsonNode data) {
         Set<String> referenced = new HashSet<>();
-        Set<UUID> offers = new HashSet<>();
+        Set<UUID> renderedOffers = new HashSet<>();
         var budget = new OutputBudget();
         for (var entry : components.entrySet()) {
             JsonNode component = entry.getValue();
             switch (text(component, "component")) {
                 case "Column" -> validateColumn(component, referenced);
                 case "Text" -> validateText(component, data, budget);
-                case "Button" -> offers.add(validateButton(component, referenced, envelope, data, budget));
+                case "Button" -> renderedOffers.add(validateButton(component, referenced, offers, data, budget));
                 default -> fail();
             }
         }
@@ -150,7 +167,7 @@ final class CrmA2uiAdapter {
         Set<String> visited = new HashSet<>();
         visit("root", components, new HashSet<>(), visited, false);
         if (visited.size() != components.size()) fail();
-        return new Graph("root", offers);
+        return new Graph("root", renderedOffers);
     }
 
     private static void validateColumn(JsonNode component, Set<String> referenced) {
@@ -171,7 +188,7 @@ final class CrmA2uiAdapter {
     private static UUID validateButton(
             JsonNode component,
             Set<String> referenced,
-            PresentationEnvelope envelope,
+            List<OfferView> offers,
             JsonNode data,
             OutputBudget budget) {
         exact(component, "id", "component", "child", "action");
@@ -190,7 +207,11 @@ final class CrmA2uiAdapter {
         } catch (IllegalArgumentException exception) {
             throw new InvalidSurface();
         }
-        if (envelope.actionOffers().stream().noneMatch(offer -> offer.id().equals(offerId))) fail();
+        OfferView offer = offers.stream().filter(candidate -> candidate.id().equals(offerId))
+                .findFirst().orElseThrow(InvalidSurface::new);
+        Set<String> suppliedFields = new HashSet<>(contextFields);
+        suppliedFields.remove("actionOfferId");
+        if (!offer.fields().isEmpty() && !offer.fields().equals(suppliedFields)) fail();
         context.properties().stream()
                 .filter(entry -> !entry.getKey().equals("actionOfferId"))
                 .forEach(entry -> {
@@ -224,15 +245,15 @@ final class CrmA2uiAdapter {
             String id,
             Map<String, JsonNode> components,
             JsonNode data,
-            PresentationEnvelope envelope,
+            List<OfferView> offers,
             Set<String> ancestors) {
         if (!ancestors.add(id)) fail();
         JsonNode component = components.get(id);
         return switch (text(component, "component")) {
             case "Column" -> "<section id=\"" + escape(id) + "\" class=\"a2ui-column\">"
-                    + joinChildren(component.get("children"), components, data, envelope, ancestors) + "</section>";
+                    + joinChildren(component.get("children"), components, data, offers, ancestors) + "</section>";
             case "Text" -> renderText(id, component, data);
-            case "Button" -> renderButton(id, component, components, data, envelope, ancestors);
+            case "Button" -> renderButton(id, component, components, data, offers, ancestors);
             default -> throw new InvalidSurface();
         };
     }
@@ -241,11 +262,11 @@ final class CrmA2uiAdapter {
             JsonNode children,
             Map<String, JsonNode> components,
             JsonNode data,
-            PresentationEnvelope envelope,
+            List<OfferView> offers,
             Set<String> ancestors) {
         var html = new StringBuilder();
         children.forEach(child -> html.append(render(
-                scalarText(child), components, data, envelope, new HashSet<>(ancestors))));
+                scalarText(child), components, data, offers, new HashSet<>(ancestors))));
         return html.toString();
     }
 
@@ -260,11 +281,11 @@ final class CrmA2uiAdapter {
             JsonNode component,
             Map<String, JsonNode> components,
             JsonNode data,
-            PresentationEnvelope envelope,
+            List<OfferView> offers,
             Set<String> ancestors) {
         JsonNode context = component.get("action").get("event").get("context");
         UUID offerId = UUID.fromString(text(context, "actionOfferId"));
-        PresentationActionOffer offer = envelope.actionOffers().stream()
+        OfferView offer = offers.stream()
                 .filter(candidate -> candidate.id().equals(offerId)).findFirst().orElseThrow(InvalidSurface::new);
         StringBuilder fields = new StringBuilder();
         context.properties().stream()
@@ -275,10 +296,12 @@ final class CrmA2uiAdapter {
         return "<form method=\"post\" action=\"/presentation/intents/" + offerId
                 + "\" data-on:submit=\"@post('/presentation/intents/" + offerId
                 + "', {contentType: 'form'})\"><input type=\"hidden\" name=\"intentId\" value=\""
-                + UUID.randomUUID() + "\"><input type=\"hidden\" name=\"payloadType\" value=\""
-                + escape(offer.inputType()) + "\"><input type=\"hidden\" name=\"payloadVersion\" value=\"2\">"
+                + UUID.randomUUID() + "\"><input type=\"hidden\" name=\"actionType\" value=\""
+                + escape(offer.actionType()) + "\"><input type=\"hidden\" name=\"payloadType\" value=\""
+                + escape(offer.inputType()) + "\"><input type=\"hidden\" name=\"payloadVersion\" value=\""
+                + offer.inputVersion() + "\">"
                 + fields + "<button id=\"" + escape(id) + "\" type=\"submit\">"
-                + render(text(component, "child"), components, data, envelope, new HashSet<>(ancestors))
+                + render(text(component, "child"), components, data, offers, new HashSet<>(ancestors))
                 + "</button></form>";
     }
 
@@ -349,6 +372,13 @@ final class CrmA2uiAdapter {
     private record Graph(String root, Set<UUID> offers) {
         private Graph {
             offers = Set.copyOf(offers);
+        }
+    }
+
+    private record OfferView(
+            UUID id, String actionType, String inputType, int inputVersion, Set<String> fields) {
+        private OfferView {
+            fields = Set.copyOf(fields);
         }
     }
 
