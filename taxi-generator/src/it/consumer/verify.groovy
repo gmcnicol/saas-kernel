@@ -1,0 +1,42 @@
+def generated = new File(basedir, 'target/generated-sources/taxi/example/bindings/customer/crm/Customer.java')
+def compiled = new File(basedir, 'target/classes/example/Consumer.class')
+def wrapper = new File(basedir, 'target/generated-sources/taxi/example/bindings/customer/crm/CustomerId.java')
+def action = new File(basedir, 'target/generated-sources/taxi/example/bindings/customer/crm/CustomerActions.java')
+def union = new File(basedir, 'target/generated-sources/taxi/example/bindings/customer/crm/CustomerEvent.java')
+def registry = new File(basedir, 'target/generated-sources/taxi/example/bindings/GeneratedSemanticRegistry.java')
+assert generated.isFile()
+assert compiled.isFile()
+assert registry.isFile()
+assert action.text.contains('customer.crm.CustomerActions.change')
+assert union.text.contains('sealed interface CustomerEvent permits')
+assert !new File(basedir, 'target/generated-sources/taxi/example/bindings/customer/crm/DocumentationOnly.java').exists()
+assert !generated.text.contains('io.github.gmcnicol.kernel.internal')
+assert wrapper.text.contains('@JsonValue')
+assert wrapper.text.contains('JsonCreator.Mode.DELEGATING')
+assert new File(basedir, 'build.log').text.contains('linter rule no-primitive-types-on-models')
+def imported = new File(basedir,
+        'target/classes/META-INF/saas-kernel/imports/179b47ce873f35fe0bc948e05cc8fa40923fa48bc85c99193567e29957293f66.taxi')
+assert imported.isFile()
+assert new File(basedir, 'target/classes/META-INF/saas-kernel/publication/manifest.properties').isFile()
+
+def hashes = {
+    def digest = java.security.MessageDigest.getInstance('SHA-256')
+    def root = new File(basedir, 'target/generated-sources/taxi')
+    def files = []
+    root.eachFileRecurse(groovy.io.FileType.FILES) { files << it }
+    files.sort { it.path }.each { file ->
+        digest.update(root.toPath().relativize(file.toPath()).toString().bytes)
+        digest.update(file.bytes)
+    }
+    digest.digest()
+}
+def first = hashes()
+def maven = new File(System.getProperty('maven.home'), 'bin/mvn').absolutePath
+def command = [maven, '-q', "-Dmaven.repo.local=${localRepositoryPath}", 'clean', 'generate-sources'].collect { it.toString() }
+assert new ProcessBuilder(command).directory(basedir).inheritIO().start().waitFor() == 0
+assert java.util.Arrays.equals(first, hashes())
+
+def taxi = new File(basedir, 'src/main/taxi/customer.taxi')
+taxi.text = taxi.text.replace('\nmodel Removable {}\n', '\n')
+assert new ProcessBuilder(command.dropRight(2) + ['generate-sources']).directory(basedir).inheritIO().start().waitFor() == 0
+assert !new File(basedir, 'target/generated-sources/taxi/example/bindings/customer/crm/Removable.java').exists()

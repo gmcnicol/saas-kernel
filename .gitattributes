@@ -1,0 +1,3 @@
+*.cedar text eol=lf
+*.properties text eol=lf
+*.taxi text eol=lf

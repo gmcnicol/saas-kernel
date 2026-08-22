@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>example</groupId><artifactId>unsupported-stream</artifactId><version>1</version>
+    <dependencies>
+        <dependency>
+            <groupId>io.github.gmcnicol</groupId><artifactId>saas-kernel</artifactId><version>@project.version@</version>
+        </dependency>
+    </dependencies>
+    <build><plugins><plugin>
+        <groupId>io.github.gmcnicol</groupId><artifactId>saas-kernel-taxi-generator</artifactId><version>@project.version@</version>
+        <configuration><basePackage>example.bindings</basePackage></configuration>
+        <executions><execution><goals><goal>generate</goal></goals></execution></executions>
+    </plugin></plugins></build>
+</project>

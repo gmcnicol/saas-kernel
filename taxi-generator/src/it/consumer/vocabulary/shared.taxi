@@ -1,0 +1,3 @@
+import io.github.gmcnicol.kernel.taxi.Published
+namespace shared
+@Published type SharedEmail inherits String

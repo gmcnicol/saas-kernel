@@ -1,0 +1,5 @@
+CREATE ROLE kernel_runtime NOLOGIN NOBYPASSRLS;
+CREATE ROLE kernel_worker NOLOGIN NOBYPASSRLS;
+CREATE ROLE kernel_test_login LOGIN PASSWORD 'kernel-test' NOSUPERUSER NOBYPASSRLS NOINHERIT;
+GRANT kernel_runtime TO kernel_test_login;
+GRANT kernel_worker TO kernel_test_login;

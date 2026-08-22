@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>example</groupId>
+    <artifactId>taxi-consumer</artifactId>
+    <version>1.0.0</version>
+    <properties><maven.compiler.release>25</maven.compiler.release></properties>
+    <dependencies>
+        <dependency>
+            <groupId>io.github.gmcnicol</groupId>
+            <artifactId>saas-kernel</artifactId>
+            <version>@project.version@</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>io.github.gmcnicol</groupId>
+                <artifactId>saas-kernel-taxi-generator</artifactId>
+                <version>@project.version@</version>
+                <configuration>
+                    <basePackage>example.bindings</basePackage>
+                    <imports>
+                        <import>
+                            <file>vocabulary/shared.taxi</file>
+                            <checksum>179b47ce873f35fe0bc948e05cc8fa40923fa48bc85c99193567e29957293f66</checksum>
+                        </import>
+                    </imports>
+                </configuration>
+                <executions><execution><goals><goal>generate</goal></goals></execution></executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>io.github.gmcnicol</groupId>
+        <artifactId>saas-kernel-reactor</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../..</relativePath>
+    </parent>
+    <artifactId>keep-in-touch-crm</artifactId>
+    <properties><maven.deploy.skip>true</maven.deploy.skip></properties>
+    <dependencies>
+        <dependency><groupId>io.github.gmcnicol</groupId><artifactId>saas-kernel</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter</artifactId></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jdbc</artifactId></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-security</artifactId></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-opentelemetry</artifactId></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-flyway</artifactId></dependency>
+        <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><scope>runtime</scope></dependency>
+        <dependency><groupId>org.flywaydb</groupId><artifactId>flyway-database-postgresql</artifactId><scope>runtime</scope></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>io.github.gmcnicol</groupId><artifactId>saas-kernel-acceptance-contract</artifactId><version>${project.version}</version><scope>test</scope></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-webmvc-test</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.springframework.security</groupId><artifactId>spring-security-test</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-testcontainers</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-junit-jupiter</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-postgresql</artifactId><scope>test</scope></dependency>
+    </dependencies>
+    <build>
+        <resources>
+            <resource><directory>src/main/resources</directory></resource>
+            <resource><directory>src/main/resources-filtered</directory><filtering>true</filtering></resource>
+        </resources>
+        <plugins>
+        <plugin>
+            <groupId>io.github.gmcnicol</groupId>
+            <artifactId>saas-kernel-taxi-generator</artifactId>
+            <version>${project.version}</version>
+            <configuration>
+                <sourceDirectory>${project.basedir}/src/main/resources/semantic-pack</sourceDirectory>
+                <basePackage>io.github.gmcnicol.crm.bindings</basePackage>
+            </configuration>
+            <executions><execution><goals><goal>generate</goal></goals></execution></executions>
+        </plugin>
+        <plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId><configuration><image><name>ghcr.io/gmcnicol/keep-in-touch-crm:${project.version}</name></image></configuration></plugin>
+        <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-failsafe-plugin</artifactId><executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions></plugin>
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId><artifactId>maven-antrun-plugin</artifactId><version>${maven-antrun-plugin.version}</version>
+            <executions><execution><id>application-checksums</id><phase>process-classes</phase><goals><goal>run</goal></goals><configuration><target>
+                <concat destfile="${project.build.directory}/semantic-pack.manifest" outputencoding="UTF-8"><filelist dir="${project.build.outputDirectory}" files="semantic-pack/manifest.properties"/><filterchain><linecontainsregexp negate="true"><regexp pattern="^checksum="/></linecontainsregexp><fixcrlf eol="lf" fixlast="true"/></filterchain></concat>
+                <concat destfile="${project.build.directory}/semantic-pack.content" binary="true"><filelist dir="${project.build.directory}" files="semantic-pack.manifest"/><filelist dir="${project.build.outputDirectory}" files="semantic-pack/schema.taxi,META-INF/saas-kernel/semantic-index.properties,io/github/gmcnicol/crm/KeepInTouchCrmApplication.class,io/github/gmcnicol/crm/TypedCrmSemanticConfiguration.class"/><sort><fileset dir="${project.build.outputDirectory}" includes="io/github/gmcnicol/crm/bindings/**/*.class"/></sort></concat>
+                <checksum file="${project.build.directory}/semantic-pack.content" property="semantic.checksum" algorithm="SHA-256"/>
+                <echo file="${project.build.outputDirectory}/semantic-pack/checksum.sha256">${semantic.checksum}</echo>
+                <concat destfile="${project.build.directory}/authorisation.manifest" outputencoding="UTF-8"><filelist dir="${project.build.outputDirectory}" files="authorisation/manifest.properties"/><filterchain><linecontainsregexp negate="true"><regexp pattern="^checksum="/></linecontainsregexp><fixcrlf eol="lf" fixlast="true"/></filterchain></concat>
+                <concat destfile="${project.build.directory}/authorisation.content" binary="true"><filelist dir="${project.build.directory}" files="authorisation.manifest"/><filelist dir="${project.build.outputDirectory}" files="authorisation/schema.cedar,authorisation/policies.cedar,io/github/gmcnicol/crm/KeepInTouchCrmApplication.class"/></concat>
+                <checksum file="${project.build.directory}/authorisation.content" property="authorisation.checksum" algorithm="SHA-256"/>
+                <echo file="${project.build.outputDirectory}/authorisation/checksum.sha256">${authorisation.checksum}</echo>
+            </target></configuration></execution></executions>
+        </plugin>
+        </plugins>
+    </build>
+</project>

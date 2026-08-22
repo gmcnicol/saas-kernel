@@ -4,6 +4,10 @@ A reusable core for products whose current facts determine which human actions a
 
 ## Language
 
+**Application**:
+The deployable product owning its domain semantics, data, Business Workflow, authorisation, presentation, and external integrations while using Kernel mechanisms.
+_Avoid_: Host, pack assembly
+
 **Kernel**:
 The product-neutral contracts and mechanisms shared by every semantic workflow product.
 _Avoid_: Platform, framework, core kernel
@@ -12,9 +16,25 @@ _Avoid_: Platform, framework, core kernel
 An extension defining a product domain through semantic types, facts, actions, policies, and action handling.
 _Avoid_: Product pack, domain plugin
 
+**Taxi Java Binding**:
+The generated Java representation of a semantic type or operation declared in Taxi. Taxi remains the source of meaning.
+_Avoid_: Canonical schema, hand-written DTO, domain model
+
+**Semantic Index**:
+The deterministic inventory connecting one Semantic Pack's Taxi meaning, Taxi Java Bindings, required Semantic Implementations, package dependencies, and generation versions.
+_Avoid_: Deployment manifest, runtime registry
+
+**Semantic Implementation**:
+The single Application-authored behaviour filling one generated derivation, applicability, handler, or concrete Event projector slot.
+_Avoid_: Taxi Java Binding, generated behaviour
+
 **Presentation Pack**:
 An extension defining how semantic capabilities appear and behave for a particular audience or workflow.
 _Avoid_: UI theme, semantic pack
+
+**Authorisation Bundle**:
+The versioned Cedar schema and policy set governing principal-specific access for an application.
+_Avoid_: Cedar pack, policy pack, semantic pack
 
 **Acceptance Fixture**:
 A product-shaped scenario that validates the Kernel contract. Acceptance Fixtures are contrasting peers, not levels in a complexity ladder.
@@ -34,6 +54,14 @@ _Avoid_: Permission, raw field
 An immutable result containing Facts and Applicable Actions derived for a subject from one Projected State version, at an explicit evaluation time, using one Semantic Pack version.
 _Avoid_: Evidence graph, decision log
 
+**Canonical Evidence**:
+The exact versioned UTF-8 JSON and checksum persisted for one typed Projected State, Fact, Candidate Payload, or Event. It protects semantic history and is not an Application business model or query store.
+_Avoid_: Source of truth, business JSON, relational projection
+
+**Authorisation Envelope**:
+A principal-specific projection containing only Cedar-authorised fields, Facts, and Action Offers for one Evaluation Snapshot.
+_Avoid_: Authorised Evaluation, Evaluation Snapshot
+
 **Action**:
 A business capability defined by a Semantic Pack.
 _Avoid_: Command, button
@@ -50,8 +78,12 @@ _Avoid_: Applicable Action, permission
 A durable, accepted request to perform an Action against a known state version.
 _Avoid_: Intention, command, job
 
+**Candidate Payload**:
+The versioned Action input submitted with an Action Offer for Taxi validation before Intent acceptance.
+_Avoid_: Intent, unvalidated Intent
+
 **Stale Intent**:
-An Intent whose expected state version no longer matches current Projected State, so it cannot be handled as originally accepted.
+An Intent whose expected Projected State or Semantic Pack no longer matches current execution context, so it cannot be handled as originally accepted.
 _Avoid_: Failed Intent, obsolete command
 
 **Event**:
@@ -61,3 +93,9 @@ _Avoid_: Intent, notification
 **Business Workflow**:
 The product-specific progression of work as Projected State changes and new Actions become applicable. A Business Workflow may use explicit domain concepts, but is not a universal stage-and-transition graph.
 _Avoid_: Intent lifecycle, workflow engine
+
+## Publication
+
+**Publication Bundle**:
+The deterministic, checksummed set of explicitly published Taxi definitions and safe dependencies made available for external schema tooling.
+_Avoid_: Runtime registry, authority endpoint

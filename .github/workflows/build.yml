@@ -1,0 +1,75 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+      - run: ./mvnw --batch-mode verify
+      - name: Verify distributable artefacts
+        shell: bash
+        run: |
+          version=$(./mvnw -q help:evaluate -Dexpression=project.version -DforceStdout)
+          test -f "kernel/target/saas-kernel-$version.jar"
+          test -f "kernel/target/saas-kernel-$version-sources.jar"
+          test -f "kernel/target/saas-kernel-$version-javadoc.jar"
+          test -f "kernel/target/saas-kernel-$version.jar.sha256"
+          test -f kernel/.flattened-pom.xml
+          test -f "taxi-generator/target/saas-kernel-taxi-generator-$version.jar"
+          test -f "taxi-generator/target/saas-kernel-taxi-generator-$version-sources.jar"
+          test -f "taxi-generator/target/saas-kernel-taxi-generator-$version-javadoc.jar"
+          test -f "taxi-generator/target/saas-kernel-taxi-generator-$version.jar.sha256"
+          test -f taxi-generator/.flattened-pom.xml
+          javap -verbose -classpath "taxi-generator/target/saas-kernel-taxi-generator-$version.jar" \
+            io.github.gmcnicol.taxi.GenerateMojo | grep -q 'major version: 65'
+          ! grep -q '<parent>' kernel/.flattened-pom.xml
+          ! grep -q '<parent>' taxi-generator/.flattened-pom.xml
+          grep -q '<url>https://github.com/gmcnicol/saas-kernel</url>' kernel/.flattened-pom.xml
+          jar tf "applications/keep-in-touch-crm/target/keep-in-touch-crm-$version.jar" | grep -q '^BOOT-INF/'
+          jar tf "applications/ledgerling/target/ledgerling-$version.jar" | grep -q '^BOOT-INF/'
+          test -z "$(find . -name Dockerfile -print -quit)"
+      - name: Check Kernel binary compatibility
+        shell: bash
+        run: |
+          metadata_url=https://repo1.maven.org/maven2/io/github/gmcnicol/saas-kernel/maven-metadata.xml
+          status=$(curl --silent --show-error --output /tmp/kernel-maven-metadata.xml \
+            --write-out '%{http_code}' "$metadata_url")
+          if [[ "$status" == 404 ]]; then
+            echo "No released Kernel version exists yet"
+            exit 0
+          fi
+          [[ "$status" == 200 ]] || { echo "Maven Central returned HTTP $status"; exit 1; }
+          metadata=$(</tmp/kernel-maven-metadata.xml)
+          latest=$(sed -n 's:.*<release>\(.*\)</release>.*:\1:p' <<<"$metadata")
+          if [[ -z "$latest" ]]; then
+            echo "Maven Central metadata has no release version"
+            exit 1
+          fi
+          current=$(./mvnw -q -pl kernel help:evaluate -Dexpression=project.version -DforceStdout)
+          break_binary=true
+          if (( ${current%%.*} > ${latest%%.*} )); then break_binary=false; fi
+          ./mvnw --batch-mode -pl kernel -Djapicmp.oldVersion="$latest" \
+            -Djapicmp.breakBinary="$break_binary" japicmp:cmp
+
+  images:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+      - run: ./mvnw --batch-mode -DskipTests install
+      - run: ./mvnw --batch-mode -DskipTests -f applications/keep-in-touch-crm/pom.xml spring-boot:build-image
+      - run: ./mvnw --batch-mode -DskipTests -f applications/ledgerling/pom.xml spring-boot:build-image

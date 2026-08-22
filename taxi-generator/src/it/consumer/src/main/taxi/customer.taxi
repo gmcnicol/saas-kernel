@@ -1,0 +1,54 @@
+import io.github.gmcnicol.kernel.taxi.Subject
+import io.github.gmcnicol.kernel.taxi.Contract
+import io.github.gmcnicol.kernel.taxi.ProjectedState
+import io.github.gmcnicol.kernel.taxi.Event
+import io.github.gmcnicol.kernel.taxi.ActionService
+
+namespace customer.crm
+
+@Subject
+type CustomerId inherits String
+
+@Subject
+type EnabledId inherits Boolean
+
+@Subject
+type RatioId inherits Double
+
+enum Status {
+    Active,
+    Dormant
+}
+
+@Contract(version = 1)
+@ProjectedState(subject = "customer.crm.CustomerId")
+model Customer {
+    id: CustomerId
+    name: String
+    nickname: String?
+    tags: String[]
+    aliases: String[]?
+    status: Status
+}
+
+model Removable {}
+
+@Contract(version = 1)
+model ChangeCustomer { note: String }
+
+@Contract(version = 1) @Event
+closed model CustomerChanged { id: CustomerId }
+
+@Contract(version = 1) @Event
+closed model CustomerSuspended { id: CustomerId }
+
+closed model CustomerEvent = CustomerChanged | CustomerSuspended
+
+service DocumentationOnly {
+    operation describe(input: ChangeCustomer): CustomerChanged[]
+}
+
+@ActionService(projection = "customer.crm.Customer")
+service CustomerActions {
+    operation change(input: ChangeCustomer): CustomerEvent[]
+}

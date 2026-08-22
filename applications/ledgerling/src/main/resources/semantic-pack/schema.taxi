@@ -1,0 +1,64 @@
+import io.github.gmcnicol.kernel.taxi.Subject
+import io.github.gmcnicol.kernel.taxi.Contract
+import io.github.gmcnicol.kernel.taxi.ProjectedState
+import io.github.gmcnicol.kernel.taxi.Fact
+import io.github.gmcnicol.kernel.taxi.Event
+import io.github.gmcnicol.kernel.taxi.ActionService
+
+namespace io.github.gmcnicol.ledgerling
+
+@Subject
+type FilingId inherits String
+type DocumentRequestId inherits String
+type ClientReference inherits String
+
+@Contract(version = 1)
+@ProjectedState(subject = "io.github.gmcnicol.ledgerling.FilingId")
+model FilingProjection {
+    filingId: FilingId
+    requestId: DocumentRequestId
+    clientReference: ClientReference
+    filingDueAt: Instant
+    recordsOutstanding: Boolean
+    preparationStarted: Boolean
+}
+
+@Contract(version = 1)
+@Fact(projection = "io.github.gmcnicol.ledgerling.FilingProjection")
+model FilingDueSoon {
+    filingDueAt: Instant
+}
+
+@Contract(version = 1)
+@Fact(projection = "io.github.gmcnicol.ledgerling.FilingProjection")
+model RecordsOutstanding {
+    requestId: DocumentRequestId
+}
+
+@Contract(version = 1)
+model RecordRecordsReceivedCandidateV1 {
+    receivedAt: Instant
+}
+
+@Contract(version = 1)
+@Event
+model RecordsReceivedEventV1 {
+    requestId: DocumentRequestId
+}
+
+@Contract(version = 1)
+model StartPreparationCandidateV1 {
+    confirmed: Boolean
+}
+
+@Contract(version = 1)
+@Event
+model PreparationStartedEventV1 {
+    requestId: DocumentRequestId
+}
+
+@ActionService(projection = "io.github.gmcnicol.ledgerling.FilingProjection")
+service LedgerlingActions {
+    operation recordRecordsReceived(input: RecordRecordsReceivedCandidateV1): RecordsReceivedEventV1[]
+    operation startPreparation(input: StartPreparationCandidateV1): PreparationStartedEventV1[]
+}

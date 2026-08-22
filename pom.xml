@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.0</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>io.github.gmcnicol</groupId>
+    <artifactId>saas-kernel-reactor</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>SaaS Kernel Reactor</name>
+    <description>Product-neutral semantic workflow mechanics for Spring Boot Applications.</description>
+    <url>https://github.com/gmcnicol/saas-kernel</url>
+
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+    <developers>
+        <developer>
+            <name>Gareth McNicol</name>
+            <email>1968845+gmcnicol@users.noreply.github.com</email>
+            <url>https://github.com/gmcnicol</url>
+        </developer>
+    </developers>
+    <scm>
+        <connection>scm:git:https://github.com/gmcnicol/saas-kernel.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/gmcnicol/saas-kernel.git</developerConnection>
+        <url>https://github.com/gmcnicol/saas-kernel</url>
+        <tag>HEAD</tag>
+    </scm>
+
+    <modules>
+        <module>kernel</module>
+        <module>taxi-generator</module>
+        <module>acceptance-contract</module>
+        <module>applications/keep-in-touch-crm</module>
+        <module>applications/ledgerling</module>
+    </modules>
+
+    <properties>
+        <java.version>25</java.version>
+        <spring-modulith.version>2.1.0</spring-modulith.version>
+        <testcontainers.version>2.0.5</testcontainers.version>
+        <taxi.version>1.70.0</taxi.version>
+        <cedar-java.version>4.2.3</cedar-java.version>
+        <maven-antrun-plugin.version>3.2.0</maven-antrun-plugin.version>
+        <central-publishing-maven-plugin.version>0.9.0</central-publishing-maven-plugin.version>
+        <kotlin.version>2.2.21</kotlin.version>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.modulith</groupId>
+                <artifactId>spring-modulith-bom</artifactId>
+                <version>${spring-modulith.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-bom</artifactId>
+                <version>${testcontainers.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.codehaus.mojo</groupId>
+                    <artifactId>flatten-maven-plugin</artifactId>
+                    <version>1.7.3</version>
+                    <configuration><flattenMode>ossrh</flattenMode></configuration>
+                    <executions>
+                        <execution>
+                            <id>flatten-consumer-pom</id>
+                            <phase>process-resources</phase>
+                            <goals><goal>flatten</goal></goals>
+                        </execution>
+                        <execution>
+                            <id>clean-flattened-pom</id>
+                            <goals><goal>clean</goal></goals>
+                        </execution>
+                    </executions>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-source-plugin</artifactId>
+                    <executions><execution><id>attach-sources</id><goals><goal>jar-no-fork</goal></goals></execution></executions>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-javadoc-plugin</artifactId>
+                    <executions><execution><id>attach-javadocs</id><goals><goal>jar</goal></goals></execution></executions>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-antrun-plugin</artifactId>
+                    <version>${maven-antrun-plugin.version}</version>
+                    <executions>
+                        <execution>
+                            <id>release-checksums</id>
+                            <phase>verify</phase>
+                            <goals><goal>run</goal></goals>
+                            <configuration>
+                                <target>
+                                    <checksum algorithm="SHA-256" fileext=".sha256">
+                                        <fileset dir="${project.build.directory}">
+                                            <include name="${project.build.finalName}.jar"/>
+                                            <include name="${project.build.finalName}-sources.jar"/>
+                                            <include name="${project.build.finalName}-javadoc.jar"/>
+                                        </fileset>
+                                    </checksum>
+                                </target>
+                            </configuration>
+                        </execution>
+                    </executions>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+
+    <profiles>
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.8</version>
+                        <executions>
+                            <execution>
+                                <id>sign-release</id>
+                                <phase>verify</phase>
+                                <goals><goal>sign</goal></goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>${central-publishing-maven-plugin.version}</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>
