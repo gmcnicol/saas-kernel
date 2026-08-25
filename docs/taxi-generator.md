@@ -2,6 +2,8 @@
 
 The Maven goal runs in `generate-sources`, compiles the Kernel standard schema with all local and imported Taxi, validates the supported subset, atomically replaces its output, registers Java sources, and packages the Semantic Index and publication resources. Runtime and plugin versions must match exactly.
 
+The generator deliberately uses the Taxi compiler as the front-end. Taxi owns parsing, import compilation, language validation, compiler diagnostics, and the `TaxiDocument` seam. The Kernel plugin owns only the Kernel-specific layer over that document: Java bindings, semantic descriptors, implementation slots, the closed transport registry, Semantic Index, publication bundle, and Kernel subset checks. It must not introduce a parallel Taxi parser or a second schema model.
+
 ## Java mapping
 
 | Taxi | Java |
