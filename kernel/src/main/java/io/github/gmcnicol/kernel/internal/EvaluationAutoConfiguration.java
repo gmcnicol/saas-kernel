@@ -9,6 +9,8 @@ import io.github.gmcnicol.kernel.semanticpack.TypedFactDerivation;
 import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.SemanticBindings;
 import io.github.gmcnicol.kernel.semanticpack.SemanticPack;
+import io.github.gmcnicol.kernel.semanticpack.TypedCompatibilityAdapter;
+import io.github.gmcnicol.kernel.semanticpack.TypedCompatibilityRequirement;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
@@ -172,8 +174,10 @@ public class EvaluationAutoConfiguration {
     @Bean
     SemanticCodec semanticCodec(
             List<SemanticBindings> bindings,
+            List<TypedCompatibilityAdapter<?, ?>> compatibilityAdapters,
+            List<TypedCompatibilityRequirement<?, ?>> compatibilityRequirements,
             io.github.gmcnicol.kernel.application.CanonicalCodec.Limits limits) {
-        return new SemanticCodec(bindings, limits);
+        return new SemanticCodec(bindings, compatibilityAdapters, compatibilityRequirements, limits);
     }
 
     @Bean
