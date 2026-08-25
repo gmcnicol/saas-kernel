@@ -57,7 +57,8 @@ class TypedCrmSemanticConfiguration {
             JdbcTemplate jdbc) {
         return TypedCrmActions.RECORD_INTERACTION.bindProjector(
                 InteractionRecordedEventV1.TYPE, transition -> jdbc.update("""
-                        UPDATE crm_contact_engagement_projection SET open_follow_up_id = NULL
+                        UPDATE crm_contact_engagement_projection
+                        SET open_follow_up_id = NULL, state_version = state_version + 1
                         WHERE tenant_id = ? AND contact_id = ?
                         """, transition.tenantId(), transition.event().contactId().value()));
     }

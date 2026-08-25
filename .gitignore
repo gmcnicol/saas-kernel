@@ -1,3 +1,4 @@
 target/
 .flattened-pom.xml
 __pycache__/
+.codegraph/

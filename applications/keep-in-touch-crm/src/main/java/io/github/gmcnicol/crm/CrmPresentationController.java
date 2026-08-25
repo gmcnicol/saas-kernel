@@ -61,7 +61,7 @@ final class CrmPresentationController {
             @PathVariable String experience,
             Authentication authentication,
             @RequestParam UUID snapshotId) {
-        return shell(render(experience, caller(authentication), snapshotId).html());
+        return CrmPresentation.shell(render(experience, caller(authentication), snapshotId).html());
     }
 
     @GetMapping(path = "/presentation/crm/{experience}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -113,7 +113,7 @@ final class CrmPresentationController {
                 Instant.now(clock), FollowUpProjection.TYPE));
     }
 
-    private static Caller caller(Authentication authentication) {
+    static Caller caller(Authentication authentication) {
         if (authentication == null || !authentication.isAuthenticated()) {
             throw new AccessDeniedException("Authenticated caller required");
         }
@@ -131,19 +131,11 @@ final class CrmPresentationController {
         return values.getFirst().substring(prefix.length());
     }
 
-    private record Caller(String tenantId, String principalType, String principalId) {}
+    record Caller(String tenantId, String principalType, String principalId) {}
 
     @ExceptionHandler({IllegalArgumentException.class, IntentRejectedException.class, IntentConflictException.class})
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     void invalidRequest() {}
-
-    private static String shell(String body) {
-        return "<!doctype html><html><head><script type=\"module\" "
-                + "src=\"https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.2/bundles/datastar.js\" "
-                + "integrity=\"sha384-SnyFlWTdFL3c8+9/1WsPuMFBq6AQOGC1LmS9upY4YkM3En3wZr5q2UvydHaMgOVG\" "
-                + "crossorigin=\"anonymous\">"
-                + "</script></head><body>" + body + "</body></html>";
-    }
 
     private static String single(MultiValueMap<String, String> form, String name) {
         var values = form.get(name);
