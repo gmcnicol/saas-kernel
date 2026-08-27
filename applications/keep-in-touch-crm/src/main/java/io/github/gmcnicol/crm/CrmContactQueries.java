@@ -5,6 +5,7 @@ import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.FollowUpProjection
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -23,6 +24,10 @@ final class CrmContactQueries {
     }
 
     FollowUpProjection projection(String tenantId, String contactId) {
+        return storedProjection(tenantId, contactId).projection();
+    }
+
+    StoredProjection storedProjection(String tenantId, String contactId) {
         if (tenantId == null || tenantId.isBlank() || contactId == null || contactId.isBlank()) {
             throw new IllegalArgumentException("Contact projection requires tenant and contact");
         }
@@ -30,13 +35,52 @@ final class CrmContactQueries {
             jdbc.execute("SET LOCAL ROLE kernel_runtime");
             jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, tenantId);
             return jdbc.queryForObject("""
-                    SELECT contact_id, next_contact_due_at, open_follow_up_id IS NULL AS follow_up_completed
+                    SELECT contact_id, next_contact_due_at, open_follow_up_id IS NULL AS follow_up_completed,
+                           state_version
                     FROM crm_contact_engagement_projection
                     WHERE tenant_id = ? AND contact_id = ?
-                    """, (result, row) -> new FollowUpProjection(
-                            new ContactId(result.getString("contact_id")),
-                            result.getTimestamp("next_contact_due_at").toInstant(),
-                            result.getBoolean("follow_up_completed")), tenantId, contactId);
+                    """, (result, row) -> new StoredProjection(result.getLong("state_version"),
+                            new FollowUpProjection(new ContactId(result.getString("contact_id")),
+                                    result.getTimestamp("next_contact_due_at").toInstant(),
+                                    result.getBoolean("follow_up_completed"))), tenantId, contactId);
+        });
+    }
+
+    String create(String tenantId, String displayName, Instant nextContactDueAt) {
+        if (tenantId == null || tenantId.isBlank() || displayName == null || displayName.isBlank()
+                || displayName.length() > 200 || nextContactDueAt == null) {
+            throw new IllegalArgumentException("Contact requires tenant, name, and follow-up time");
+        }
+        return transactions.execute(status -> {
+            jdbc.execute("SET LOCAL ROLE kernel_worker");
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, tenantId);
+            UUID id = UUID.randomUUID();
+            jdbc.update("INSERT INTO crm_contact (tenant_id, id, display_name) VALUES (?, ?, ?)",
+                    tenantId, id, displayName.strip());
+            jdbc.update("""
+                    INSERT INTO crm_contact_engagement_projection
+                        (tenant_id, contact_id, display_name, next_contact_due_at, open_follow_up_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    """, tenantId, id.toString(), displayName.strip(),
+                    java.sql.Timestamp.from(nextContactDueAt), UUID.randomUUID());
+            return id.toString();
+        });
+    }
+
+    List<ContactSummary> all(String tenantId) {
+        if (tenantId == null || tenantId.isBlank()) throw new IllegalArgumentException("Tenant is required");
+        return transactions.execute(status -> {
+            jdbc.execute("SET LOCAL ROLE kernel_runtime");
+            jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, tenantId);
+            return jdbc.query("""
+                    SELECT contact_id, display_name, next_contact_due_at, open_follow_up_id IS NULL AS complete
+                    FROM crm_contact_engagement_projection
+                    WHERE tenant_id = ?
+                    ORDER BY display_name, contact_id
+                    """, (result, row) -> new ContactSummary(
+                            result.getString("contact_id"), result.getString("display_name"),
+                            result.getTimestamp("next_contact_due_at").toInstant(), result.getBoolean("complete")),
+                    tenantId);
         });
     }
 
@@ -65,4 +109,8 @@ final class CrmContactQueries {
     }
 
     record ContactDue(String contactId, String displayName, Instant dueAt) { }
+
+    record ContactSummary(String contactId, String displayName, Instant dueAt, boolean complete) { }
+
+    record StoredProjection(long version, FollowUpProjection projection) { }
 }

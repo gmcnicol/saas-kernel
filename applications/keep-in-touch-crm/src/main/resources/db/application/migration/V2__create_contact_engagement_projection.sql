@@ -5,6 +5,7 @@ CREATE TABLE crm_contact_engagement_projection (
     last_interaction_at timestamptz,
     next_contact_due_at timestamptz NOT NULL,
     open_follow_up_id uuid,
+    state_version bigint NOT NULL DEFAULT 1 CHECK (state_version > 0),
     PRIMARY KEY (tenant_id, contact_id)
 );
 
