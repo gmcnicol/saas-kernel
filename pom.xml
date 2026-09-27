@@ -13,7 +13,7 @@
 
     <groupId>io.github.gmcnicol</groupId>
     <artifactId>saas-kernel-reactor</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.2.0-SNAPSHOT</version>
     <packaging>pom</packaging>
     <name>SaaS Kernel Reactor</name>
     <description>Product-neutral semantic workflow mechanics for Spring Boot Applications.</description>

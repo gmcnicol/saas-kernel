@@ -47,11 +47,10 @@ class KernelArchitectureTests {
         String codec = Files.readString(Path.of(
                 "src/main/java/io/github/gmcnicol/kernel/internal/SemanticCodec.java"));
 
-        assertThat(occurrences(evaluation, "canonical.encode(")).isEqualTo(2);
-        assertThat(occurrences(evaluation, "canonical.decode(")).isEqualTo(1);
-        assertThat(occurrences(actions, "canonical.encode(")).isEqualTo(3);
-        assertThat(occurrences(actions, "canonical.decode(")).isEqualTo(4);
-        assertThat(occurrences(actions, "canonical.decodeEvent(")).isEqualTo(1);
+        assertThat(occurrences(evaluation, "canonical.encode(")).isEqualTo(3);
+        assertThat(occurrences(actions, "canonical.encode(")).isEqualTo(7);
+        assertThat(evaluation).doesNotContain("canonical.decode(", "canonicalJson()");
+        assertThat(actions).doesNotContain("canonical.decode(", "canonical.decodeEvent(", "canonicalJson()");
         assertThat(occurrences(codec, "new CanonicalCodec(")).isEqualTo(1);
     }
 

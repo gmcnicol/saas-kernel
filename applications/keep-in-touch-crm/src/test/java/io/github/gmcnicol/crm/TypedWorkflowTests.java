@@ -91,8 +91,7 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
                             new RecordInteractionCandidateV1("contract")));
                 },
                 at -> org.mockito.Mockito.doReturn(at).when(clock).instant(),
-                () -> kernel.evaluate(new TypedProjectedState<>(
-                        tenant, subject, 2, FollowUpProjection.TYPE, projection), processAt.minusSeconds(1)),
+                () -> admin().update("UPDATE crm_contact_engagement_projection SET state_version = 2 WHERE tenant_id = ? AND contact_id = ?", tenant, id),
                 intent -> admin().update("""
                         UPDATE kernel.typed_intent SET status = 'CLAIMED', attempt_count = 1,
                             lease_token = ?, lease_until = ? WHERE id = ?
@@ -101,9 +100,9 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
                         .doCallRealMethod().when(handler).handle(
                                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
                                 org.mockito.ArgumentMatchers.any()),
-                () -> kernel.readIntentEvidence(
+                () -> kernel.findIntentEvents(
                         tenant, kernel.findIntents(io.github.gmcnicol.kernel.application.IntentQuery.tenant(tenant))
-                                .getFirst().id(), TypedCrmActions.RECORD_INTERACTION).events().size(),
+                                .getFirst().id()).size(),
                 () -> contacts.projection(tenant, id).followUpCompleted(),
                 () -> !meters.find("kernel.intent.outcomes").counters().isEmpty());
     }
@@ -188,9 +187,10 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
 
         assertThat(completed.id()).isEqualTo(intent.id());
         assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
-        assertThat(kernel.readIntentEvidence("tenant-one", intent.id(), TypedCrmActions.RECORD_INTERACTION)
-                        .events())
-                .singleElement().extracting(event -> event.contactId().value()).isEqualTo("alex");
+        assertThat(kernel.findIntentEvents("tenant-one", intent.id()))
+                .singleElement().extracting(event -> event.sequence()).isEqualTo(1);
+        assertThat(admin().queryForObject("SELECT notes FROM crm_interaction WHERE tenant_id = ? AND intent_id = ? AND recorded_at IS NOT NULL",
+                String.class, "tenant-one", intent.id())).isEqualTo("Spoke today");
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
             jdbc.execute("SET LOCAL ROLE kernel_runtime");
             jdbc.queryForObject("SELECT set_config('kernel.tenant_id', 'tenant-one', true)", String.class);
@@ -209,6 +209,47 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
                 VALUES (?, ?, ?, ?, ?)
                 """, tenant, contactId, contactId, java.sql.Timestamp.from(dueAt),
                 complete ? null : UUID.randomUUID());
+    }
+
+    @Test
+    void domainOwnsTheOnlyNoteAndDeletingItLeavesNoKernelCopy() {
+        Flow flow = flow("private-note");
+        var intent = flow.accept().apply(UUID.randomUUID());
+        String secret = "unique-private-note-" + UUID.randomUUID();
+        // Changing accepted domain input must fail integrity checks, not execute another request.
+        admin().update("UPDATE crm_interaction SET notes = ? WHERE tenant_id = ? AND intent_id = ?", secret, flow.tenant(), intent.id());
+        flow.clock().accept(flow.processAt());
+        assertThat(kernel.processNext(flow.processAt()).orElseThrow().status()).isEqualTo(IntentStatus.FAILED);
+        assertThat(admin().queryForObject("SELECT count(*) FROM crm_interaction WHERE tenant_id = ?", Integer.class, flow.tenant())).isZero();
+        assertThat(kernel.findIntentEvents(flow.tenant(), intent.id())).isEmpty();
+        assertNoKernelValue(secret);
+
+        Flow completed = flow("private-note-completed");
+        var accepted = completed.accept().apply(UUID.randomUUID());
+        completed.clock().accept(completed.processAt());
+        assertThat(kernel.processNext(completed.processAt()).orElseThrow().status()).isEqualTo(IntentStatus.SUCCEEDED);
+        assertThat(completed.accept().apply(accepted.id()).status()).isEqualTo(IntentStatus.SUCCEEDED);
+        assertThat(admin().queryForObject("SELECT count(*) FROM crm_interaction WHERE tenant_id = ?", Integer.class, completed.tenant())).isEqualTo(1);
+        admin().update("DELETE FROM crm_contact_engagement_projection WHERE tenant_id = ?", completed.tenant());
+        assertThat(admin().queryForObject("SELECT count(*) FROM crm_interaction WHERE tenant_id = ?", Integer.class, completed.tenant())).isZero();
+        assertThat(kernel.findIntentEvents(completed.tenant() + "-other", accepted.id())).isEmpty();
+    }
+
+    @Test
+    void deletedDomainStateCannotExecuteOrBeRecreatedFromKernelHistory() {
+        Flow flow = flow("deleted-state");
+        var intent = flow.accept().apply(UUID.randomUUID());
+        admin().update("DELETE FROM crm_contact_engagement_projection WHERE tenant_id = ?", flow.tenant());
+        flow.clock().accept(flow.processAt());
+        assertThat(kernel.processNext(flow.processAt()).orElseThrow().status()).isEqualTo(IntentStatus.STALE);
+        assertThat(kernel.findIntentEvents(flow.tenant(), intent.id())).isEmpty();
+    }
+
+    private static void assertNoKernelValue(String value) {
+        for (String table : admin().queryForList("SELECT tablename FROM pg_tables WHERE schemaname = 'kernel'", String.class)) {
+            assertThat(admin().queryForObject("SELECT count(*) FROM kernel.\"" + table.replace("\"", "\"\"")
+                    + "\" row WHERE position(? in row_to_json(row)::text) > 0", Integer.class, value)).as(table).isZero();
+        }
     }
 
     private static JdbcTemplate admin() {

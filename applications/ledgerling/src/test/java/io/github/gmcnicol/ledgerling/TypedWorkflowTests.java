@@ -97,8 +97,7 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
                                     new RecordRecordsReceivedCandidateV1(dueAt.plusSeconds(1))));
                 },
                 at -> org.mockito.Mockito.doReturn(at).when(clock).instant(),
-                () -> kernel.evaluate(new TypedProjectedState<>(
-                        tenant, subject, 2, FilingProjection.TYPE, projection), processAt.minusSeconds(1)),
+                () -> admin().update("UPDATE ledger_filing_projection SET state_version = 2 WHERE tenant_id = ? AND filing_id = ?", tenant, id),
                 intent -> admin().update("""
                         UPDATE kernel.typed_intent SET status = 'CLAIMED', attempt_count = 1,
                             lease_token = ?, lease_until = ? WHERE id = ?
@@ -107,9 +106,9 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
                         .doCallRealMethod().when(handler).handle(
                                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
                                 org.mockito.ArgumentMatchers.any()),
-                () -> kernel.readIntentEvidence(
+                () -> kernel.findIntentEvents(
                         tenant, kernel.findIntents(io.github.gmcnicol.kernel.application.IntentQuery.tenant(tenant))
-                                .getFirst().id(), LedgerlingActions.RECORD_RECORDS_RECEIVED).events().size(),
+                                .getFirst().id()).size(),
                 () -> !filings.projection(tenant, id).recordsOutstanding(),
                 () -> !meters.find("kernel.intent.outcomes").counters().isEmpty());
     }
@@ -197,9 +196,8 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
 
         assertThat(completed.id()).isEqualTo(intent.id());
         assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
-        assertThat(kernel.readIntentEvidence(
-                        "tenant-one", intent.id(), LedgerlingActions.RECORD_RECORDS_RECEIVED).events())
-                .singleElement().extracting(event -> event.requestId().value()).isEqualTo("request-a");
+        assertThat(kernel.findIntentEvents("tenant-one", intent.id()))
+                .singleElement().extracting(event -> event.sequence()).isEqualTo(1);
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
             jdbc.execute("SET LOCAL ROLE kernel_runtime");
             jdbc.queryForObject("SELECT set_config('kernel.tenant_id', 'tenant-one', true)", String.class);
@@ -249,9 +247,8 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
         org.mockito.Mockito.doReturn(startsAt).when(clock).instant();
 
         assertThat(kernel.processNext(startsAt).orElseThrow().status()).isEqualTo(IntentStatus.SUCCEEDED);
-        assertThat(kernel.readIntentEvidence(
-                        "tenant-correction", intent.id(), LedgerlingActions.RECORD_RECORDS_RECEIVED).events())
-                .singleElement().extracting(event -> event.requestId().value()).isEqualTo("request-correction");
+        assertThat(kernel.findIntentEvents("tenant-correction", intent.id()))
+                .singleElement().extracting(event -> event.sequence()).isEqualTo(1);
         assertThat(filings.projection("tenant-correction", "filing-correction").recordsOutstanding()).isFalse();
         assertThat(kernel.processNextReevaluation(startsAt)).isEmpty();
     }

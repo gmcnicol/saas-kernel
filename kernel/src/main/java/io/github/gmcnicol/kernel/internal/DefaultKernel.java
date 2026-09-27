@@ -19,14 +19,12 @@ import io.github.gmcnicol.kernel.application.Subject;
 import io.github.gmcnicol.kernel.application.TypedAuthorisationEnvelope;
 import io.github.gmcnicol.kernel.application.TypedCandidatePayload;
 import io.github.gmcnicol.kernel.application.TypedEvaluationSnapshot;
-import io.github.gmcnicol.kernel.application.TypedIntentEvidence;
 import io.github.gmcnicol.kernel.application.TypedPresentationEnvelope;
 import io.github.gmcnicol.kernel.application.TypedProjectedState;
 import io.github.gmcnicol.kernel.application.TypedSubject;
 import io.github.gmcnicol.kernel.semanticpack.SemanticBindings;
 import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.TypedFactDerivation;
-import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
@@ -57,6 +55,7 @@ final class DefaultKernel implements Kernel {
     private final Map<String, ProjectionType<?, ?>> projections;
     private final SemanticCodec canonical;
     private final KernelTelemetry telemetry;
+    private final io.github.gmcnicol.kernel.application.ApplicationWorkflowData applicationData;
 
     DefaultKernel(
             JdbcTemplate jdbc,
@@ -72,7 +71,8 @@ final class DefaultKernel implements Kernel {
             List<TypedApplicabilityPolicy<?>> policies,
             List<SemanticBindings> bindings,
             SemanticCodec canonical,
-            KernelTelemetry telemetry) {
+            KernelTelemetry telemetry,
+            io.github.gmcnicol.kernel.application.ApplicationWorkflowData applicationData) {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.actions = actions;
@@ -84,6 +84,7 @@ final class DefaultKernel implements Kernel {
         this.semanticPackVersion = semanticPackVersion;
         this.canonical = canonical;
         this.telemetry = telemetry;
+        this.applicationData = java.util.Objects.requireNonNull(applicationData);
         this.derivations = derivations.stream()
                 .sorted(Comparator.comparing(derivation -> derivation.factType().qualifiedName()))
                 .toList();
@@ -161,7 +162,7 @@ final class DefaultKernel implements Kernel {
                 UUID.randomUUID(), state.tenantId(), state.subject(), state.version(), state.type(),
                 projection.checksum(), evaluatedAt, applicationVersion, kernelVersion,
                 semanticPackVersion, facts, List.copyOf(applicable), reevaluateAt);
-        TypedEvaluationSnapshot<I, P> persisted = persistSnapshot(snapshot, derived);
+        TypedEvaluationSnapshot<I, P> persisted = persistSnapshot(snapshot);
         telemetry.evaluation(persisted);
         return persisted;
     }
@@ -170,8 +171,8 @@ final class DefaultKernel implements Kernel {
     private DerivedFact derive(TypedFactDerivation<?, ?> derivation, Object projection, Instant evaluatedAt) {
         var typed = (TypedFactDerivation<Object, Object>) derivation;
         TypedFactDerivation.Result<Object> result = typed.derive(projection, evaluatedAt);
-        Optional<CanonicalEvidence> evidence = result.value().map(value -> canonical.encode(typed.factType(), value));
-        return new DerivedFact(typed.factType(), typed.id(), result.value(), evidence, result.reevaluateAt());
+        result.value().ifPresent(value -> canonical.encode(typed.factType(), value));
+        return new DerivedFact(typed.factType(), result.value(), result.reevaluateAt());
     }
 
     @SuppressWarnings("unchecked")
@@ -194,11 +195,11 @@ final class DefaultKernel implements Kernel {
         int inserted = jdbc.update("""
                 INSERT INTO kernel.typed_projected_state
                     (tenant_id, subject_type, subject_id, state_version, projection_type,
-                     contract_version, format_version, content, checksum)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
+                     contract_version, format_version, checksum)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
                 """, state.tenantId(), state.subject().type().qualifiedName(), state.subject().externalId(),
                 state.version(), evidence.qualifiedType(), evidence.contractVersion(), evidence.formatVersion(),
-                evidence.canonicalJson(), evidence.checksum());
+                evidence.checksum());
         String persisted = jdbc.queryForObject("""
                 SELECT checksum FROM kernel.typed_projected_state
                 WHERE tenant_id = ? AND subject_type = ? AND subject_id = ? AND state_version = ?
@@ -210,8 +211,7 @@ final class DefaultKernel implements Kernel {
         }
     }
 
-    private <I, P> TypedEvaluationSnapshot<I, P> persistSnapshot(
-            TypedEvaluationSnapshot<I, P> snapshot, List<DerivedFact> facts) {
+    private <I, P> TypedEvaluationSnapshot<I, P> persistSnapshot(TypedEvaluationSnapshot<I, P> snapshot) {
         int inserted = jdbc.update("""
                 INSERT INTO kernel.typed_evaluation_snapshot
                     (id, tenant_id, subject_type, subject_id, state_version, projection_type,
@@ -244,19 +244,6 @@ final class DefaultKernel implements Kernel {
                     snapshot.evaluatedAt(), snapshot.applicationVersion(), snapshot.kernelVersion(),
                     snapshot.semanticPackVersion(), snapshot.facts(), snapshot.applicableActions(),
                     snapshot.reevaluateAt());
-        }
-        int position = 0;
-        for (DerivedFact fact : facts) {
-            if (fact.evidence().isEmpty()) continue;
-            CanonicalEvidence evidence = fact.evidence().orElseThrow();
-            jdbc.update("""
-                    INSERT INTO kernel.typed_evaluation_fact
-                        (snapshot_id, tenant_id, position, fact_type, contract_version,
-                         format_version, derivation_id, content, checksum)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, snapshot.id(), snapshot.tenantId(), position++, evidence.qualifiedType(),
-                    evidence.contractVersion(), evidence.formatVersion(), fact.derivationId(),
-                    evidence.canonicalJson(), evidence.checksum());
         }
         IntStream.range(0, snapshot.applicableActions().size()).forEach(index -> {
             ActionType<P, ?, ?> action = snapshot.applicableActions().get(index);
@@ -297,12 +284,6 @@ final class DefaultKernel implements Kernel {
             TypedCandidatePayload<?> payload) {
         return telemetry.observe("kernel.intent.acceptance",
                 () -> actions.accept(tenantId, principal, actionOfferId, intentId, payload));
-    }
-
-    @Override
-    public <P, C, E> TypedIntentEvidence<C, E> readIntentEvidence(
-            String tenantId, UUID intentId, ActionType<P, C, E> actionType) {
-        return actions.readIntentEvidence(tenantId, intentId, actionType);
     }
 
     @Override
@@ -358,14 +339,8 @@ final class DefaultKernel implements Kernel {
                 SELECT snapshot.id, snapshot.tenant_id, snapshot.subject_type, snapshot.subject_id,
                        snapshot.state_version, snapshot.projection_type, snapshot.projection_contract_version,
                        snapshot.state_checksum, snapshot.semantic_pack_id,
-                       snapshot.semantic_pack_checksum, state.format_version, state.content
+                       snapshot.semantic_pack_checksum
                 FROM kernel.typed_evaluation_snapshot snapshot
-                JOIN kernel.typed_projected_state state
-                  ON state.tenant_id = snapshot.tenant_id AND state.subject_type = snapshot.subject_type
-                 AND state.subject_id = snapshot.subject_id AND state.state_version = snapshot.state_version
-                 AND state.projection_type = snapshot.projection_type
-                 AND state.contract_version = snapshot.projection_contract_version
-                 AND state.checksum = snapshot.state_checksum
                 WHERE snapshot.id = ?
                 """, (result, row) -> new StoredProjection(
                         result.getObject("id", UUID.class), result.getString("tenant_id"),
@@ -373,8 +348,7 @@ final class DefaultKernel implements Kernel {
                         result.getLong("state_version"), result.getString("projection_type"),
                         result.getInt("projection_contract_version"), result.getString("state_checksum"),
                         claim.dueAt(), result.getString("semantic_pack_id"),
-                        result.getString("semantic_pack_checksum"), result.getInt("format_version"),
-                        result.getString("content")), claim.id());
+                        result.getString("semantic_pack_checksum")), claim.id());
         telemetry.reevaluation("claimed", java.time.Duration.between(stored.dueAt(), evaluatedAt));
         ProjectionType<?, ?> type = projections.get(stored.projectionType() + "@" + stored.projectionVersion());
         Long latest = jdbc.queryForObject("""
@@ -389,24 +363,24 @@ final class DefaultKernel implements Kernel {
             telemetry.reevaluation("stale", null);
             return new ReevaluationOutcome(true, null);
         }
-        CanonicalEvidence evidence = new CanonicalEvidence(
-                stored.projectionType(), stored.projectionVersion(), stored.formatVersion(),
-                stored.content().getBytes(StandardCharsets.UTF_8), stored.checksum());
-        TypedEvaluationSnapshot<?, ?> snapshot = evaluateStored(stored, type, evidence, evaluatedAt);
+        TypedEvaluationSnapshot<?, ?> snapshot = evaluateStored(stored, type, evaluatedAt);
         telemetry.reevaluation("completed", null);
         return new ReevaluationOutcome(true, snapshot);
     }
 
     @SuppressWarnings("unchecked")
     private <I, P> TypedEvaluationSnapshot<I, P> evaluateStored(
-            StoredProjection stored, ProjectionType<?, ?> descriptor,
-            CanonicalEvidence evidence, Instant evaluatedAt) {
+            StoredProjection stored, ProjectionType<?, ?> descriptor, Instant evaluatedAt) {
         ProjectionType<I, P> type = (ProjectionType<I, P>) descriptor;
-        P projection = canonical.decode(type, evidence);
         I subject = type.subjectType().fromExternalId(stored.subjectId());
-        return evaluateInTransaction(new TypedProjectedState<>(
-                stored.tenantId(), new TypedSubject<>(type.subjectType(), subject), stored.version(), type, projection),
-                evaluatedAt);
+        TenantContext.lockSubject(jdbc, stored.tenantId(), new Subject(stored.subjectType(), stored.subjectId()));
+        var current = applicationData.readState(stored.tenantId(), new TypedSubject<>(type.subjectType(), subject), type);
+        if (current.isEmpty()) return null;
+        var state = current.orElseThrow();
+        if (!state.tenantId().equals(stored.tenantId()) || !state.subject().externalId().equals(stored.subjectId())
+                || state.type() != type || state.version() != stored.version()
+                || !canonical.encode(type, state.value()).checksum().equals(stored.checksum())) return null;
+        return evaluateInTransaction(state, evaluatedAt);
     }
 
     @Override
@@ -419,18 +393,22 @@ final class DefaultKernel implements Kernel {
         return intentQueries.audit(query);
     }
 
+    @Override
+    public List<io.github.gmcnicol.kernel.application.IntentEvent> findIntentEvents(String tenantId, UUID intentId) {
+        return intentQueries.events(tenantId, intentId);
+    }
+
     private static String key(SemanticType<?> descriptor) {
         return descriptor.qualifiedName() + "@" + descriptor.contractVersion();
     }
 
     private record DerivedFact(
-            FactType<?> type, String derivationId, Optional<Object> value,
-            Optional<CanonicalEvidence> evidence, Optional<Instant> reevaluateAt) {}
+            FactType<?> type, Optional<Object> value, Optional<Instant> reevaluateAt) {}
 
     private record StoredProjection(
             UUID id, String tenantId, String subjectType, String subjectId, long version,
             String projectionType, int projectionVersion, String checksum, Instant dueAt,
-            String semanticPackId, String semanticPackChecksum, int formatVersion, String content) {}
+            String semanticPackId, String semanticPackChecksum) {}
 
     private record ReevaluationOutcome(boolean claimed, TypedEvaluationSnapshot<?, ?> snapshot) {}
 

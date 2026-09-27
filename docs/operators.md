@@ -48,8 +48,9 @@ Restore one transactionally consistent PostgreSQL backup. Never restore Kernel t
 rebuild only Projected State. A valid recovery preserves together:
 
 - both Flyway schema-history tables and every applied migration checksum;
-- immutable Evaluation Snapshots, Action Offers, Intent, audit, ordered Events, Event payloads,
-  Projected State versions, and reevaluation requests;
+- Evaluation Snapshot metadata, Action Offers, Intent, audit, ordered Event receipts,
+  Projected State identities and reevaluation requests;
+- Application-owned pending input and domain records, which contain the only domain values;
 - Application tables referenced by Projected State or Event handling;
 - tenant RLS policies, protected roles, grants, constraints, and lease state;
 - Application, Kernel, Semantic Pack, and Authorisation Bundle provenance.
@@ -58,3 +59,14 @@ After restore, start the exact Application artefact recorded by restored provena
 migration streams validate, and confirm private info, Flyway, readiness, and backlog metrics before
 serving traffic. Do not edit stored checksums, status, Events, audit, or applied migrations to make
 startup pass. Restore a correct backup or ship a forward migration.
+
+## Version 0.2 cutover
+
+Stop request admission, drain accepted work using the old version, then stop every old process.
+The new Application must implement `ApplicationWorkflowData`; startup refuses to begin migration
+without exactly one binding. Its migrations run after Kernel V5 and before V6, allowing recovery
+of domain references needed for existing history or Undo. V6 removes historical domain payload
+columns and aborts if any old Intent is pending, claimed or waiting to retry. This is not a rolling
+upgrade, and rollback requires restoring the whole pre-upgrade database with the matching old
+Application. Keep backup access restricted and follow the Application's data-retention policy;
+the migration does not claim to erase backups, WAL or physical storage remnants.

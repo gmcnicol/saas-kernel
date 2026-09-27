@@ -1,6 +1,6 @@
 # Migration to the typed Kernel
 
-This repository is pre-release and greenfield. New typed writes use canonical evidence only; pre-release map APIs are not retained as public contracts. Durable typed contracts evolve by keeping historical Taxi declarations and registering explicit typed compatibility adapters rather than rewriting stored evidence.
+This repository is pre-release. Typed values use generated descriptors and canonical validation, not a persisted evidence archive. Version 0.2 removes domain payload copies from Kernel; see [the persistence contract](persistence.md) and [the cutover procedure](operators.md#version-02-cutover). Applications must supply `ApplicationWorkflowData` and replace historical Kernel payload reads with domain queries. Pre-release map APIs are not retained as public contracts.
 
 Replace old semantic maps as follows:
 
@@ -16,6 +16,6 @@ Replace old semantic maps as follows:
 
 Delete hand-written semantic DTOs and string field access. Regenerate from Taxi, implement every generated slot exactly once, update Cedar entities to generated qualified identities, then rebuild from clean output. Keep ordinary relational models and query services Application-owned.
 
-For a durable shape change: copy the historical Taxi declaration, create the new qualified type and `@Contract` version, regenerate bindings, then register one `TypedCompatibilityAdapter` bean from the generated historical descriptor to the generated current descriptor and one `TypedCompatibilityRequirement` bean for every historical-to-current path that must exist before readiness. Kernel decodes the exact historical descriptor, verifies canonical evidence first, applies one unambiguous adapter chain, and leaves the original bytes unchanged. Declared missing, ambiguous or cyclic adapter paths fail before readiness.
+For an Application-owned durable shape change: keep the historical Taxi declaration, create the new qualified type and `@Contract` version, and regenerate bindings. Applications may use `TypedCompatibilityAdapter` and `TypedCompatibilityRequirement` for explicitly supported historical values. The codec validates the exact descriptor before conversion; this does not authorise retaining a second copy in Kernel. Missing, ambiguous or cyclic declared adapter paths fail before readiness.
 
 After the first stable release, compatibility policy and binary API tooling are enforced against that released baseline. No fictitious pre-release binary baseline is retained now.

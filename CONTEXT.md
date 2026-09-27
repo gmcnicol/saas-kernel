@@ -43,8 +43,8 @@ _Avoid_: Demo app, complexity stage
 ## Workflow
 
 **Projected State**:
-The current domain state derived from recorded Events.
-_Avoid_: Source of truth, mutable record
+A view of current Application-owned domain records, supplied for evaluation and execution.
+_Avoid_: Kernel copy, historical snapshot store
 
 **Fact**:
 A semantic statement derived from Projected State and used to evaluate business applicability.
@@ -54,9 +54,9 @@ _Avoid_: Permission, raw field
 An immutable result containing Facts and Applicable Actions derived for a subject from one Projected State version, at an explicit evaluation time, using one Semantic Pack version.
 _Avoid_: Evidence graph, decision log
 
-**Canonical Evidence**:
-The exact versioned UTF-8 JSON and checksum persisted for one typed Projected State, Fact, Candidate Payload, or Event. It protects semantic history and is not an Application business model or query store.
-_Avoid_: Source of truth, business JSON, relational projection
+**Execution Receipt**:
+A record identifying an executed Action's outcome and its domain record references, without duplicating the domain values.
+_Avoid_: Domain archive, payload evidence
 
 **Authorisation Envelope**:
 A principal-specific projection containing only Cedar-authorised fields, Facts, and Action Offers for one Evaluation Snapshot.

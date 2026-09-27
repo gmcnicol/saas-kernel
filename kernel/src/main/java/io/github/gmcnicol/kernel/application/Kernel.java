@@ -24,9 +24,6 @@ public interface Kernel {
             String tenantId, Principal principal, UUID actionOfferId, UUID intentId,
             TypedCandidatePayload<?> payload);
 
-    <P, C, E> TypedIntentEvidence<C, E> readIntentEvidence(
-            String tenantId, UUID intentId, ActionType<P, C, E> actionType);
-
     Optional<Intent> processNext(Instant processedAt);
 
     List<Intent> processDue(Instant processedAt);
@@ -36,4 +33,6 @@ public interface Kernel {
     List<IntentView> findIntents(IntentQuery query);
 
     List<IntentAuditEntry> findIntentAudit(IntentAuditQuery query);
+
+    List<IntentEvent> findIntentEvents(String tenantId, UUID intentId);
 }

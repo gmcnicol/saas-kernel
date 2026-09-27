@@ -14,22 +14,91 @@ import org.springframework.jdbc.core.JdbcTemplate;
 public class KernelAutoConfiguration {
 
     @Bean(initMethod = "migrate")
-    Flyway kernelFlyway(DataSource dataSource, Environment environment) {
+    Flyway kernelFlyway(DataSource dataSource, Environment environment,
+            org.springframework.beans.factory.ListableBeanFactory beans) {
+        if (beans.getBeanNamesForType(io.github.gmcnicol.kernel.application.ApplicationWorkflowData.class, true, false).length != 1) {
+            throw new IllegalStateException("Exactly one ApplicationWorkflowData binding is required before migration");
+        }
         return migrationFlyway(dataSource, environment)
                 .locations("classpath:db/kernel/migration")
                 .schemas("kernel")
                 .defaultSchema("kernel")
                 .table("flyway_kernel_schema_history")
+                .target("5")
                 .load();
     }
 
-    @Bean(initMethod = "migrate")
+    @Bean
     @DependsOn("kernelFlyway")
     Flyway applicationFlyway(DataSource dataSource, Environment environment) {
-        return migrationFlyway(dataSource, environment)
+        var application = migrationFlyway(dataSource, environment)
                 .locations("classpath:db/application/migration")
                 .table("flyway_application_schema_history")
                 .load();
+        var kernel = migrationFlyway(dataSource, environment)
+                .locations("classpath:db/kernel/migration").schemas("kernel").defaultSchema("kernel")
+                .table("flyway_kernel_schema_history").load();
+        migrateDomainData(application, kernel, environment.getRequiredProperty("spring.application.name"));
+        return application;
+    }
+
+    static void migrateDomainData(Flyway application, Flyway kernel, String applicationId) {
+        try (var connection = kernel.getConfiguration().getDataSource().getConnection();
+             var statement = connection.createStatement()) {
+            boolean autoCommit = connection.getAutoCommit();
+            String rowSecurity;
+            try (var result = statement.executeQuery("SHOW row_security")) {
+                result.next();
+                rowSecurity = result.getString(1);
+            }
+            boolean locked = false;
+            try {
+                connection.setAutoCommit(true);
+                statement.execute("SET row_security = off");
+                boolean legacy;
+                try (var result = statement.executeQuery("""
+                        SELECT EXISTS (SELECT FROM information_schema.columns
+                        WHERE table_schema = 'kernel' AND table_name = 'typed_intent' AND column_name = 'payload_content')
+                        """)) {
+                    result.next();
+                    legacy = result.getBoolean(1);
+                }
+                if (legacy) {
+                    // A transaction lock would also retain table locks and block V6 on its separate connection.
+                    try (var lock = connection.prepareStatement("SELECT pg_try_advisory_lock(hashtextextended(?, 0))")) {
+                        lock.setString(1, applicationId);
+                        try (var result = lock.executeQuery()) {
+                            if (!result.next() || !result.getBoolean(1)) {
+                                throw new IllegalStateException("Stop all old Application processes before the domain-data cutover");
+                            }
+                            locked = true;
+                        }
+                    }
+                    try (var result = statement.executeQuery("SELECT EXISTS (SELECT FROM kernel.typed_intent WHERE status IN ('PENDING', 'CLAIMED', 'RETRY_WAIT'))")) {
+                        result.next();
+                        if (result.getBoolean(1)) {
+                            throw new IllegalStateException("Drain pending Intents with the previous Application before migrating domain data");
+                        }
+                    }
+                }
+                application.migrate();
+                kernel.migrate();
+            } finally {
+                try {
+                    if (locked) {
+                        try (var unlock = connection.prepareStatement("SELECT pg_advisory_unlock(hashtextextended(?, 0))")) {
+                            unlock.setString(1, applicationId);
+                            unlock.execute();
+                        }
+                    }
+                } finally {
+                    statement.execute("SET row_security = " + rowSecurity);
+                    connection.setAutoCommit(autoCommit);
+                }
+            }
+        } catch (java.sql.SQLException failure) {
+            throw new IllegalStateException("Cannot safely migrate Application-owned domain data", failure);
+        }
     }
 
     @Bean

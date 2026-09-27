@@ -101,4 +101,18 @@ final class IntentQueryService {
                 cursorTime, cursorTime, cursorId, query.limit() };
     }
 
+    List<io.github.gmcnicol.kernel.application.IntentEvent> events(String tenantId, java.util.UUID intentId) {
+        java.util.Objects.requireNonNull(intentId, "Intent identity is required");
+        return transactions.execute(status -> {
+            TenantContext.use(jdbc, tenantId);
+            return jdbc.query("""
+                    SELECT id, sequence, event_type, event_contract_version, resulting_state_version, occurred_at
+                    FROM kernel.typed_event WHERE tenant_id = ? AND intent_id = ? ORDER BY sequence
+                    """, (row, n) -> new io.github.gmcnicol.kernel.application.IntentEvent(
+                            row.getObject("id", java.util.UUID.class), row.getInt("sequence"), row.getString("event_type"),
+                            row.getInt("event_contract_version"), row.getLong("resulting_state_version"),
+                            row.getTimestamp("occurred_at").toInstant()), tenantId, intentId);
+        });
+    }
+
 }

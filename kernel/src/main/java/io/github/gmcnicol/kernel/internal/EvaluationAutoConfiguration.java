@@ -65,7 +65,8 @@ public class EvaluationAutoConfiguration {
             List<TypedFactDerivation<?, ?>> typedDerivations,
             List<TypedApplicabilityPolicy<?>> typedPolicies,
             List<SemanticBindings> typedBindings,
-            SemanticCodec semanticCodec) {
+            SemanticCodec semanticCodec,
+            io.github.gmcnicol.kernel.application.ApplicationWorkflowData applicationData) {
         return new DefaultKernel(
                 jdbc,
                 new TransactionTemplate(transactionManager),
@@ -80,7 +81,7 @@ public class EvaluationAutoConfiguration {
                 typedPolicies,
                 typedBindings,
                 semanticCodec,
-                telemetry);
+                telemetry, applicationData);
     }
 
     @Bean
@@ -165,10 +166,11 @@ public class EvaluationAutoConfiguration {
             List<io.github.gmcnicol.kernel.semanticpack.TypedEventProjector<?, ?>> projectors,
             List<TypedApplicabilityPolicy<?>> policies,
             List<TypedFactDerivation<?, ?>> derivations,
-            SemanticCodec semanticCodec) {
+            SemanticCodec semanticCodec,
+            io.github.gmcnicol.kernel.application.ApplicationWorkflowData applicationData) {
         return new TypedActionService(
                 jdbc, new TransactionTemplate(transactionManager), cedar, worker, clock, telemetry, semanticPack, bindings,
-                handlers, projectors, policies, derivations, semanticCodec);
+                handlers, projectors, policies, derivations, semanticCodec, applicationData);
     }
 
     @Bean
@@ -237,7 +239,7 @@ public class EvaluationAutoConfiguration {
 
     private static String kernelVersion() {
         String version = EvaluationAutoConfiguration.class.getPackage().getImplementationVersion();
-        return version == null ? "0.1.0-SNAPSHOT" : version;
+        return version == null ? "0.2.0-SNAPSHOT" : version;
     }
 
     private static Properties load(ResourceLoader resources, String path) {
