@@ -4,6 +4,7 @@ import io.github.gmcnicol.kernel.application.ActionType;
 import io.github.gmcnicol.kernel.application.CanonicalCodec;
 import io.github.gmcnicol.kernel.application.CanonicalEvidence;
 import io.github.gmcnicol.kernel.application.EventType;
+import io.github.gmcnicol.kernel.application.ExactIntentCompletion;
 import io.github.gmcnicol.kernel.application.FactSet;
 import io.github.gmcnicol.kernel.application.FactType;
 import io.github.gmcnicol.kernel.application.Intent;
@@ -51,7 +52,9 @@ import java.util.Optional;
 import java.util.UUID;
 import org.springframework.dao.TransientDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.transaction.support.TransactionOperations;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /** Typed Action offer, acceptance and execution path. */
 final class TypedActionService {
@@ -297,7 +300,8 @@ final class TypedActionService {
         if (offerId == null || intentId == null || payload == null
                 || payload.priorIntentId().filter(intentId::equals).isPresent()) throw new IntentRejectedException();
         try {
-            return transactions.execute(status -> acceptInTransaction(null, null, offerId, intentId, payload));
+            return transactions.execute(status -> acceptInTransaction(
+                    null, null, offerId, intentId, payload, null));
         } catch (IntentConflictException | IntentRejectedException exception) {
             throw exception;
         } catch (RuntimeException exception) {
@@ -311,11 +315,77 @@ final class TypedActionService {
                 || payload.priorIntentId().filter(intentId::equals).isPresent()) throw new IntentRejectedException();
         try {
             return transactions.execute(
-                    status -> acceptInTransaction(tenantId, principal, offerId, intentId, payload));
+                    status -> acceptInTransaction(tenantId, principal, offerId, intentId, payload, null));
         } catch (IntentConflictException | IntentRejectedException exception) {
             throw exception;
         } catch (RuntimeException exception) {
             throw new IntentRejectedException();
+        }
+    }
+
+    <C> ExactIntentCompletion execute(
+            String tenantId,
+            Principal principal,
+            UUID offerId,
+            UUID intentId,
+            TypedCandidatePayload<C> candidate,
+            Instant executedAt) {
+        requireCallerTransaction();
+        if (tenantId == null || principal == null || offerId == null || intentId == null
+                || candidate == null || executedAt == null
+                || candidate.priorIntentId().filter(intentId::equals).isPresent()) {
+            throw new IntentRejectedException();
+        }
+        Instant attemptStartedAt = clock.instant();
+        Intent accepted = acceptInTransaction(tenantId, principal, offerId, intentId, candidate, executedAt);
+        if (accepted.status() == IntentStatus.SUCCEEDED) {
+            return ExactIntentCompletion.ALREADY_SUCCEEDED;
+        }
+        if (accepted.status() != IntentStatus.PENDING) throw new IntentRejectedException();
+        UUID token = UUID.randomUUID();
+        Claim claim = claimExact(tenantId, intentId, token, executedAt);
+        Intent completed = complete(claim, token, executedAt);
+        if (completed.status() != IntentStatus.SUCCEEDED) throw new IntentRejectedException();
+        telemetry.outcome(completed.status(), Duration.between(attemptStartedAt, clock.instant()));
+        telemetry.intent(claim.tenantId(), claim.subject(), claim.offerId(), claim.id(), completed.status(),
+                KernelTelemetry.traceId(claim.traceparent(), claim.id()));
+        return ExactIntentCompletion.COMPLETED;
+    }
+
+    private Claim claimExact(String tenantId, UUID intentId, UUID token, Instant claimedAt) {
+        TenantContext.assumeWorkerRole(jdbc);
+        TenantContext.useAfterRole(jdbc, tenantId);
+        int updated = jdbc.update("""
+                UPDATE kernel.typed_intent SET status = 'CLAIMED', attempt_count = attempt_count + 1,
+                    lease_token = ?, lease_until = 'infinity'::timestamptz, next_attempt_at = NULL
+                WHERE tenant_id = ? AND id = ? AND status = 'PENDING'
+                """, token, tenantId, intentId);
+        if (updated != 1) throw new IntentRejectedException();
+        Claim claim = jdbc.queryForObject("""
+                SELECT action_offer_id, subject_type, subject_id, accepted_at, traceparent
+                FROM kernel.typed_intent WHERE tenant_id = ? AND id = ?
+                """, (result, row) -> new Claim(intentId, tenantId, IntentStatus.PENDING).withTelemetry(
+                        result.getObject("action_offer_id", UUID.class),
+                        new Subject(result.getString("subject_type"), result.getString("subject_id")),
+                        result.getTimestamp("accepted_at").toInstant(), result.getString("traceparent")),
+                tenantId, intentId);
+        audit(intentId, tenantId, nextAudit(intentId), IntentStatus.PENDING, IntentStatus.CLAIMED,
+                claimedAt, "exact Intent claimed");
+        return claim;
+    }
+
+    private void requireCallerTransaction() {
+        var dataSource = jdbc.getDataSource();
+        if (!TransactionSynchronizationManager.isActualTransactionActive() || dataSource == null) {
+            throw new IllegalStateException("Exact Intent execution requires an active caller transaction");
+        }
+        var connection = DataSourceUtils.getConnection(dataSource);
+        try {
+            if (!DataSourceUtils.isConnectionTransactional(connection, dataSource)) {
+                throw new IllegalStateException("Exact Intent execution requires an active caller transaction");
+            }
+        } finally {
+            DataSourceUtils.releaseConnection(connection, dataSource);
         }
     }
 
@@ -324,7 +394,8 @@ final class TypedActionService {
             Principal expectedPrincipal,
             UUID offerId,
             UUID intentId,
-            TypedCandidatePayload<C> payload) {
+            TypedCandidatePayload<C> payload,
+            Instant exactExecutionAt) {
         TenantContext.assumeRuntimeRole(jdbc);
         String tenantId = jdbc.queryForObject(
                 "SELECT kernel.resolve_typed_action_offer_tenant(?)", String.class, offerId);
@@ -362,11 +433,17 @@ final class TypedActionService {
         CanonicalEvidence evidence = canonical.encode(action.candidateType(), payload.value());
         String traceparent = payload.traceContext().map(W3cTraceContext::traceparent).orElse(null);
         String tracestate = payload.traceContext().map(W3cTraceContext::tracestate).orElse(null);
-        String requestChecksum = requestChecksum(offerId, evidence, traceparent, tracestate, payload.priorIntentId());
+        String requestChecksum = requestChecksum(
+                offerId, evidence, traceparent, tracestate, payload.priorIntentId(),
+                Optional.ofNullable(exactExecutionAt));
         List<Intent> existing = existing(tenantId, intentId, offerId, requestChecksum);
         if (!existing.isEmpty()) return existing.getFirst();
         State state = currentState(tenantId, offer.subjectType(), offer.subjectId(), action.projectionType());
-        FactSet authorisationFacts = facts(action.projectionType(), state.value(), clock.instant());
+        existing = existing(tenantId, intentId, offerId, requestChecksum);
+        if (!existing.isEmpty()) return existing.getFirst();
+        Instant acceptedAt = Optional.ofNullable(exactExecutionAt).orElseGet(clock::instant)
+                .truncatedTo(ChronoUnit.MICROS);
+        FactSet authorisationFacts = facts(action.projectionType(), state.value(), acceptedAt);
         if (state.version() != offer.stateVersion() || !state.evidence().checksum().equals(offer.stateChecksum())
                 || !currentlyApplicable(action, offer.policyId(), state.value(), authorisationFacts)
                 || !cedarAllows(offer.principal(), offer.subjectId(), action, state.value(), authorisationFacts)) {
@@ -379,7 +456,6 @@ final class TypedActionService {
                     """, Boolean.class, tenantId, priorIntentId);
             if (!Boolean.TRUE.equals(terminal)) throw new IntentRejectedException();
         });
-        Instant acceptedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
         int inserted = jdbc.update("""
                 INSERT INTO kernel.typed_intent
                     (id, tenant_id, action_offer_id, subject_type, subject_id, action_id, policy_id,
@@ -845,7 +921,8 @@ final class TypedActionService {
             CanonicalEvidence evidence,
             String traceparent,
             String tracestate,
-            Optional<UUID> priorIntentId) {
+            Optional<UUID> priorIntentId,
+            Optional<Instant> exactExecutionAt) {
         StringBuilder canonical = new StringBuilder();
         append(canonical, offerId.toString());
         append(canonical, evidence.qualifiedType());
@@ -855,6 +932,7 @@ final class TypedActionService {
         append(canonical, traceparent == null ? "" : traceparent);
         append(canonical, tracestate == null ? "" : tracestate);
         append(canonical, priorIntentId.map(UUID::toString).orElse(""));
+        exactExecutionAt.map(Instant::toString).ifPresent(value -> append(canonical, value));
         return sha256(canonical.toString().getBytes(StandardCharsets.UTF_8));
     }
 

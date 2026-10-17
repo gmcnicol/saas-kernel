@@ -3,6 +3,7 @@ package io.github.gmcnicol.kernel.internal;
 import io.github.gmcnicol.kernel.application.ActionType;
 import io.github.gmcnicol.kernel.application.ApplicationVersion;
 import io.github.gmcnicol.kernel.application.CanonicalEvidence;
+import io.github.gmcnicol.kernel.application.ExactIntentCompletion;
 import io.github.gmcnicol.kernel.application.FactSet;
 import io.github.gmcnicol.kernel.application.FactType;
 import io.github.gmcnicol.kernel.application.Intent;
@@ -284,6 +285,14 @@ final class DefaultKernel implements Kernel {
             TypedCandidatePayload<?> payload) {
         return telemetry.observe("kernel.intent.acceptance",
                 () -> actions.accept(tenantId, principal, actionOfferId, intentId, payload));
+    }
+
+    @Override
+    public <C> ExactIntentCompletion execute(
+            String tenantId, Principal principal, UUID actionOfferId, UUID intentId,
+            TypedCandidatePayload<C> candidate, Instant executedAt) {
+        return telemetry.observe("kernel.intent.execution",
+                () -> actions.execute(tenantId, principal, actionOfferId, intentId, candidate, executedAt));
     }
 
     @Override

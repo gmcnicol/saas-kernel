@@ -24,6 +24,14 @@ public interface Kernel {
             String tenantId, Principal principal, UUID actionOfferId, UUID intentId,
             TypedCandidatePayload<?> payload);
 
+    /**
+     * Accepts and completes exactly one Intent in an active caller-owned transaction.
+     * A completed result remains provisional until that transaction commits.
+     */
+    <C> ExactIntentCompletion execute(
+            String tenantId, Principal principal, UUID actionOfferId, UUID intentId,
+            TypedCandidatePayload<C> candidate, Instant executedAt);
+
     Optional<Intent> processNext(Instant processedAt);
 
     List<Intent> processDue(Instant processedAt);
