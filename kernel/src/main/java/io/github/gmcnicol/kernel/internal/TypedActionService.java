@@ -376,7 +376,8 @@ final class TypedActionService {
 
     private void requireCallerTransaction() {
         var dataSource = jdbc.getDataSource();
-        if (!TransactionSynchronizationManager.isActualTransactionActive() || dataSource == null) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive() || dataSource == null
+                || !TransactionSynchronizationManager.hasResource(dataSource)) {
             throw new IllegalStateException("Exact Intent execution requires an active caller transaction");
         }
         var connection = DataSourceUtils.getConnection(dataSource);

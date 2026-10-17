@@ -36,6 +36,9 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -85,6 +88,25 @@ class ExactIntentExecutionTests {
         assertThat(contacts.projection(flow.tenant(), flow.contactId()).followUpCompleted()).isFalse();
         assertThat(admin().queryForObject(
                 "SELECT count(*) FROM crm_interaction WHERE tenant_id = ?", Integer.class, flow.tenant())).isZero();
+    }
+
+    @Test
+    void transactionFromAnotherManagerIsNotAcceptedAsTheCallerTransaction() {
+        Flow flow = flow("wrong-transaction-manager");
+        UUID intentId = UUID.randomUUID();
+        var unrelatedTransactionManager = new AbstractPlatformTransactionManager() {
+            @Override protected Object doGetTransaction() { return new Object(); }
+            @Override protected void doBegin(Object transaction, TransactionDefinition definition) {}
+            @Override protected void doCommit(DefaultTransactionStatus status) {}
+            @Override protected void doRollback(DefaultTransactionStatus status) {}
+        };
+
+        new TransactionTemplate(unrelatedTransactionManager).executeWithoutResult(status ->
+                assertThatThrownBy(() -> execute(flow, intentId, "not saved"))
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("active caller transaction"));
+
+        assertNoExecutionEffect(flow, intentId);
     }
 
     @Test
