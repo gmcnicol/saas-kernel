@@ -52,6 +52,7 @@ import java.util.Optional;
 import java.util.UUID;
 import org.springframework.dao.TransientDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.ConnectionHolder;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.transaction.support.TransactionOperations;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -323,33 +324,34 @@ final class TypedActionService {
         }
     }
 
-    <C> ExactIntentCompletion execute(
-            String tenantId,
-            Principal principal,
-            UUID offerId,
-            UUID intentId,
-            TypedCandidatePayload<C> candidate,
-            Instant executedAt) {
+    <C> ExactIntentCompletion execute(ExactIntentRequest<C> request) {
         requireCallerTransaction();
-        if (tenantId == null || principal == null || offerId == null || intentId == null
-                || candidate == null || executedAt == null
-                || candidate.priorIntentId().filter(intentId::equals).isPresent()) {
+        if (request.tenantId() == null || request.principal() == null || request.actionOfferId() == null
+                || request.intentId() == null || request.candidate() == null || request.executedAt() == null
+                || request.candidate().priorIntentId().filter(request.intentId()::equals).isPresent()) {
             throw new IntentRejectedException();
         }
-        Instant attemptStartedAt = clock.instant();
-        Intent accepted = acceptInTransaction(tenantId, principal, offerId, intentId, candidate, executedAt);
-        if (accepted.status() == IntentStatus.SUCCEEDED) {
-            return ExactIntentCompletion.ALREADY_SUCCEEDED;
+        String callerRole = TenantContext.currentRole(jdbc);
+        try {
+            Instant attemptStartedAt = clock.instant();
+            Intent accepted = acceptInTransaction(
+                    request.tenantId(), request.principal(), request.actionOfferId(), request.intentId(),
+                    request.candidate(), request.executedAt());
+            if (accepted.status() == IntentStatus.SUCCEEDED) {
+                return ExactIntentCompletion.ALREADY_SUCCEEDED;
+            }
+            if (accepted.status() != IntentStatus.PENDING) throw new IntentRejectedException();
+            UUID token = UUID.randomUUID();
+            Claim claim = claimExact(request.tenantId(), request.intentId(), token, request.executedAt());
+            Intent completed = complete(claim, token, request.executedAt());
+            if (completed.status() != IntentStatus.SUCCEEDED) throw new IntentRejectedException();
+            telemetry.committedOutcome(completed.status(), Duration.between(attemptStartedAt, clock.instant()));
+            telemetry.intent(claim.tenantId(), claim.subject(), claim.offerId(), claim.id(), completed.status(),
+                    KernelTelemetry.traceId(claim.traceparent(), claim.id()));
+            return ExactIntentCompletion.COMPLETED;
+        } finally {
+            TenantContext.restoreRole(jdbc, callerRole);
         }
-        if (accepted.status() != IntentStatus.PENDING) throw new IntentRejectedException();
-        UUID token = UUID.randomUUID();
-        Claim claim = claimExact(tenantId, intentId, token, executedAt);
-        Intent completed = complete(claim, token, executedAt);
-        if (completed.status() != IntentStatus.SUCCEEDED) throw new IntentRejectedException();
-        telemetry.outcome(completed.status(), Duration.between(attemptStartedAt, clock.instant()));
-        telemetry.intent(claim.tenantId(), claim.subject(), claim.offerId(), claim.id(), completed.status(),
-                KernelTelemetry.traceId(claim.traceparent(), claim.id()));
-        return ExactIntentCompletion.COMPLETED;
     }
 
     private Claim claimExact(String tenantId, UUID intentId, UUID token, Instant claimedAt) {
@@ -376,8 +378,11 @@ final class TypedActionService {
 
     private void requireCallerTransaction() {
         var dataSource = jdbc.getDataSource();
-        if (!TransactionSynchronizationManager.isActualTransactionActive() || dataSource == null
-                || !TransactionSynchronizationManager.hasResource(dataSource)) {
+        Object resource = dataSource == null ? null : TransactionSynchronizationManager.getResource(dataSource);
+        if (!TransactionSynchronizationManager.isActualTransactionActive()
+                || !TransactionSynchronizationManager.isSynchronizationActive()
+                || !(resource instanceof ConnectionHolder holder)
+                || !holder.isSynchronizedWithTransaction()) {
             throw new IllegalStateException("Exact Intent execution requires an active caller transaction");
         }
         var connection = DataSourceUtils.getConnection(dataSource);

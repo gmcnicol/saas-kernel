@@ -291,8 +291,9 @@ final class DefaultKernel implements Kernel {
     public <C> ExactIntentCompletion execute(
             String tenantId, Principal principal, UUID actionOfferId, UUID intentId,
             TypedCandidatePayload<C> candidate, Instant executedAt) {
-        return telemetry.observe("kernel.intent.execution",
-                () -> actions.execute(tenantId, principal, actionOfferId, intentId, candidate, executedAt));
+        var request = new ExactIntentRequest<>(
+                tenantId, principal, actionOfferId, intentId, candidate, executedAt);
+        return telemetry.observe("kernel.intent.execution", () -> actions.execute(request));
     }
 
     @Override

@@ -20,6 +20,8 @@ import java.util.function.Function;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Reusable public-{@link Kernel} acceptance contract for exact Intent execution.
@@ -33,18 +35,32 @@ public interface ExactIntentExecutionContract {
     /** Creates an isolated, offered Action whose projection has not yet been updated. */
     ExactFlow exactFlow(String uniqueId);
 
-    /** Runs work in a transaction managed by the same datasource and transaction manager as the Kernel. */
-    <T> T inCallerTransaction(Supplier<T> work);
+    /** Supplies the fixture's transaction boundary while hiding fixture-specific setup from inherited tests. */
+    CallerTransactions callerTransactions();
 
-    /** Runs work in the Kernel transaction and then rolls that transaction back. */
-    void inRollbackOnlyTransaction(Runnable work);
+    /** Adapts the Spring transaction manager shared by an Application and the Kernel. */
+    static CallerTransactions springTransactions(PlatformTransactionManager transactionManager) {
+        var transactions = new TransactionTemplate(transactionManager);
+        return new CallerTransactions() {
+            @Override public <T> T commit(Supplier<T> work) {
+                return transactions.execute(status -> work.get());
+            }
+
+            @Override public void rollback(Runnable work) {
+                transactions.executeWithoutResult(status -> {
+                    work.run();
+                    status.setRollbackOnly();
+                });
+            }
+        };
+    }
 
     @Test
     default void exactExecutionRequiresACallerTransaction() {
         ExactFlow flow = exactFlow("requires-transaction");
         UUID intentId = UUID.randomUUID();
 
-        assertThatThrownBy(() -> execute(flow, intentId, "not accepted"))
+        assertThatThrownBy(() -> execute(flow, intentId, CandidateVariation.ORIGINAL))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("active caller transaction");
 
@@ -59,11 +75,12 @@ public interface ExactIntentExecutionContract {
         UUID unrelatedId = UUID.randomUUID();
         unrelated.kernel().accept(
                 unrelated.tenant(), unrelated.principal(), unrelated.actionOfferId(), unrelatedId,
-                unrelated.candidate().apply("unrelated"));
+                unrelated.candidate().apply(CandidateVariation.ORIGINAL));
         ExactFlow exact = exactFlow("named");
         UUID exactId = UUID.randomUUID();
 
-        ExactIntentCompletion completion = inCallerTransaction(() -> execute(exact, exactId, "named"));
+        ExactIntentCompletion completion = inCallerTransaction(
+                () -> execute(exact, exactId, CandidateVariation.ORIGINAL));
 
         assertThat(completion).isEqualTo(ExactIntentCompletion.COMPLETED);
         assertThat(exact.projectionUpdated().getAsBoolean()).isTrue();
@@ -80,7 +97,7 @@ public interface ExactIntentExecutionContract {
         ExactFlow flow = exactFlow("rollback");
         UUID intentId = UUID.randomUUID();
 
-        inRollbackOnlyTransaction(() -> assertThat(execute(flow, intentId, "rolled back"))
+        inRollbackOnlyTransaction(() -> assertThat(execute(flow, intentId, CandidateVariation.ORIGINAL))
                 .isEqualTo(ExactIntentCompletion.COMPLETED));
 
         assertThat(flow.kernel().findIntents(IntentQuery.tenant(flow.tenant()))).isEmpty();
@@ -94,11 +111,11 @@ public interface ExactIntentExecutionContract {
         ExactFlow flow = exactFlow("request-identity");
         UUID intentId = UUID.randomUUID();
 
-        assertThat(inCallerTransaction(() -> execute(flow, intentId, "original")))
+        assertThat(inCallerTransaction(() -> execute(flow, intentId, CandidateVariation.ORIGINAL)))
                 .isEqualTo(ExactIntentCompletion.COMPLETED);
-        assertThat(inCallerTransaction(() -> execute(flow, intentId, "original")))
+        assertThat(inCallerTransaction(() -> execute(flow, intentId, CandidateVariation.ORIGINAL)))
                 .isEqualTo(ExactIntentCompletion.ALREADY_SUCCEEDED);
-        assertThatThrownBy(() -> inCallerTransaction(() -> execute(flow, intentId, "changed")))
+        assertThatThrownBy(() -> inCallerTransaction(() -> execute(flow, intentId, CandidateVariation.CHANGED)))
                 .isInstanceOf(IntentConflictException.class);
 
         assertThat(flow.kernel().findIntentEvents(flow.tenant(), intentId)).hasSize(1);
@@ -114,7 +131,7 @@ public interface ExactIntentExecutionContract {
 
         try (var executor = Executors.newSingleThreadExecutor()) {
             var exact = executor.submit(() -> inCallerTransaction(() -> {
-                ExactIntentCompletion completion = execute(flow, intentId, "held before commit");
+                ExactIntentCompletion completion = execute(flow, intentId, CandidateVariation.ORIGINAL);
                 exactCompleted.countDown();
                 await(allowCommit);
                 return completion;
@@ -144,10 +161,10 @@ public interface ExactIntentExecutionContract {
         UUID secondId = UUID.randomUUID();
         first.kernel().accept(
                 first.tenant(), first.principal(), first.actionOfferId(), firstId,
-                first.candidate().apply("first due"));
+                first.candidate().apply(CandidateVariation.ORIGINAL));
         second.kernel().accept(
                 second.tenant(), second.principal(), second.actionOfferId(), secondId,
-                second.candidate().apply("second due"));
+                second.candidate().apply(CandidateVariation.ORIGINAL));
 
         assertThat(first.kernel().processDue(Instant.parse("2100-01-01T00:00:00Z")))
                 .extracting(intent -> intent.id())
@@ -161,7 +178,8 @@ public interface ExactIntentExecutionContract {
         ExactFlow flow = exactFlow("commit");
         UUID intentId = UUID.randomUUID();
 
-        ExactIntentCompletion completion = inCallerTransaction(() -> execute(flow, intentId, "committed"));
+        ExactIntentCompletion completion = inCallerTransaction(
+                () -> execute(flow, intentId, CandidateVariation.ORIGINAL));
 
         assertThat(completion).isEqualTo(ExactIntentCompletion.COMPLETED);
         assertThat(flow.kernel().findIntents(IntentQuery.tenant(flow.tenant())))
@@ -186,11 +204,26 @@ public interface ExactIntentExecutionContract {
         }
     }
 
+    private <T> T inCallerTransaction(Supplier<T> work) {
+        return callerTransactions().commit(work);
+    }
+
+    private void inRollbackOnlyTransaction(Runnable work) {
+        callerTransactions().rollback(work);
+    }
+
     private static ExactIntentCompletion execute(
-            ExactFlow flow, UUID intentId, String content) {
+            ExactFlow flow, UUID intentId, CandidateVariation variation) {
         return flow.kernel().execute(
                 flow.tenant(), flow.principal(), flow.actionOfferId(), intentId,
-                flow.candidate().apply(content), flow.executedAt());
+                flow.candidate().apply(variation), flow.executedAt());
+    }
+
+    enum CandidateVariation { ORIGINAL, CHANGED }
+
+    interface CallerTransactions {
+        <T> T commit(Supplier<T> work);
+        void rollback(Runnable work);
     }
 
     /**
@@ -203,7 +236,7 @@ public interface ExactIntentExecutionContract {
             Principal principal,
             UUID actionOfferId,
             Instant executedAt,
-            Function<String, TypedCandidatePayload<?>> candidate,
+            Function<CandidateVariation, TypedCandidatePayload<?>> candidate,
             BooleanSupplier projectionUpdated,
             IntSupplier applicationChangeCount) {}
 }

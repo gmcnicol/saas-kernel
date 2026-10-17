@@ -96,6 +96,10 @@ final class KernelTelemetry {
         timer("kernel.intent.end.to.end", endToEnd, "outcome", status.name().toLowerCase());
     }
 
+    void committedOutcome(IntentStatus status, Duration endToEnd) {
+        afterCommit(() -> outcome(status, endToEnd));
+    }
+
     void retry() {
         counter("kernel.intent.retries", "worker", "embedded");
     }

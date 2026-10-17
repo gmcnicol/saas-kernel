@@ -8,7 +8,7 @@ values mean. It does not prescribe tables, columns, joins, materialised views, o
 An Application may supply Kernel Projected State from any normal Application-owned query shape.
 
 Kernel persistence contains execution metadata only: evaluation provenance and state identity,
-Action Offers, Intent status, Event receipts, audit, leases and reevaluation schedules.
+Action Offers, Intent status, Execution Receipts, audit, leases and reevaluation schedules.
 It does not store Projected State values, Facts, Candidate Payload bodies or Event bodies.
 Canonical encoding validates typed values in memory and computes integrity checks; encoded
 bytes are not an evidence archive. Kernel cannot reconstruct deleted Application records.

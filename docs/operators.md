@@ -48,7 +48,7 @@ Restore one transactionally consistent PostgreSQL backup. Never restore Kernel t
 rebuild only Projected State. A valid recovery preserves together:
 
 - both Flyway schema-history tables and every applied migration checksum;
-- Evaluation Snapshot metadata, Action Offers, Intent, audit, ordered Event receipts,
+- Evaluation Snapshot metadata, Action Offers, Intent, audit, ordered Execution Receipts,
   Projected State identities and reevaluation requests;
 - Application-owned pending input and domain records, which contain the only domain values;
 - Application tables referenced by Projected State or Event handling;

@@ -19,7 +19,6 @@ import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.TypedIntentHandler;
 import java.time.Instant;
 import java.util.UUID;
-import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -86,24 +85,16 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract implements ExactIn
                 FollowUpProjection.TYPE).actionOffers().getFirst().id();
         return new ExactFlow(
                 kernel, tenant, principal, offerId, dueAt.plusSeconds(3),
-                content -> TypedCrmActions.RECORD_INTERACTION.candidate(
-                        new RecordInteractionCandidateV1(content)),
+                variation -> TypedCrmActions.RECORD_INTERACTION.candidate(
+                        new RecordInteractionCandidateV1(variation.name())),
                 () -> contacts.projection(tenant, id).followUpCompleted(),
                 () -> admin().queryForObject(
                         "SELECT count(*) FROM crm_interaction WHERE tenant_id = ?", Integer.class, tenant));
     }
 
     @Override
-    public <T> T inCallerTransaction(Supplier<T> work) {
-        return new TransactionTemplate(transactionManager).execute(status -> work.get());
-    }
-
-    @Override
-    public void inRollbackOnlyTransaction(Runnable work) {
-        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
-            work.run();
-            status.setRollbackOnly();
-        });
+    public CallerTransactions callerTransactions() {
+        return ExactIntentExecutionContract.springTransactions(transactionManager);
     }
 
     @Override

@@ -21,7 +21,6 @@ import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.Ledg
 import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.RecordRecordsReceivedCandidateV1;
 import java.time.Instant;
 import java.util.UUID;
-import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -91,25 +90,19 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract implements ExactIn
                 .findFirst().orElseThrow().id();
         return new ExactFlow(
                 kernel, tenant, principal, offerId, dueAt.plusSeconds(2),
-                content -> LedgerlingActions.RECORD_RECORDS_RECEIVED.candidate(
-                        new RecordRecordsReceivedCandidateV1(
-                                content.equals("changed") ? dueAt.plusSeconds(2) : dueAt.plusSeconds(1))),
+                variation -> LedgerlingActions.RECORD_RECORDS_RECEIVED.candidate(
+                        new RecordRecordsReceivedCandidateV1(switch (variation) {
+                            case ORIGINAL -> dueAt.plusSeconds(1);
+                            case CHANGED -> dueAt.plusSeconds(2);
+                        })),
                 () -> !filings.projection(tenant, id).recordsOutstanding(),
                 () -> admin().queryForObject(
                         "SELECT count(*) FROM ledger_filing_change WHERE tenant_id = ?", Integer.class, tenant));
     }
 
     @Override
-    public <T> T inCallerTransaction(Supplier<T> work) {
-        return new TransactionTemplate(transactionManager).execute(status -> work.get());
-    }
-
-    @Override
-    public void inRollbackOnlyTransaction(Runnable work) {
-        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
-            work.run();
-            status.setRollbackOnly();
-        });
+    public CallerTransactions callerTransactions() {
+        return ExactIntentExecutionContract.springTransactions(transactionManager);
     }
 
     @Override

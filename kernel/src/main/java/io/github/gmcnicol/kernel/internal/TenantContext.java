@@ -23,6 +23,14 @@ final class TenantContext {
         jdbc.execute("SET LOCAL ROLE kernel_worker");
     }
 
+    static String currentRole(JdbcTemplate jdbc) {
+        return jdbc.queryForObject("SELECT current_user", String.class);
+    }
+
+    static void restoreRole(JdbcTemplate jdbc, String role) {
+        jdbc.execute("SET LOCAL ROLE \"" + role.replace("\"", "\"\"") + "\"");
+    }
+
     static void useAfterRole(JdbcTemplate jdbc, String tenantId) {
         if (tenantId == null || !VALID_TENANT.matcher(tenantId).matches()) {
             throw new IllegalArgumentException("Invalid tenant context");

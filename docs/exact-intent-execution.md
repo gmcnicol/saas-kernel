@@ -4,7 +4,7 @@ Use `Kernel.execute(...)` when one named Intent and Application-owned database c
 
 ## Transaction requirement
 
-The caller must already have an active transaction created by the same transaction manager and datasource that the Kernel uses. `execute` does not open an independent transaction. A transaction from another manager is not sufficient.
+The caller must already have an active transaction that participates in the Kernel datasource through the configured Spring transaction manager. `execute` does not open an independent transaction. It verifies Spring's strongest reliable participation contract: an actual active transaction, active synchronization, and a transaction-synchronized connection bound for the exact Kernel datasource. Spring does not expose a stable transaction-manager identity for comparison, so Kernel deliberately does not use brittle manager-object identity checks.
 
 For example, put the Application write and exact execution in one Spring transaction and let any exception escape so Spring rolls everything back:
 
@@ -23,9 +23,9 @@ ExactIntentCompletion applyOneAction(
 }
 ```
 
-The configured transaction manager must bind `applicationJdbc` and the Kernel to the same datasource connection. Beware of Spring self-invocation: calling an `@Transactional` method through `this` does not pass through the transaction proxy.
+The configured transaction manager must bind `applicationJdbc` and the Kernel to the same datasource connection. Merely activating another manager, or binding a datasource connection without a real datasource transaction, is rejected. Beware of Spring self-invocation: calling an `@Transactional` method through `this` does not pass through the transaction proxy.
 
-`ExactIntentCompletion.COMPLETED` means execution finished inside the current transaction. It is **provisional** until the outer transaction commits. A later rollback removes the accepted Intent, Event receipts, Kernel execution changes, Application projection updates, and other Application writes made in that transaction. Other transactions, including asynchronous workers, cannot observe the exact Intent before commit.
+`ExactIntentCompletion.COMPLETED` means execution finished inside the current transaction. It is **provisional** until the outer transaction commits. A later rollback removes the accepted Intent, Execution Receipts, Kernel execution changes, Application projection updates, and other Application writes made in that transaction. Other transactions, including asynchronous workers, cannot observe the exact Intent before commit.
 
 ## Replay and conflict
 

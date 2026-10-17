@@ -11,26 +11,32 @@ import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.TypedCrmActions;
 import io.github.gmcnicol.kernel.application.ExactIntentCompletion;
 import io.github.gmcnicol.kernel.application.IntentConflictException;
 import io.github.gmcnicol.kernel.application.IntentQuery;
-import io.github.gmcnicol.kernel.application.IntentStatus;
+import io.github.gmcnicol.kernel.application.IntentRejectedException;
 import io.github.gmcnicol.kernel.application.Kernel;
 import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.RetryableIntentException;
+import io.github.gmcnicol.kernel.application.TypedAuthorisationModel;
 import io.github.gmcnicol.kernel.application.TypedProjectedState;
 import io.github.gmcnicol.kernel.application.TypedSubject;
+import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.TypedEventProjector;
 import io.github.gmcnicol.kernel.semanticpack.TypedIntentHandler;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.ConnectionHolder;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -39,6 +45,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.AbstractPlatformTransactionManager;
 import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -47,6 +54,7 @@ import org.testcontainers.utility.DockerImageName;
 
 @Testcontainers
 @SpringBootTest
+@ExtendWith(OutputCaptureExtension.class)
 class ExactIntentExecutionTests {
 
     @Container
@@ -66,9 +74,16 @@ class ExactIntentExecutionTests {
 
     @Autowired Kernel kernel;
     @Autowired CrmContactQueries contacts;
+    @Autowired DataSource dataSource;
+    @Autowired JdbcTemplate jdbc;
+    @Autowired MeterRegistry meters;
     @Autowired PlatformTransactionManager transactionManager;
     @MockitoSpyBean(name = "typedRecordInteractionHandler")
     TypedIntentHandler<FollowUpProjection, RecordInteractionCandidateV1, InteractionRecordedEventV1> handler;
+    @MockitoSpyBean(name = "typedRecordInteractionApplicability")
+    TypedApplicabilityPolicy<FollowUpProjection> applicability;
+    @MockitoSpyBean
+    TypedAuthorisationModel<FollowUpProjection> authorisationModel;
     @MockitoSpyBean(name = "typedInteractionRecordedProjector")
     TypedEventProjector<FollowUpProjection, InteractionRecordedEventV1> projector;
 
@@ -91,17 +106,32 @@ class ExactIntentExecutionTests {
     }
 
     @Test
-    void transactionFromAnotherManagerIsNotAcceptedAsTheCallerTransaction() {
-        Flow flow = flow("wrong-transaction-manager");
+    void aBoundKernelDatasourceConnectionWithoutARealDatasourceTransactionIsRejected() {
+        Flow flow = flow("resource-only-transaction");
         UUID intentId = UUID.randomUUID();
-        var unrelatedTransactionManager = new AbstractPlatformTransactionManager() {
+        var resourceOnlyManager = new AbstractPlatformTransactionManager() {
             @Override protected Object doGetTransaction() { return new Object(); }
-            @Override protected void doBegin(Object transaction, TransactionDefinition definition) {}
+            @Override protected void doBegin(Object transaction, TransactionDefinition definition) {
+                try {
+                    TransactionSynchronizationManager.bindResource(
+                            dataSource, new ConnectionHolder(dataSource.getConnection()));
+                } catch (java.sql.SQLException exception) {
+                    throw new IllegalStateException(exception);
+                }
+            }
             @Override protected void doCommit(DefaultTransactionStatus status) {}
             @Override protected void doRollback(DefaultTransactionStatus status) {}
+            @Override protected void doCleanupAfterCompletion(Object transaction) {
+                var holder = (ConnectionHolder) TransactionSynchronizationManager.unbindResource(dataSource);
+                try {
+                    holder.getConnection().close();
+                } catch (java.sql.SQLException exception) {
+                    throw new IllegalStateException(exception);
+                }
+            }
         };
 
-        new TransactionTemplate(unrelatedTransactionManager).executeWithoutResult(status ->
+        new TransactionTemplate(resourceOnlyManager).executeWithoutResult(status ->
                 assertThatThrownBy(() -> execute(flow, intentId, "not saved"))
                         .isInstanceOf(IllegalStateException.class)
                         .hasMessageContaining("active caller transaction"));
@@ -110,102 +140,106 @@ class ExactIntentExecutionTests {
     }
 
     @Test
-    void callerCommitPublishesTheSucceededIntentAndApplicationProjectionTogether() {
-        Flow flow = flow("commit");
-        UUID intentId = UUID.randomUUID();
+    void exactSuccessTelemetryIsPublishedOnlyAfterCommitAndDroppedOnRollback(CapturedOutput output) {
+        Flow committed = flow("telemetry-commit");
+        UUID committedIntentId = UUID.randomUUID();
+        double beforeCommit = succeededOutcomeCount();
 
-        ExactIntentCompletion completion = new TransactionTemplate(transactionManager).execute(status ->
-                kernel.execute(flow.tenant(), flow.principal(), flow.offerId(), intentId,
-                        TypedCrmActions.RECORD_INTERACTION.candidate(
-                                new RecordInteractionCandidateV1("completed exactly")),
-                        flow.executedAt()));
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            assertThat(execute(committed, committedIntentId, "committed telemetry"))
+                    .isEqualTo(ExactIntentCompletion.COMPLETED);
+            assertThat(succeededOutcomeCount()).isEqualTo(beforeCommit);
+            assertThat(output).doesNotContain(committedIntentId.toString());
+        });
+        assertThat(succeededOutcomeCount()).isEqualTo(beforeCommit + 1);
+        assertThat(output).contains(committedIntentId.toString(), "\"intent_outcome\":\"succeeded\"");
 
-        assertThat(completion).isEqualTo(ExactIntentCompletion.COMPLETED);
-        assertThat(kernel.findIntents(IntentQuery.tenant(flow.tenant())))
-                .singleElement()
-                .satisfies(intent -> {
-                    assertThat(intent.id()).isEqualTo(intentId);
-                    assertThat(intent.status()).isEqualTo(IntentStatus.SUCCEEDED);
-                });
-        assertThat(contacts.projection(flow.tenant(), flow.contactId()).followUpCompleted()).isTrue();
-        assertThat(kernel.findIntentEvents(flow.tenant(), intentId)).hasSize(1);
+        Flow rolledBack = flow("telemetry-rollback");
+        UUID rolledBackIntentId = UUID.randomUUID();
+        double beforeRollback = succeededOutcomeCount();
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            assertThat(execute(rolledBack, rolledBackIntentId, "rolled back telemetry"))
+                    .isEqualTo(ExactIntentCompletion.COMPLETED);
+            status.setRollbackOnly();
+        });
+        assertThat(succeededOutcomeCount()).isEqualTo(beforeRollback);
+        assertThat(output).doesNotContain(rolledBackIntentId.toString());
     }
 
     @Test
-    void asynchronousWorkerCannotSeeTheExactIntentBeforeCallerCommit() throws Exception {
-        Flow flow = flow("worker-visibility");
+    void exactExecutionRestoresTheCallerDatabaseRoleBeforeReturning() {
+        Flow flow = flow("caller-role");
+
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            String callerRole = jdbc.queryForObject("SELECT current_user", String.class);
+            jdbc.execute("CREATE TEMP TABLE exact_caller_role_probe(value integer) ON COMMIT DROP");
+
+            assertThat(execute(flow, UUID.randomUUID(), "restore caller role"))
+                    .isEqualTo(ExactIntentCompletion.COMPLETED);
+
+            assertThat(jdbc.queryForObject("SELECT current_user", String.class)).isEqualTo(callerRole);
+            jdbc.update("INSERT INTO exact_caller_role_probe(value) VALUES (1)");
+            assertThat(jdbc.queryForObject(
+                    "SELECT sum(value) FROM exact_caller_role_probe", Integer.class)).isEqualTo(1);
+        });
+    }
+
+    @Test
+    void staleProjectedStateFailsTheCallAndRollsBackTheCallerTransaction() {
+        Flow flow = flow("stale-state");
         UUID intentId = UUID.randomUUID();
-        var handlerEntered = new CountDownLatch(1);
-        var releaseHandler = new CountDownLatch(1);
-        org.mockito.Mockito.doAnswer(invocation -> {
-            RecordInteractionCandidateV1 candidate = invocation.getArgument(1);
-            if (candidate.note().equals("blocked exact request")) {
-                handlerEntered.countDown();
-                if (!releaseHandler.await(5, TimeUnit.SECONDS)) {
-                    throw new IllegalStateException("test did not release exact handler");
-                }
-            }
-            return invocation.callRealMethod();
-        }).when(handler).handle(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any());
+        admin().update("""
+                UPDATE crm_contact_engagement_projection SET state_version = 2
+                WHERE tenant_id = ? AND contact_id = ?
+                """, flow.tenant(), flow.contactId());
 
-        try (var executor = Executors.newSingleThreadExecutor()) {
-            Future<ExactIntentCompletion> exact = executor.submit(() ->
-                    new TransactionTemplate(transactionManager).execute(
-                            status -> execute(flow, intentId, "blocked exact request")));
-            assertThat(handlerEntered.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThatThrownBy(() -> new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            makeApplicationChange(flow);
+            execute(flow, intentId, "stale request");
+        })).isInstanceOf(IntentRejectedException.class);
 
-            assertThat(kernel.processNext(Instant.parse("2100-01-01T00:00:00Z"))).isEmpty();
+        assertNoExecutionEffect(flow, intentId);
+        assertApplicationChangeRolledBack(flow);
+    }
 
-            releaseHandler.countDown();
-            assertThat(exact.get()).isEqualTo(ExactIntentCompletion.COMPLETED);
+    @Test
+    void changedApplicabilityFailsTheCallAndRollsBackTheCallerTransaction() {
+        Flow flow = flow("changed-applicability");
+        UUID intentId = UUID.randomUUID();
+        org.mockito.Mockito.doReturn(false).when(applicability).isApplicable(
+                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+
+        try {
+            assertThatThrownBy(() -> new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+                makeApplicationChange(flow);
+                execute(flow, intentId, "no longer applicable");
+            })).isInstanceOf(IntentRejectedException.class);
         } finally {
-            releaseHandler.countDown();
+            org.mockito.Mockito.reset(applicability);
         }
-        assertThat(kernel.findIntents(IntentQuery.tenant(flow.tenant())))
-                .singleElement().extracting(intent -> intent.status()).isEqualTo(IntentStatus.SUCCEEDED);
+
+        assertNoExecutionEffect(flow, intentId);
+        assertApplicationChangeRolledBack(flow);
     }
 
     @Test
-    void exactExecutionCompletesOnlyTheNamedIntentWhenUnrelatedWorkIsDue() {
-        Flow unrelated = flow("unrelated-due");
-        UUID unrelatedId = UUID.randomUUID();
-        kernel.accept(unrelated.tenant(), unrelated.principal(), unrelated.offerId(), unrelatedId,
-                TypedCrmActions.RECORD_INTERACTION.candidate(new RecordInteractionCandidateV1("unrelated")));
-        Flow exact = flow("named");
-        UUID exactId = UUID.randomUUID();
+    void cedarDenialFailsTheCallAndRollsBackTheCallerTransaction() {
+        Flow flow = flow("cedar-denial");
+        UUID intentId = UUID.randomUUID();
+        org.mockito.Mockito.doThrow(new IllegalStateException("Cedar input unavailable"))
+                .when(authorisationModel).fields();
 
-        ExactIntentCompletion completion = new TransactionTemplate(transactionManager)
-                .execute(status -> execute(exact, exactId, "named"));
+        try {
+            assertThatThrownBy(() -> new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+                makeApplicationChange(flow);
+                execute(flow, intentId, "denied request");
+            })).isInstanceOf(IntentRejectedException.class);
+        } finally {
+            org.mockito.Mockito.reset(authorisationModel);
+        }
 
-        assertThat(completion).isEqualTo(ExactIntentCompletion.COMPLETED);
-        assertThat(contacts.projection(exact.tenant(), exact.contactId()).followUpCompleted()).isTrue();
-        assertThat(contacts.projection(unrelated.tenant(), unrelated.contactId()).followUpCompleted()).isFalse();
-        assertThat(kernel.findIntents(IntentQuery.tenant(unrelated.tenant())))
-                .singleElement().extracting(intent -> intent.status()).isEqualTo(IntentStatus.PENDING);
-        assertThat(kernel.processNext(Instant.parse("2100-01-01T00:00:00Z"))).get()
-                .extracting(intent -> intent.id()).isEqualTo(unrelatedId);
-    }
-
-    @Test
-    void processDueStillCompletesItsExistingBoundedQueueAfterExactExecution() {
-        Flow firstDue = flow("process-due-first");
-        Flow secondDue = flow("process-due-second");
-        UUID firstId = UUID.randomUUID();
-        UUID secondId = UUID.randomUUID();
-        kernel.accept(firstDue.tenant(), firstDue.principal(), firstDue.offerId(), firstId,
-                TypedCrmActions.RECORD_INTERACTION.candidate(new RecordInteractionCandidateV1("first due")));
-        kernel.accept(secondDue.tenant(), secondDue.principal(), secondDue.offerId(), secondId,
-                TypedCrmActions.RECORD_INTERACTION.candidate(new RecordInteractionCandidateV1("second due")));
-        Flow exact = flow("before-process-due");
-        new TransactionTemplate(transactionManager).execute(
-                status -> execute(exact, UUID.randomUUID(), "exact before due"));
-
-        assertThat(kernel.processDue(Instant.parse("2100-01-01T00:00:00Z")))
-                .extracting(intent -> intent.id())
-                .containsExactlyInAnyOrder(firstId, secondId);
-        assertThat(contacts.projection(firstDue.tenant(), firstDue.contactId()).followUpCompleted()).isTrue();
-        assertThat(contacts.projection(secondDue.tenant(), secondDue.contactId()).followUpCompleted()).isTrue();
+        assertNoExecutionEffect(flow, intentId);
+        assertApplicationChangeRolledBack(flow);
     }
 
     @Test
@@ -216,12 +250,15 @@ class ExactIntentExecutionTests {
                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any());
 
-        assertThatThrownBy(() -> new TransactionTemplate(transactionManager)
-                .executeWithoutResult(status -> execute(flow, intentId, "handler failure")))
+        assertThatThrownBy(() -> new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            makeApplicationChange(flow);
+            execute(flow, intentId, "handler failure");
+        }))
                 .isInstanceOf(RetryableIntentException.class)
                 .hasMessage("handler failed");
 
         assertNoExecutionEffect(flow, intentId);
+        assertApplicationChangeRolledBack(flow);
     }
 
     @Test
@@ -233,25 +270,15 @@ class ExactIntentExecutionTests {
             throw new IllegalStateException("projector failed after writing");
         }).when(projector).project(org.mockito.ArgumentMatchers.any());
 
-        assertThatThrownBy(() -> new TransactionTemplate(transactionManager)
-                .executeWithoutResult(status -> execute(flow, intentId, "projector failure")))
+        assertThatThrownBy(() -> new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            makeApplicationChange(flow);
+            execute(flow, intentId, "projector failure");
+        }))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("projector failed after writing");
 
         assertNoExecutionEffect(flow, intentId);
-    }
-
-    @Test
-    void callerRollbackRemovesTheIntentEventReceiptAndApplicationChanges() {
-        Flow flow = flow("caller-rollback");
-        UUID intentId = UUID.randomUUID();
-
-        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
-            assertThat(execute(flow, intentId, "rolled back")).isEqualTo(ExactIntentCompletion.COMPLETED);
-            status.setRollbackOnly();
-        });
-
-        assertNoExecutionEffect(flow, intentId);
+        assertApplicationChangeRolledBack(flow);
     }
 
     @Test
@@ -283,17 +310,13 @@ class ExactIntentExecutionTests {
     }
 
     @Test
-    void identicalSucceededRequestReconcilesButChangedCandidateConflicts() {
-        Flow flow = flow("request-identity");
+    void changedExecutionTimeUnderTheSameIntentIdentityConflicts() {
+        Flow flow = flow("execution-time-identity");
         UUID intentId = UUID.randomUUID();
         var transactions = new TransactionTemplate(transactionManager);
 
         assertThat(transactions.<ExactIntentCompletion>execute(status -> execute(flow, intentId, "original")))
                 .isEqualTo(ExactIntentCompletion.COMPLETED);
-        assertThat(transactions.<ExactIntentCompletion>execute(status -> execute(flow, intentId, "original")))
-                .isEqualTo(ExactIntentCompletion.ALREADY_SUCCEEDED);
-        assertThatThrownBy(() -> transactions.execute(status -> execute(flow, intentId, "changed")))
-                .isInstanceOf(IntentConflictException.class);
         assertThatThrownBy(() -> transactions.execute(status -> kernel.execute(
                 flow.tenant(), flow.principal(), flow.offerId(), intentId,
                 TypedCrmActions.RECORD_INTERACTION.candidate(new RecordInteractionCandidateV1("original")),
@@ -301,15 +324,28 @@ class ExactIntentExecutionTests {
                 .isInstanceOf(IntentConflictException.class);
 
         assertThat(kernel.findIntentEvents(flow.tenant(), intentId)).hasSize(1);
-        assertThat(admin().queryForObject(
-                "SELECT notes FROM crm_interaction WHERE tenant_id = ? AND intent_id = ?",
-                String.class, flow.tenant(), intentId)).isEqualTo("original");
     }
 
     private ExactIntentCompletion execute(Flow flow, UUID intentId, String note) {
         return kernel.execute(flow.tenant(), flow.principal(), flow.offerId(), intentId,
                 TypedCrmActions.RECORD_INTERACTION.candidate(new RecordInteractionCandidateV1(note)),
                 flow.executedAt());
+    }
+
+    private void makeApplicationChange(Flow flow) {
+        jdbc.execute("SET LOCAL ROLE kernel_worker");
+        jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, flow.tenant());
+        jdbc.update("""
+                UPDATE crm_contact_engagement_projection SET display_name = 'transient caller change'
+                WHERE tenant_id = ? AND contact_id = ?
+                """, flow.tenant(), flow.contactId());
+    }
+
+    private void assertApplicationChangeRolledBack(Flow flow) {
+        assertThat(admin().queryForObject("""
+                SELECT display_name FROM crm_contact_engagement_projection
+                WHERE tenant_id = ? AND contact_id = ?
+                """, String.class, flow.tenant(), flow.contactId())).isEqualTo(flow.contactId());
     }
 
     private void assertNoExecutionEffect(Flow flow, UUID intentId) {
@@ -337,6 +373,11 @@ class ExactIntentExecutionTests {
         UUID offerId = kernel.authorise(tenant, snapshot.id(), principal, dueAt.plusSeconds(2),
                 FollowUpProjection.TYPE).actionOffers().getFirst().id();
         return new Flow(tenant, contactId, principal, offerId, dueAt.plusSeconds(3));
+    }
+
+    private double succeededOutcomeCount() {
+        var counter = meters.find("kernel.intent.outcomes").tag("outcome", "succeeded").counter();
+        return counter == null ? 0 : counter.count();
     }
 
     private static JdbcTemplate admin() {
