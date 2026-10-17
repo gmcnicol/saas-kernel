@@ -13,11 +13,13 @@ import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.RetryableIntentException;
 import io.github.gmcnicol.kernel.application.TypedProjectedState;
 import io.github.gmcnicol.kernel.application.TypedSubject;
+import io.github.gmcnicol.kernel.contract.ExactIntentExecutionContract;
 import io.github.gmcnicol.kernel.contract.TypedKernelBehaviourContract;
 import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.TypedIntentHandler;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -36,7 +38,7 @@ import org.testcontainers.utility.DockerImageName;
 
 @Testcontainers
 @SpringBootTest
-class TypedWorkflowTests extends TypedKernelBehaviourContract {
+class TypedWorkflowTests extends TypedKernelBehaviourContract implements ExactIntentExecutionContract {
 
     @Container
     static final PostgreSQLContainer postgres = new PostgreSQLContainer(DockerImageName.parse("postgres:18-alpine"))
@@ -67,6 +69,41 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
     @Override
     protected Kernel kernel() {
         return kernel;
+    }
+
+    @Override
+    public ExactFlow exactFlow(String uniqueId) {
+        String tenant = "crm-exact-contract-" + uniqueId;
+        String id = "contact-exact-" + uniqueId;
+        Instant dueAt = Instant.parse("2020-08-15T09:00:00Z");
+        seedContact(tenant, id, dueAt, false);
+        FollowUpProjection projection = contacts.projection(tenant, id);
+        var snapshot = kernel.evaluate(new TypedProjectedState<>(tenant,
+                new TypedSubject<>(ContactId.TYPE, projection.contactId()), 1,
+                FollowUpProjection.TYPE, projection), dueAt.plusSeconds(1));
+        Principal principal = new Principal("Owner", "exact-contract");
+        UUID offerId = kernel.authorise(tenant, snapshot.id(), principal, dueAt.plusSeconds(2),
+                FollowUpProjection.TYPE).actionOffers().getFirst().id();
+        return new ExactFlow(
+                kernel, tenant, principal, offerId, dueAt.plusSeconds(3),
+                content -> TypedCrmActions.RECORD_INTERACTION.candidate(
+                        new RecordInteractionCandidateV1(content)),
+                () -> contacts.projection(tenant, id).followUpCompleted(),
+                () -> admin().queryForObject(
+                        "SELECT count(*) FROM crm_interaction WHERE tenant_id = ?", Integer.class, tenant));
+    }
+
+    @Override
+    public <T> T inCallerTransaction(Supplier<T> work) {
+        return new TransactionTemplate(transactionManager).execute(status -> work.get());
+    }
+
+    @Override
+    public void inRollbackOnlyTransaction(Runnable work) {
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            work.run();
+            status.setRollbackOnly();
+        });
     }
 
     @Override

@@ -108,4 +108,6 @@ TypedPresentationPack<ContactId, FollowUp> followUpPage() {
 
 Read the Application row directly into `new FollowUp(new ContactId(id), dueAt, complete)`, then call `Kernel.evaluate(TypedProjectedState, Instant)`. Derivations produce typed Facts. `Kernel.authorise` applies Cedar to fields, Facts and Actions. A client accepts only an issued Action Offer with `FollowUpActions.RECORD.candidate(new RecordInteraction(note))`. The Intent Worker invokes the bound handler, persists the ordered Event, and calls the projector in the same completion transaction. No step converts semantic state through a map or JSON round trip.
 
-Application-owned relational tables remain the normal read and write model. See [Persistence](persistence.md), [Generator reference](taxi-generator.md), and the CRM Acceptance Fixture for a complete executable path.
+Application-owned relational tables remain the normal read and write model. When one named Intent must commit atomically with other Application writes, use the transaction-mandatory public `Kernel.execute(...)` operation described in [Exact Intent execution](exact-intent-execution.md). Use `processNext` and `processDue` for ordinary asynchronous queue processing.
+
+See [Persistence](persistence.md), [Generator reference](taxi-generator.md), and the CRM Acceptance Fixture for complete executable paths.

@@ -8,6 +8,7 @@ import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.RetryableIntentException;
 import io.github.gmcnicol.kernel.application.TypedProjectedState;
 import io.github.gmcnicol.kernel.application.TypedSubject;
+import io.github.gmcnicol.kernel.contract.ExactIntentExecutionContract;
 import io.github.gmcnicol.kernel.contract.TypedKernelBehaviourContract;
 import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.TypedIntentHandler;
@@ -20,6 +21,7 @@ import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.Ledg
 import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.RecordRecordsReceivedCandidateV1;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -38,7 +40,7 @@ import org.testcontainers.utility.DockerImageName;
 
 @Testcontainers
 @SpringBootTest
-class TypedWorkflowTests extends TypedKernelBehaviourContract {
+class TypedWorkflowTests extends TypedKernelBehaviourContract implements ExactIntentExecutionContract {
 
     @Container
     static final PostgreSQLContainer postgres = new PostgreSQLContainer(DockerImageName.parse("postgres:18-alpine"))
@@ -70,6 +72,44 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
     @Override
     protected Kernel kernel() {
         return kernel;
+    }
+
+    @Override
+    public ExactFlow exactFlow(String uniqueId) {
+        String tenant = "ledger-exact-contract-" + uniqueId;
+        String id = "filing-exact-" + uniqueId;
+        Instant dueAt = Instant.parse("2020-08-15T09:00:00Z");
+        seedFiling(tenant, id, dueAt, true, false);
+        FilingProjection projection = filings.projection(tenant, id);
+        var snapshot = kernel.evaluate(new TypedProjectedState<>(tenant,
+                new TypedSubject<>(FilingId.TYPE, projection.filingId()), 1,
+                FilingProjection.TYPE, projection), dueAt);
+        Principal principal = new Principal("Staff", "exact-contract");
+        UUID offerId = kernel.authorise(tenant, snapshot.id(), principal, dueAt.plusSeconds(1),
+                        FilingProjection.TYPE).actionOffers().stream()
+                .filter(candidate -> candidate.actionType() == LedgerlingActions.RECORD_RECORDS_RECEIVED)
+                .findFirst().orElseThrow().id();
+        return new ExactFlow(
+                kernel, tenant, principal, offerId, dueAt.plusSeconds(2),
+                content -> LedgerlingActions.RECORD_RECORDS_RECEIVED.candidate(
+                        new RecordRecordsReceivedCandidateV1(
+                                content.equals("changed") ? dueAt.plusSeconds(2) : dueAt.plusSeconds(1))),
+                () -> !filings.projection(tenant, id).recordsOutstanding(),
+                () -> admin().queryForObject(
+                        "SELECT count(*) FROM ledger_filing_change WHERE tenant_id = ?", Integer.class, tenant));
+    }
+
+    @Override
+    public <T> T inCallerTransaction(Supplier<T> work) {
+        return new TransactionTemplate(transactionManager).execute(status -> work.get());
+    }
+
+    @Override
+    public void inRollbackOnlyTransaction(Runnable work) {
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            work.run();
+            status.setRollbackOnly();
+        });
     }
 
     @Override
