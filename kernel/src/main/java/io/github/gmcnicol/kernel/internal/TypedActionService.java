@@ -332,6 +332,7 @@ final class TypedActionService {
             throw new IntentRejectedException();
         }
         String callerRole = TenantContext.currentRole(jdbc);
+        Throwable failure = null;
         try {
             Instant attemptStartedAt = clock.instant();
             Intent accepted = acceptInTransaction(
@@ -349,8 +350,16 @@ final class TypedActionService {
             telemetry.intent(claim.tenantId(), claim.subject(), claim.offerId(), claim.id(), completed.status(),
                     KernelTelemetry.traceId(claim.traceparent(), claim.id()));
             return ExactIntentCompletion.COMPLETED;
+        } catch (RuntimeException | Error exception) {
+            failure = exception;
+            throw exception;
         } finally {
-            TenantContext.restoreRole(jdbc, callerRole);
+            try {
+                TenantContext.restoreRole(jdbc, callerRole);
+            } catch (RuntimeException roleRestorationFailure) {
+                if (failure == null) throw roleRestorationFailure;
+                failure.addSuppressed(roleRestorationFailure);
+            }
         }
     }
 

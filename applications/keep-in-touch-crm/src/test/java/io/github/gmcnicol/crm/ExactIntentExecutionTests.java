@@ -299,6 +299,27 @@ class ExactIntentExecutionTests {
     }
 
     @Test
+    void databaseProjectorFailureIsNotMaskedByRoleRestoration() {
+        Flow flow = flow("database-projector-failure");
+        UUID intentId = UUID.randomUUID();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            invocation.callRealMethod();
+            jdbc.queryForObject("SELECT 1 / 0", Integer.class);
+            return null;
+        }).when(projector).project(org.mockito.ArgumentMatchers.any());
+
+        assertThatThrownBy(() -> new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            makeApplicationChange(flow);
+            execute(flow, intentId, "database projector failure");
+        }))
+                .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class)
+                .hasMessageContaining("SELECT 1 / 0");
+
+        assertNoExecutionEffect(flow, intentId);
+        assertApplicationChangeRolledBack(flow);
+    }
+
+    @Test
     void concurrentIdenticalRequestsHaveOneEffectAndReconcileToTheSameOutcome() throws Exception {
         Flow flow = flow("concurrent");
         UUID intentId = UUID.randomUUID();
