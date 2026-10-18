@@ -38,6 +38,7 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.ConnectionHolder;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.orm.jpa.JpaTransactionManager;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
@@ -86,6 +87,22 @@ class ExactIntentExecutionTests {
     TypedAuthorisationModel<FollowUpProjection> authorisationModel;
     @MockitoSpyBean(name = "typedInteractionRecordedProjector")
     TypedEventProjector<FollowUpProjection, InteractionRecordedEventV1> projector;
+
+    @Test
+    void exactExecutionParticipatesInTheApplicationsJpaTransaction() {
+        assertThat(transactionManager).isInstanceOf(JpaTransactionManager.class);
+        Flow flow = flow("jpa-transaction");
+        UUID intentId = UUID.randomUUID();
+
+        ExactIntentCompletion completion = new TransactionTemplate(transactionManager).execute(status ->
+                execute(flow, intentId, "jpa transaction"));
+        assertThat(completion).isEqualTo(ExactIntentCompletion.COMPLETED);
+
+        assertThat(kernel.findIntentEvents(flow.tenant(), intentId)).hasSize(1);
+        assertThat(admin().queryForObject(
+                "SELECT count(*) FROM crm_interaction WHERE tenant_id = ?", Integer.class, flow.tenant()))
+                .isEqualTo(1);
+    }
 
     @Test
     void exactExecutionRequiresAnActiveCallerTransactionBeforeAcceptingAnything() {

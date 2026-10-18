@@ -4,7 +4,7 @@ Use `Kernel.execute(...)` when one named Intent and Application-owned database c
 
 ## Transaction requirement
 
-The caller must already have an active transaction that participates in the Kernel datasource through the configured Spring transaction manager. `execute` does not open an independent transaction. It verifies Spring's strongest reliable participation contract: an actual active transaction, active synchronization, and a transaction-synchronized connection bound for the exact Kernel datasource. Spring does not expose a stable transaction-manager identity for comparison, so Kernel deliberately does not use brittle manager-object identity checks.
+The caller must already have an active transaction that participates in the Kernel datasource through the configured Spring transaction manager. `execute` does not open an independent transaction. It verifies Spring's strongest reliable participation contract: an actual active transaction, active synchronization, and a non-auto-commit transactional connection bound for the exact Kernel datasource. This supports both JDBC and JPA transaction managers that expose the JPA transaction's connection for the same datasource. Spring does not expose a stable transaction-manager identity for comparison, so Kernel deliberately does not use brittle manager-object identity or resource-holder implementation-state checks.
 
 For example, put the Application write and exact execution in one Spring transaction and let any exception escape so Spring rolls everything back:
 

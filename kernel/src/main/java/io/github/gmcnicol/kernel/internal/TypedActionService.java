@@ -381,15 +381,16 @@ final class TypedActionService {
         Object resource = dataSource == null ? null : TransactionSynchronizationManager.getResource(dataSource);
         if (!TransactionSynchronizationManager.isActualTransactionActive()
                 || !TransactionSynchronizationManager.isSynchronizationActive()
-                || !(resource instanceof ConnectionHolder holder)
-                || !holder.isSynchronizedWithTransaction()) {
+                || !(resource instanceof ConnectionHolder)) {
             throw new IllegalStateException("Exact Intent execution requires an active caller transaction");
         }
         var connection = DataSourceUtils.getConnection(dataSource);
         try {
-            if (!DataSourceUtils.isConnectionTransactional(connection, dataSource)) {
+            if (!DataSourceUtils.isConnectionTransactional(connection, dataSource) || connection.getAutoCommit()) {
                 throw new IllegalStateException("Exact Intent execution requires an active caller transaction");
             }
+        } catch (java.sql.SQLException exception) {
+            throw new IllegalStateException("Cannot verify the caller transaction", exception);
         } finally {
             DataSourceUtils.releaseConnection(connection, dataSource);
         }
