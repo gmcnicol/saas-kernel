@@ -1,3 +1,4 @@
+import io.github.gmcnicol.kernel.taxi.Capability
 import io.github.gmcnicol.kernel.taxi.Subject
 import io.github.gmcnicol.kernel.taxi.Contract
 import io.github.gmcnicol.kernel.taxi.ProjectedState
@@ -6,6 +7,12 @@ import io.github.gmcnicol.kernel.taxi.Event
 import io.github.gmcnicol.kernel.taxi.ActionService
 
 namespace io.github.gmcnicol.ledgerling
+
+@Contract(version = 1) @Capability
+model ManageFiling { remaining: Int? }
+
+@Contract(version = 1) @Capability
+model ExportFilings {}
 
 @Subject
 type FilingId inherits String

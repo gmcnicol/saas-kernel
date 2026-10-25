@@ -125,6 +125,9 @@ public class EvaluationAutoConfiguration {
     CedarAuthoriser cedarAuthoriser(
             List<AuthorisationBundle> bundles,
             List<io.github.gmcnicol.kernel.application.TypedAuthorisationModel<?>> typedModels,
+            List<SemanticBindings> bindings,
+            List<io.github.gmcnicol.kernel.application.EffectiveCapabilityResolver> resolvers,
+            Clock clock,
             ResourceLoader resources) {
         Properties manifest = load(resources, bundles.getFirst().manifestResource());
         String schema = read(resources, manifest.getProperty("schema"));
@@ -139,7 +142,7 @@ public class EvaluationAutoConfiguration {
                     PolicySet.parsePolicies(policies),
                     typedModels,
                     manifest.getProperty("id"),
-                    checksum);
+                    checksum, bindings, resolvers, clock);
         } catch (Exception exception) {
             throw new IllegalStateException("Cannot initialise Authorisation Bundle", exception);
         }

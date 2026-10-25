@@ -7,7 +7,13 @@ import java.util.Set;
 public record TypedAuthorisationModel<P>(
         ProjectionType<?, P> projectionType,
         Set<FieldType<P, ?>> fields,
-        Set<FactType<?>> facts) {
+        Set<FactType<?>> facts,
+        Set<CapabilityType<?>> requiredCapabilities) {
+    public TypedAuthorisationModel(
+            ProjectionType<?, P> projectionType, Set<FieldType<P, ?>> fields, Set<FactType<?>> facts) {
+        this(projectionType, fields, facts, Set.of());
+    }
+
     public TypedAuthorisationModel(ProjectionType<?, P> projectionType, Set<FieldType<P, ?>> fields) {
         this(projectionType, fields, Set.of());
     }
@@ -16,6 +22,7 @@ public record TypedAuthorisationModel<P>(
         Objects.requireNonNull(projectionType, "projectionType");
         fields = Set.copyOf(fields);
         facts = Set.copyOf(facts);
+        requiredCapabilities = Set.copyOf(requiredCapabilities);
         if (!projectionType.fields().containsAll(fields)) {
             throw new IllegalArgumentException("Authorisation fields must belong to the generated Projection");
         }

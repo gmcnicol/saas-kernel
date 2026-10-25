@@ -1,3 +1,4 @@
+import io.github.gmcnicol.kernel.taxi.Capability
 import io.github.gmcnicol.kernel.taxi.Subject
 import io.github.gmcnicol.kernel.taxi.Contract
 import io.github.gmcnicol.kernel.taxi.ProjectedState
@@ -32,6 +33,9 @@ model Customer {
 }
 
 model Removable {}
+
+@Contract(version = 1) @Capability
+model ManageCustomer { remaining: Int? }
 
 @Contract(version = 1)
 model ChangeCustomer { note: String }
