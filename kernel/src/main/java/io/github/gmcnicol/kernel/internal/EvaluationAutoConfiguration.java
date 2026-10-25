@@ -87,8 +87,8 @@ public class EvaluationAutoConfiguration {
     @Bean
     @DependsOn({"applicationValidator", "runtimeRoleValidator"})
     io.github.gmcnicol.kernel.application.AuthorisedReads authorisedReads(
-            DataSource dataSource, CedarAuthoriser cedar, List<SemanticBindings> bindings) {
-        return new ScopedAuthorisedReads(dataSource, cedar, bindings);
+            DataSource dataSource, CedarAuthoriser cedar, List<SemanticBindings> bindings, MeterRegistry meters) {
+        return new ScopedAuthorisedReads(dataSource, cedar, bindings, meters);
     }
 
     @Bean

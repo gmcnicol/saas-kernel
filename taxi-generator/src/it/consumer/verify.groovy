@@ -68,6 +68,8 @@ class WrongRead {
     void consume(AuthorisedRecord<CustomerRead> view, CustomerRead raw) {
         ReadValue<String> foreign = view.get(Customer.READ_NAME);
         AuthorisedRecord<CustomerRead> notAuthorised = raw;
+        ReadPage<Customer> foreignPage = new ReadPage<CustomerRead>(java.util.List.of(view), java.util.OptionalLong.empty(), java.util.Optional.empty());
+        java.util.Set<ReadPath<CustomerRead, ?>> foreignQuery = java.util.Set.of(Customer.READ_NAME);
     }
 }
 '''

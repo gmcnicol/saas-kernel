@@ -82,6 +82,14 @@ public final class Consumer {
         });
     }
 
+    public static void indexedReadConsumer(io.github.gmcnicol.kernel.application.AuthorisedReads reads,
+            io.github.gmcnicol.kernel.application.ReadRequest<example.bindings.customer.crm.CustomerRead> request,
+            io.github.gmcnicol.kernel.application.AuthorisedIndex<example.bindings.customer.crm.CustomerRead> index) {
+        io.github.gmcnicol.kernel.application.ReadPage<example.bindings.customer.crm.CustomerRead> page =
+                reads.collection(request, index, io.github.gmcnicol.kernel.application.CollectionOptions.page(16));
+        reads.collection(request, index, new io.github.gmcnicol.kernel.application.CollectionOptions(16, 100, () -> false, page.continuation()));
+    }
+
     private static void rejects(Runnable parser) {
         try {
             parser.run();

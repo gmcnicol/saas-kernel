@@ -145,6 +145,391 @@ class AuthorisedReadTests {
                 .hasMessage("Authorisation denied").hasNoCause().hasToString("io.github.gmcnicol.kernel.application.AuthorisationDeniedException: Authorisation denied");
     }
 
+    @Test void rawCandidateCollectionMetadataIsExplicitlyUnsupportedEvenWhenItFits() {
+        var request = request("unsafe-raw-metadata");
+        assertThatThrownBy(() -> reads.collection(request, single(request, "SELECT 'visible'"), CollectionOptions.page(127)))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.UNSUPPORTED)).hasNoCause();
+    }
+
+    @Test void currentIndexCountsAreExactIncludingZeroAndResultsAreImmutable() {
+        var request = request("complete-collection-" + UUID.randomUUID());
+        var index = networkIndex(request, 2, 10, true);
+        var page = reads.collection(request, index, CollectionOptions.page(2));
+        assertThat(page.records()).hasSize(2);
+        assertThat(page.exactCount()).hasValue(2);
+        assertThat(page.continuation()).isEmpty();
+        assertThatThrownBy(page.records()::clear).isInstanceOf(UnsupportedOperationException.class);
+        var emptyRequest = request("empty-index-" + UUID.randomUUID());
+        assertThat(reads.collection(emptyRequest, networkIndex(emptyRequest, 0, 10, true), CollectionOptions.page(2)).exactCount()).hasValue(0);
+    }
+
+    @Test void collectionCancellationAndDecisionBudgetsNeverReleasePartialOutput() {
+        var request = request("collection-work");
+        var cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+        var delegate = single(request, "SELECT 'visible' FROM generate_series(1, 2)");
+        var source = new ReadSource<NetworkContactRead>() {
+            public String revision(java.sql.Connection c) { return "1"; }
+            public void select(java.sql.Connection c, java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception {
+                delegate.select(c, candidate -> { sink.accept(candidate); cancelled.set(true); });
+            }
+        };
+        assertThatThrownBy(() -> reads.collection(request, authorisedFixture(request, source),
+                new CollectionOptions(2, 4224, cancelled::get, Optional.empty())))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.CANCELLED)).hasNoCause();
+        assertThatThrownBy(() -> reads.collection(request, authorisedFixture(request, delegate),
+                new CollectionOptions(2, 2, () -> false, Optional.empty())))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.BUDGET)).hasNoCause();
+    }
+
+    @Test void currentAuthorisedIndexPagesLargeNetworksWithoutCandidateMetadata() {
+        var request = request("indexed-" + UUID.randomUUID());
+        var index = networkIndex(request, 300, 50, false);
+        var first = reads.collection(request, index, CollectionOptions.page(40));
+        assertThat(first.records()).hasSize(40);
+        assertThat(first.exactCount()).isEmpty();
+        assertThat(first.continuation()).isPresent();
+        assertThat(first.continuation().orElseThrow()).doesNotContain(request.tenantId(), "network-a", "SECRET");
+        var next = reads.collection(request, index, new CollectionOptions(40, 4224, () -> false, first.continuation()));
+        assertThat(next.records().getFirst().get(NetworkContactRead.READ_DETAILS_DISPLAY_NAME)).isEqualTo(ReadValue.shown("Name-41"));
+        assertThat(next.exactCount()).isEmpty();
+        assertThat(first.toString()).isEqualTo("ReadPage[redacted]");
+        int total = first.records().size() + next.records().size();
+        while (next.continuation().isPresent()) {
+            next = reads.collection(request, index, new CollectionOptions(40, 4224, () -> false, next.continuation()));
+            assertThat(next.records()).isNotEmpty();
+            total += next.records().size();
+        }
+        assertThat(total).isEqualTo(300);
+    }
+
+    AuthorisedIndex<NetworkContactRead> networkIndex(ReadRequest<NetworkContactRead> request, int visible, int hidden, boolean exact) {
+        var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.execute("CREATE TABLE IF NOT EXISTS collection_contact (tenant_id text, id int, owner text, name text)");
+        admin.execute("ALTER TABLE collection_contact ENABLE ROW LEVEL SECURITY");
+        admin.execute("ALTER TABLE collection_contact FORCE ROW LEVEL SECURITY");
+        admin.execute("DROP POLICY IF EXISTS collection_tenant ON collection_contact");
+        admin.execute("CREATE POLICY collection_tenant ON collection_contact USING (tenant_id = current_setting('kernel.tenant_id', true))");
+        admin.execute("GRANT SELECT ON collection_contact TO kernel_runtime");
+        admin.execute("CREATE INDEX IF NOT EXISTS collection_owner_order ON collection_contact (tenant_id, owner, id)");
+        admin.execute("CREATE TABLE IF NOT EXISTS collection_revision (tenant_id text PRIMARY KEY, source_revision text, index_revision text, authorised_count bigint)");
+        admin.execute("ALTER TABLE collection_revision ENABLE ROW LEVEL SECURITY");
+        admin.execute("ALTER TABLE collection_revision FORCE ROW LEVEL SECURITY");
+        admin.execute("DROP POLICY IF EXISTS collection_revision_tenant ON collection_revision");
+        admin.execute("CREATE POLICY collection_revision_tenant ON collection_revision USING (tenant_id = current_setting('kernel.tenant_id', true))");
+        admin.execute("GRANT SELECT ON collection_revision TO kernel_runtime");
+        admin.update("INSERT INTO collection_revision VALUES (?, 'source-1', 'index-1', ?)", request.tenantId(), visible);
+        admin.update("INSERT INTO collection_contact SELECT ?, n, 'member', 'Name-' || n FROM generate_series(1, ?) n", request.tenantId(), visible);
+        admin.update("INSERT INTO collection_contact SELECT ?, n + 10000, 'stranger', 'SECRET' FROM generate_series(1, ?) n", request.tenantId(), hidden);
+        return new AuthorisedIndex<>() {
+            public Set<ReadPath<NetworkContactRead, ?>> queryFields() { return Set.of(NetworkContactRead.READ_CONTACT_ID); }
+            public State current(java.sql.Connection c, Binding<NetworkContactRead> binding) throws Exception {
+                // Application-owned authorised relation, keyed by current scope/principal/policy/authority.
+                if (!binding.authorityRevision().equals("1")) throw new CollectionReadException(CollectionReadException.Reason.STALE);
+                try (var q = c.prepareStatement("SELECT * FROM collection_revision")) {
+                    try (var row = q.executeQuery()) {
+                        if (!row.next()) throw new CollectionReadException(CollectionReadException.Reason.STALE);
+                        return new State(row.getString("source_revision"), row.getString("index_revision"), checksum(), "1", exact ? OptionalLong.of(row.getLong("authorised_count")) : OptionalLong.empty());
+                    }
+                }
+            }
+            public void select(java.sql.Connection c, Binding<NetworkContactRead> binding, long offset, int limit,
+                    java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception {
+                try (var q = c.prepareStatement("SELECT * FROM collection_contact WHERE owner = ? ORDER BY id LIMIT ? OFFSET ?")) {
+                    q.setString(1, binding.request().principal().id()); q.setInt(2, limit); q.setLong(3, offset); q.setFetchSize(1);
+                    try (var row = q.executeQuery()) {
+                        while (row.next()) {
+                            var id = new NetworkContactId(Integer.toString(row.getInt("id")));
+                            sink.accept(new ReadCandidate<>(row.getString("tenant_id"), request.scope(), new TypedSubject<>(NetworkContactId.TYPE, id),
+                                    new NetworkContactRead(id, "network-a", row.getString("owner"), Optional.of(new ContactReadDetails(row.getString("name"), Optional.empty())), List.of())));
+                        }
+                    }
+                }
+            }
+        };
+    }
+
+    @Test void privateFieldPredicatesRejectBeforeQueryEvenWhenNoRecordsOrOutputFieldsExist() {
+        var request = request("private-query-" + UUID.randomUUID());
+        var index = networkIndex(request, 0, 20, false);
+        var selected = new java.util.concurrent.atomic.AtomicBoolean();
+        var privateQuery = new AuthorisedIndex<NetworkContactRead>() {
+            public Set<ReadPath<NetworkContactRead, ?>> queryFields() { return Set.of(NetworkContactRead.READ_DETAILS_PRIVATE_NOTE); }
+            public State current(java.sql.Connection c, Binding<NetworkContactRead> b) throws Exception { return index.current(c, b); }
+            public void select(java.sql.Connection c, Binding<NetworkContactRead> b, long offset, int limit,
+                    java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) { selected.set(true); }
+        };
+        assertThatThrownBy(() -> reads.collection(request, privateQuery, CollectionOptions.page(10)))
+                .isInstanceOf(CollectionReadException.class).hasNoCause();
+        assertThat(selected).isFalse();
+    }
+
+    @Test void permittedGeneratedQueryPathIsCheckedEvenWhenNotSelectedForOutput() {
+        var base = request("permitted-query-" + UUID.randomUUID());
+        var request = new ReadRequest<>(base.tenantId(), base.principal(), base.scope(), base.type(), Set.<ReadPath<NetworkContactRead, ?>>of(),
+                base.bundleId(), base.bundleChecksum(), base.limits());
+        var index = networkIndex(request, 3, 20, false);
+        var query = new AuthorisedIndex<NetworkContactRead>() {
+            public String queryIdentity() { return "name-search-v1:bound-parameter-digest"; }
+            public Set<ReadPath<NetworkContactRead, ?>> queryFields() { return Set.of(NetworkContactRead.READ_DETAILS_DISPLAY_NAME, NetworkContactRead.READ_CONTACT_ID); }
+            public State current(java.sql.Connection c, Binding<NetworkContactRead> b) throws Exception { return index.current(c, b); }
+            public void select(java.sql.Connection c, Binding<NetworkContactRead> b, long offset, int limit,
+                    java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception { index.select(c, b, offset, limit, sink); }
+        };
+        var result = reads.collection(request, query, CollectionOptions.page(2));
+        assertThat(result.records()).hasSize(2);
+        assertThat(result.records().getFirst().get(NetworkContactRead.READ_DETAILS_DISPLAY_NAME)).isEqualTo(ReadValue.hidden());
+        assertThat(result.continuation()).isPresent();
+    }
+
+    @Test void collectionAuthorityChangeIsStaleNotAnEmptyResultOrDependencyFailure() {
+        var request = request("collection-revision");
+        var source = new ReadSource<NetworkContactRead>() {
+            public String revision(java.sql.Connection c) { return "1"; }
+            public void select(java.sql.Connection c, java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception {
+                single(request, "SELECT 'once-authorised'").select(c, sink);
+                authority.states.put(request.tenantId(), "changed");
+            }
+        };
+        assertThatThrownBy(() -> reads.collection(request, authorisedFixture(request, source), CollectionOptions.page(2)))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.STALE)).hasNoCause();
+    }
+
+    @Test void swallowedIndexWindowOverrunCannotReleaseAPage() {
+        var request = request("index-overrun-" + UUID.randomUUID());
+        var index = networkIndex(request, 10, 0, false);
+        var oversized = new AuthorisedIndex<NetworkContactRead>() {
+            public Set<ReadPath<NetworkContactRead, ?>> queryFields() { return index.queryFields(); }
+            public State current(java.sql.Connection c, Binding<NetworkContactRead> b) throws Exception { return index.current(c, b); }
+            public void select(java.sql.Connection c, Binding<NetworkContactRead> b, long offset, int limit,
+                    java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception {
+                try { index.select(c, b, offset, 10, sink); }
+                catch (CollectionReadException ignored) { /* Trusted callback cannot override a failed sink. */ }
+            }
+        };
+        assertThatThrownBy(() -> reads.collection(request, oversized, CollectionOptions.page(2)))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.BUDGET)).hasNoCause();
+    }
+
+    @Autowired io.micrometer.core.instrument.MeterRegistry meters;
+
+    @Test void hiddenRowsDoNotChangeIndexedPageShapeOrMeasuredDecisionWork() {
+        var request = request("metamorphic-" + UUID.randomUUID());
+        var index = networkIndex(request, 12, 0, true);
+        var before = measuredDecisions();
+        var first = reads.collection(request, index, CollectionOptions.page(5));
+        double work = measuredDecisions() - before;
+        var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("INSERT INTO collection_contact SELECT ?, n + 10000, 'stranger', 'HIDDEN' FROM generate_series(1, 10000) n", request.tenantId());
+        before = measuredDecisions();
+        var again = reads.collection(request, index, CollectionOptions.page(5));
+        assertThat(measuredDecisions() - before).isEqualTo(work).isEqualTo(25);
+        assertThat(again.records().toString()).isEqualTo(first.records().toString());
+        assertThat(again.exactCount()).hasValue(12);
+        assertThat(again.continuation().isPresent()).isEqualTo(first.continuation().isPresent());
+        assertThat(meters.find("kernel.read.collection.duration").tag("mode", "index").timer()).isNotNull();
+    }
+    double measuredDecisions() {
+        var summary = meters.find("kernel.read.collection.decisions").tag("mode", "index").summary();
+        return summary == null ? 0 : summary.totalAmount();
+    }
+
+    @Test void continuationCannotBeReplayedAcrossCurrentBindingsOrAfterRevocation() {
+        var request = request("replay-" + UUID.randomUUID());
+        var index = networkIndex(request, 5, 4, false);
+        var token = reads.collection(request, index, CollectionOptions.page(2)).continuation();
+        var resume = new CollectionOptions(2, 4224, () -> false, token);
+        List<ReadRequest<NetworkContactRead>> foreign = List.of(
+                new ReadRequest<>(request.tenantId() + "-other", request.principal(), request.scope(), request.type(), request.fields(), request.bundleId(), request.bundleChecksum(), request.limits()),
+                new ReadRequest<>(request.tenantId(), new Principal("Owner", "other"), request.scope(), request.type(), request.fields(), request.bundleId(), request.bundleChecksum(), request.limits()),
+                new ReadRequest<>(request.tenantId(), request.principal(), new TypedSubject<>(NetworkId.TYPE, new NetworkId("network-b")), request.type(), request.fields(), request.bundleId(), request.bundleChecksum(), request.limits()),
+                new ReadRequest<>(request.tenantId(), request.principal(), request.scope(), request.type(), Set.of(NetworkContactRead.READ_DETAILS_DISPLAY_NAME), request.bundleId(), request.bundleChecksum(), request.limits()),
+                new ReadRequest<>(request.tenantId(), request.principal(), request.scope(), request.type(), request.fields(), request.bundleId(), "stale-policy", request.limits()));
+        for (var other : foreign) assertThatThrownBy(() -> reads.collection(other, index, resume))
+                .isInstanceOf(CollectionReadException.class).hasNoCause();
+        assertThatThrownBy(() -> reads.collection(request, index, new CollectionOptions(3, 4224, () -> false, token)))
+                .isInstanceOf(CollectionReadException.class).hasNoCause();
+        assertThatThrownBy(() -> reads.collection(request, index, new CollectionOptions(2, 4224, () -> false, Optional.of(token.orElseThrow() + "x"))))
+                .isInstanceOf(CollectionReadException.class).hasNoCause();
+        authority.states.put(request.tenantId(), "changed");
+        assertThatThrownBy(() -> reads.collection(request, index, resume)).isInstanceOf(CollectionReadException.class).hasNoCause();
+        authority.states.put(request.tenantId(), "revoked");
+        assertThatThrownBy(() -> reads.collection(request, index, resume)).isInstanceOf(CollectionReadException.class).hasNoCause();
+    }
+
+    @Test void indexSourceAndQueryRevisionsInvalidateResumeAndNeverFallBackToRawRows() {
+        var request = request("index-fences-" + UUID.randomUUID());
+        var index = networkIndex(request, 6, 4, false);
+        var token = reads.collection(request, index, CollectionOptions.page(2)).continuation();
+        for (String change : List.of("source", "index", "query", "mid-query", "mid-policy", "mid-authority", "denied")) {
+            var calls = new java.util.concurrent.atomic.AtomicInteger();
+            var changed = new AuthorisedIndex<NetworkContactRead>() {
+                public Set<ReadPath<NetworkContactRead, ?>> queryFields() { return index.queryFields(); }
+                public String queryIdentity() { return change.equals("query") ? "changed-template-or-parameters" : "all-v1"; }
+                public State current(java.sql.Connection c, Binding<NetworkContactRead> b) {
+                    boolean mid = change.startsWith("mid-") && calls.incrementAndGet() > 1;
+                    return new State(change.equals("source") || (mid && change.equals("mid-query")) ? "source-2" : "source-1",
+                            change.equals("index") ? "index-2" : "index-1", mid && change.equals("mid-policy") ? "new-policy" : checksum(),
+                            mid && change.equals("mid-authority") ? "2" : "1", OptionalLong.empty());
+                }
+                public void select(java.sql.Connection c, Binding<NetworkContactRead> b, long offset, int limit,
+                        java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception {
+                    if (change.equals("denied")) single(request, "SELECT 'SECRET'").select(c, candidate -> {
+                        var v = candidate.value();
+                        sink.accept(new ReadCandidate<>(candidate.tenantId(), candidate.scope(), candidate.record(),
+                                new NetworkContactRead(v.contactId(), v.network(), "stranger", v.details(), v.tags())));
+                    });
+                    else index.select(c, b, offset, limit, sink);
+                }
+            };
+            assertThatThrownBy(() -> reads.collection(request, changed, new CollectionOptions(2, 4224, () -> false, token)))
+                    .as(change).isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.STALE)).hasNoCause();
+        }
+    }
+
+    @Test void legacyMixedReadsStillFilterButCannotAcquireCollectionMetadataOrRawPagination() {
+        var request = request("mixed-count");
+        var source = new ReadSource<NetworkContactRead>() {
+            public String revision(java.sql.Connection c) { return "1"; }
+            public void select(java.sql.Connection c, java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception {
+                single(request, "SELECT 'visible' FROM generate_series(1, 2)").select(c, sink);
+                single(request, "SELECT 'SECRET'").select(c, candidate -> {
+                    var v = candidate.value();
+                    sink.accept(new ReadCandidate<>(candidate.tenantId(), candidate.scope(), candidate.record(),
+                            new NetworkContactRead(v.contactId(), v.network(), "stranger", v.details(), v.tags())));
+                });
+            }
+        };
+        var records = reads.many(request, source);
+        assertThat(records).hasSize(2);
+        assertThat(records.toString()).doesNotContain("SECRET");
+        assertThatThrownBy(() -> reads.collection(request, source, CollectionOptions.page(127)))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.UNSUPPORTED));
+        assertThatThrownBy(() -> reads.collection(request, source, CollectionOptions.page(1)))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.UNSUPPORTED));
+    }
+
+    @Test void collectionDependencyFailureAndCedarErrorsAreNotNoResults() {
+        var request = request("collection-dependency");
+        assertThat(reads.collection(request, authorisedFixture(request, single(request, "SELECT 'none' WHERE false")), CollectionOptions.page(2)).records()).isEmpty();
+        assertThatThrownBy(() -> reads.collection(request, authorisedFixture(request, single(request, "SELECT 'PRIVATE' FROM deliberately_missing")), CollectionOptions.page(2)))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.DEPENDENCY))
+                .hasMessage("Collection read failed: DEPENDENCY").hasNoCause();
+        authority.states.put(request.tenantId(), "cedar-record-error");
+        assertThatThrownBy(() -> reads.collection(request, authorisedFixture(request, single(request, "SELECT 'PRIVATE'")), CollectionOptions.page(2)))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.DEPENDENCY)).hasNoCause();
+    }
+
+    @Test void collectionByteAndSqlDeadlineOverrunsAreBudgetFailuresNotDependencies() {
+        var base = request("collection-limit-reasons");
+        var request = new ReadRequest<>(base.tenantId(), base.principal(), base.scope(), base.type(), base.fields(),
+                base.bundleId(), base.bundleChecksum(), new ReadLimits(3, 2, 64, 50));
+        for (String sql : List.of("SELECT repeat('x', 100)", "SELECT 'late', pg_sleep(0.2)")) {
+            assertThatThrownBy(() -> reads.collection(request, authorisedFixture(request, single(request, sql)), CollectionOptions.page(1)))
+                    .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.BUDGET)).hasNoCause();
+        }
+    }
+
+    @Test void authoritativeDatabaseIndexWithdrawalInvalidatesResume() {
+        var request = request("withdraw-index-" + UUID.randomUUID());
+        var index = networkIndex(request, 10, 0, true);
+        var token = reads.collection(request, index, CollectionOptions.page(2)).continuation();
+        var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("UPDATE collection_revision SET source_revision = 'withdrawn-2', index_revision = 'rebuilt-2' WHERE tenant_id = ?", request.tenantId());
+        assertThatThrownBy(() -> reads.collection(request, index, new CollectionOptions(2, 4224, () -> false, token)))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.STALE)).hasNoCause();
+    }
+
+    @Test void applicationNameSearchAndOrderUsePermittedGeneratedPathAndAuthorisedOffsets() {
+        var request = request("search-" + UUID.randomUUID());
+        var base = networkIndex(request, 35, 100, false);
+        var query = new AuthorisedIndex<NetworkContactRead>() {
+            public String queryIdentity() { return "name-prefix-v1:parameter-sha256-for-name-2"; }
+            public Set<ReadPath<NetworkContactRead, ?>> queryFields() { return Set.of(NetworkContactRead.READ_DETAILS_DISPLAY_NAME, NetworkContactRead.READ_CONTACT_ID); }
+            public State current(java.sql.Connection c, Binding<NetworkContactRead> b) throws Exception { return base.current(c, b); }
+            public void select(java.sql.Connection c, Binding<NetworkContactRead> b, long offset, int limit,
+                    java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception {
+                // Authored template. No field strings/query fragments come from the caller or Kernel.
+                try (var q = c.prepareStatement("SELECT * FROM collection_contact WHERE owner = ? AND name LIKE ? ORDER BY name, id LIMIT ? OFFSET ?")) {
+                    q.setString(1, b.request().principal().id()); q.setString(2, "Name-2%"); q.setInt(3, limit); q.setLong(4, offset); q.setFetchSize(1);
+                    try (var row = q.executeQuery()) {
+                        while (row.next()) {
+                            var id = new NetworkContactId(Integer.toString(row.getInt("id")));
+                            sink.accept(new ReadCandidate<>(row.getString("tenant_id"), request.scope(), new TypedSubject<>(NetworkContactId.TYPE, id),
+                                    new NetworkContactRead(id, "network-a", row.getString("owner"), Optional.of(new ContactReadDetails(row.getString("name"), Optional.empty())), List.of())));
+                        }
+                    }
+                }
+            }
+        };
+        var first = reads.collection(request, query, CollectionOptions.page(4));
+        assertThat(first.records()).extracting(view -> view.get(NetworkContactRead.READ_DETAILS_DISPLAY_NAME))
+                .containsExactly(ReadValue.shown("Name-2"), ReadValue.shown("Name-20"), ReadValue.shown("Name-21"), ReadValue.shown("Name-22"));
+        var next = reads.collection(request, query, new CollectionOptions(4, 4224, () -> false, first.continuation()));
+        assertThat(next.records().getFirst().get(NetworkContactRead.READ_DETAILS_DISPLAY_NAME)).isEqualTo(ReadValue.shown("Name-23"));
+        assertThat(next.exactCount()).isEmpty();
+    }
+
+    @Test void indexBuiltForOldPolicyOrAuthorityCannotSupplyCountsEvenIfItsRowsStillPassCedar() {
+        var request = request("stale-index-metadata-" + UUID.randomUUID());
+        var index = networkIndex(request, 10, 0, true);
+        for (boolean oldPolicy : List.of(true, false)) {
+            var stale = new AuthorisedIndex<NetworkContactRead>() {
+                public State current(java.sql.Connection c, Binding<NetworkContactRead> b) {
+                    return new State("source-1", "index-1", oldPolicy ? "old-policy" : request.bundleChecksum(), oldPolicy ? "1" : "old-authority", OptionalLong.of(10));
+                }
+                public void select(java.sql.Connection c, Binding<NetworkContactRead> b, long offset, int limit,
+                        java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception { index.select(c, b, offset, limit, sink); }
+            };
+            assertThatThrownBy(() -> reads.collection(request, stale, CollectionOptions.page(5)))
+                    .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.STALE)).hasNoCause();
+        }
+    }
+
+    @Test void inconsistentExactIndexCountRejectsInsteadOfInventingAnExhaustionPage() {
+        var request = request("bad-index-count-" + UUID.randomUUID());
+        var index = networkIndex(request, 2, 0, true);
+        var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("UPDATE collection_revision SET authorised_count = 10 WHERE tenant_id = ?", request.tenantId());
+        assertThatThrownBy(() -> reads.collection(request, index, CollectionOptions.page(5)))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.STALE)).hasNoCause();
+    }
+
+    @Test void missingEffectiveAuthorityIsDeniedButResolverOutageIsADependencyFailure() {
+        var request = request("authority-failure-kinds");
+        var index = authorisedFixture(request, single(request, "SELECT 'private'"));
+        authority.states.put(request.tenantId(), "revoked");
+        assertThatThrownBy(() -> reads.collection(request, index, CollectionOptions.page(2)))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.DENIED)).hasNoCause();
+        authority.states.put(request.tenantId(), "error");
+        assertThatThrownBy(() -> reads.collection(request, index, CollectionOptions.page(2)))
+                .isInstanceOfSatisfying(CollectionReadException.class, e -> assertThat(e.reason()).isEqualTo(CollectionReadException.Reason.DEPENDENCY)).hasNoCause();
+    }
+
+    @Test void indexOrderingKeyNeedsCurrentQueryAndLeafPermissionWithoutBeingReturned() {
+        var request = request("index-key-permission-" + UUID.randomUUID());
+        var index = networkIndex(request, 4, 2, false);
+        var ordered = new AuthorisedIndex<NetworkContactRead>() {
+            public Set<ReadPath<NetworkContactRead, ?>> queryFields() { return Set.of(NetworkContactRead.READ_CONTACT_ID); }
+            public State current(java.sql.Connection c, Binding<NetworkContactRead> b) throws Exception { return index.current(c, b); }
+            public void select(java.sql.Connection c, Binding<NetworkContactRead> b, long offset, int limit,
+                    java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception { index.select(c, b, offset, limit, sink); }
+        };
+        var page = reads.collection(request, ordered, CollectionOptions.page(2));
+        assertThat(page.records()).hasSize(2);
+        assertThat(page.records().getFirst().get(NetworkContactRead.READ_CONTACT_ID)).isEqualTo(ReadValue.hidden());
+    }
+
+    /** Trusted immutable authorised relation for failure injection at the public JDBC source boundary. */
+    AuthorisedIndex<NetworkContactRead> authorisedFixture(ReadRequest<NetworkContactRead> request, ReadSource<NetworkContactRead> source) {
+        return new AuthorisedIndex<>() {
+            public State current(java.sql.Connection c, Binding<NetworkContactRead> b) throws Exception {
+                return new State(source.revision(c), "fixture-index-1", checksum(), "1", OptionalLong.empty());
+            }
+            public void select(java.sql.Connection c, Binding<NetworkContactRead> b, long offset, int limit,
+                    java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception { source.select(c, sink); }
+        };
+    }
+
     @Test void deniedAndMissingRecordsAreBothEmpty() {
         var base = request("missing-record");
         var denied = new ReadRequest<>(base.tenantId(), new Principal("Viewer", "outsider"), base.scope(), base.type(),

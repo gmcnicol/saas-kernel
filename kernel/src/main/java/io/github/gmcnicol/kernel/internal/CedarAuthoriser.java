@@ -14,6 +14,7 @@ import io.github.gmcnicol.kernel.application.CapabilityType;
 import io.github.gmcnicol.kernel.application.TypedCapability;
 import io.github.gmcnicol.kernel.application.EffectiveCapabilityResolver;
 import io.github.gmcnicol.kernel.application.AuthorisationDeniedException;
+import io.github.gmcnicol.kernel.application.CollectionReadException;
 import io.github.gmcnicol.kernel.semanticpack.SemanticBindings;
 import io.github.gmcnicol.kernel.application.ActionType;
 import io.github.gmcnicol.kernel.application.FactType;
@@ -113,12 +114,22 @@ final class CedarAuthoriser {
 
     <P> CapabilityAuthority capabilityAuthority(
             String tenantId, Principal principal, TypedSubject<?> subject, ProjectionType<?, P> projectionType) {
+        return capabilityAuthority(tenantId, principal, subject, projectionType, false);
+    }
+
+    <P> CapabilityAuthority capabilityAuthority(
+            String tenantId, Principal principal, TypedSubject<?> subject, ProjectionType<?, P> projectionType, boolean classifyReadFailure) {
         if (model(projectionType).requiredCapabilities().isEmpty()) return new CapabilityAuthority(Map.of(), "");
         try {
             if (resolvers.size() != 1) throw new AuthorisationDeniedException();
             var request = new EffectiveCapabilityResolver.Request(
                     new EffectiveCapabilityResolver.Scope(tenantId, principal, subject), clock.instant());
-            var resolution = resolvers.getFirst().resolve(request);
+            EffectiveCapabilityResolver.Resolution resolution;
+            try { resolution = resolvers.getFirst().resolve(request); }
+            catch (RuntimeException dependency) {
+                if (classifyReadFailure) throw new CollectionReadException(CollectionReadException.Reason.DEPENDENCY);
+                throw new AuthorisationDeniedException();
+            }
             var context = resolution.context();
             if (context.formatVersion() != 1 || !request.scope().equals(context.scope())
                     || context.scope().resource().type() != subject.type()
@@ -142,6 +153,10 @@ final class CedarAuthoriser {
             }
             return new CapabilityAuthority(Map.of("capabilities", new CedarMap(values)), context.revision());
         } catch (RuntimeException exception) {
+            if (classifyReadFailure) {
+                if (exception instanceof CollectionReadException safe) throw safe;
+                throw new CollectionReadException(CollectionReadException.Reason.DENIED);
+            }
             throw new AuthorisationDeniedException();
         }
     }
@@ -198,6 +213,23 @@ final class CedarAuthoriser {
                     || !result.success.get().getErrors().isEmpty()) {
                 throw new AuthorisationDeniedException();
             }
+            return result.success.get().isAllowed();
+        } catch (Exception failure) { throw new AuthorisationDeniedException(); }
+    }
+
+    <P> boolean allowsReadQuery(io.github.gmcnicol.kernel.application.ReadRequest<P> read,
+            io.github.gmcnicol.kernel.application.ReadPath<P, ?> path, Map<String, Value> authority) {
+        try {
+            Entity principal = entity(read.principal().type(), read.principal().id());
+            Entity resource = entity(simpleName(read.scope().type().qualifiedName()),
+                    key(read.tenantId(), read.scope().type().qualifiedName(), read.scope().externalId()), Map.of());
+            var context = new LinkedHashMap<String, Value>(authority);
+            context.put("readScope", new com.cedarpolicy.value.PrimString(read.scope().externalId()));
+            var request = new AuthorizationRequest(principal.getEUID(), euid("Action", TYPED_ACTION_PREFIX + path.qualifiedName() + ".query"),
+                    resource.getEUID(), Optional.of(context), Optional.of(schema), true);
+            var result = engine.isAuthorized(request, policies, Set.of(principal, resource));
+            if (!result.warnings.isEmpty() || result.success.isEmpty() || !result.success.get().getErrors().isEmpty())
+                throw new AuthorisationDeniedException();
             return result.success.get().isAllowed();
         } catch (Exception failure) { throw new AuthorisationDeniedException(); }
     }

@@ -164,11 +164,12 @@ encodings can have different byte sizes; the budget is compact Kernel JSON.
 
 Each candidate uses at most one existing single Cedar record call plus one existing
 single call per selected leaf of a permitted record. This is a bounded loop, **not
-batching**, not an N+1 solution, and not #70 performance completion. #70 remains
-blocked by the existing Cedar binding's lack of a batch API. No pagination, counts,
-search, continuation, release API, new dependencies/services/languages or release
-artefacts are introduced. Collection inference and future release safety are not
-claimed here.
+batching** and not an N+1 solution. The approved `bounded-current-api` revision
+supersedes historical no-batch blocker notes. `many` itself adds no pagination,
+counts, search or continuation guarantees, and does not hide raw-scan timing.
+Use the [bounded collection contract](authorised-collections.md) for collection
+metadata: it requires a current Application-owned authorised index and rejects
+raw `ReadSource` metadata requests. Final release safety remains #71.
 
 ## Evidence
 
