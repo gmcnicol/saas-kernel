@@ -61,18 +61,59 @@ class AuthorisedReadTests {
                 }));
     }
 
-    @Test void erroredCedarRecordDecisionCannotUseAnotherPermit() {
+    @Test void erroredCedarRecordDecisionFailsTheEntireReadDespiteAnotherPermit() {
         var request = request("cedar-record-error");
         authority.states.put(request.tenantId(), "cedar-record-error");
-        assertThat(reads.one(request, single(request, "SELECT 'PRIVATE'"))).isEmpty();
+        assertThatThrownBy(() -> reads.one(request, single(request, "SELECT 'PRIVATE'")))
+                .isExactlyInstanceOf(AuthorisationDeniedException.class)
+                .hasMessage("Authorisation denied").hasNoCause();
     }
 
-    @Test void erroredNestedFieldDecisionCannotUseItsPermit() {
+    @Test void erroredNestedFieldDecisionFailsTheEntireReadDespiteItsPermit() {
         var request = request("cedar-field-error");
         authority.states.put(request.tenantId(), "cedar-field-error");
-        var result = reads.one(request, single(request, "SELECT 'PRIVATE'")).orElseThrow();
-        assertThat(result.get(NetworkContactRead.READ_DETAILS_DISPLAY_NAME)).isEqualTo(ReadValue.hidden());
-        assertThat(new tools.jackson.databind.json.JsonMapper().writeValueAsString(result)).isEqualTo("{}");
+        assertThatThrownBy(() -> reads.one(request, single(request, "SELECT 'PRIVATE'")))
+                .isExactlyInstanceOf(AuthorisationDeniedException.class)
+                .hasMessage("Authorisation denied").hasNoCause();
+    }
+
+    @Test void schemaInvalidCedarPrincipalFailsInsteadOfLookingLikeAMissingRecord() {
+        var base = request("invalid-cedar-principal");
+        var request = new ReadRequest<>(base.tenantId(), new Principal("NotInCedarSchema", "PRIVATE-PRINCIPAL"),
+                base.scope(), base.type(), base.fields(), base.bundleId(), base.bundleChecksum(), base.limits());
+        assertThatThrownBy(() -> reads.one(request, single(request, "SELECT 'PRIVATE'")))
+                .isExactlyInstanceOf(AuthorisationDeniedException.class)
+                .hasMessage("Authorisation denied").hasNoCause();
+    }
+
+    @org.junit.jupiter.api.TestFactory java.util.stream.Stream<org.junit.jupiter.api.DynamicTest> swallowedCedarFailureDiscardsEarlierRecordsAndFields() {
+        return java.util.stream.Stream.of("record-error", "field-error")
+                .map(mode -> org.junit.jupiter.api.DynamicTest.dynamicTest(mode, () -> {
+                    var request = request("mixed-cedar-" + mode);
+                    var earlierCandidateAccepted = new java.util.concurrent.atomic.AtomicBoolean();
+                    var failureCaughtBySource = new java.util.concurrent.atomic.AtomicBoolean();
+                    var source = new ReadSource<NetworkContactRead>() {
+                        public String revision(java.sql.Connection c) { return "1"; }
+                        public void select(java.sql.Connection c, java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception {
+                            single(request, "SELECT 'earlier permitted name'").select(c, sink);
+                            earlierCandidateAccepted.set(true);
+                            try {
+                                single(request, "SELECT 'PRIVATE-LATER-NAME'").select(c, row -> {
+                                    var id = new NetworkContactId(mode);
+                                    sink.accept(new ReadCandidate<>(row.tenantId(), row.scope(), new TypedSubject<>(NetworkContactId.TYPE, id),
+                                            new NetworkContactRead(id, row.value().network(), row.value().owner(), row.value().details(), row.value().tags())));
+                                });
+                            } catch (AuthorisationDeniedException ignored) {
+                                failureCaughtBySource.set(true); // Swallowing cannot release the earlier buffer.
+                            }
+                        }
+                    };
+                    assertThatThrownBy(() -> reads.many(request, source))
+                            .isExactlyInstanceOf(AuthorisationDeniedException.class)
+                            .hasMessage("Authorisation denied").hasNoCause();
+                    assertThat(earlierCandidateAccepted).isTrue();
+                    assertThat(failureCaughtBySource).isTrue();
+                }));
     }
 
     @Test void swallowedCandidateFailureCannotReleaseAnEarlierPartialResult() {
@@ -434,7 +475,8 @@ class AuthorisedReadTests {
     @TestConfiguration static class Configuration {
         @Bean TypedAuthorisationModel<NetworkContactRead> readModel() {
             return new TypedAuthorisationModel<>(NetworkContactRead.TYPE,
-                    Set.of(NetworkContactRead.NETWORK, NetworkContactRead.OWNER), Set.of(), Set.of(EngageContact.TYPE));
+                    Set.of(NetworkContactRead.CONTACT_ID, NetworkContactRead.NETWORK, NetworkContactRead.OWNER),
+                    Set.of(), Set.of(EngageContact.TYPE));
         }
         @Bean CurrentAuthority readAuthority() { return new CurrentAuthority(); }
     }
@@ -467,12 +509,15 @@ class AuthorisedReadTests {
         var result = reads.many(request, new ReadSource<NetworkContactRead>() {
             @Override public String revision(java.sql.Connection connection) { return "1"; }
             @Override public void select(java.sql.Connection connection, java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception {
-                try (var statement = connection.createStatement(); var rows = statement.executeQuery("SELECT * FROM read_contact")) {
-                    while (rows.next()) {
-                        var id = new NetworkContactId(rows.getString("id"));
-                        var value = new NetworkContactRead(id, rows.getString("network"), rows.getString("owner"),
-                                Optional.of(new ContactReadDetails(rows.getString("display_name"), Optional.ofNullable(rows.getString("private_note")))), List.of("SECRET-TAG"));
-                        sink.accept(new ReadCandidate<>(rows.getString("tenant_id"), new TypedSubject<>(NetworkId.TYPE, new NetworkId(rows.getString("network"))), new TypedSubject<>(NetworkContactId.TYPE, id), value));
+                try (var statement = connection.prepareStatement("SELECT * FROM read_contact")) {
+                    statement.setFetchSize(1);
+                    try (var rows = statement.executeQuery()) {
+                        while (rows.next()) {
+                            var id = new NetworkContactId(rows.getString("id"));
+                            var value = new NetworkContactRead(id, rows.getString("network"), rows.getString("owner"),
+                                    Optional.of(new ContactReadDetails(rows.getString("display_name"), Optional.ofNullable(rows.getString("private_note")))), List.of("SECRET-TAG"));
+                            sink.accept(new ReadCandidate<>(rows.getString("tenant_id"), new TypedSubject<>(NetworkId.TYPE, new NetworkId(rows.getString("network"))), new TypedSubject<>(NetworkContactId.TYPE, id), value));
+                        }
                     }
                 }
             }
