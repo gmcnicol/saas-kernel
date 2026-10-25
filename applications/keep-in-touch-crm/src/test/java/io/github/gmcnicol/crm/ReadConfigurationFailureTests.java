@@ -24,13 +24,8 @@ abstract class ReadConfigurationFailureFixture {
     @Container static final PostgreSQLContainer postgres = new PostgreSQLContainer(
             DockerImageName.parse("postgres:18-alpine")).withInitScript("postgres-init.sql");
     @DynamicPropertySource static void properties(DynamicPropertyRegistry p) {
-        p.add("spring.datasource.url", postgres::getJdbcUrl);
-        p.add("spring.datasource.username", () -> "kernel_test_login");
-        p.add("spring.datasource.password", () -> "kernel-test");
-        p.add("spring.flyway.url", postgres::getJdbcUrl);
-        p.add("spring.flyway.user", postgres::getUsername);
-        p.add("spring.flyway.password", postgres::getPassword);
-        p.add("kernel.intent-worker.enabled", () -> "false");
+        io.github.gmcnicol.kernel.contract.WorkflowTestDatabase.register(p::add,
+                postgres::getJdbcUrl, postgres::getUsername, postgres::getPassword);
     }
     @Autowired AuthorisedReads reads;
     @TestBean(methodName = "bundle") AuthorisationBundle crmAuthorisationBundle;

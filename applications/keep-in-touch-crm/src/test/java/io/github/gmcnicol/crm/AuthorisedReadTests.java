@@ -348,15 +348,19 @@ class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.Authoris
                 try (var q = c.prepareStatement("SELECT * FROM collection_contact WHERE owner = ? ORDER BY id LIMIT ? OFFSET ?")) {
                     q.setString(1, binding.request().principal().id()); q.setInt(2, limit); q.setLong(3, offset); q.setFetchSize(1);
                     try (var row = q.executeQuery()) {
-                        while (row.next()) {
-                            var id = new NetworkContactId(Integer.toString(row.getInt("id")));
-                            sink.accept(new ReadCandidate<>(row.getString("tenant_id"), request.scope(), new TypedSubject<>(NetworkContactId.TYPE, id),
-                                    new NetworkContactRead(id, "network-a", row.getString("owner"), Optional.of(new ContactReadDetails(row.getString("name"), Optional.empty())), List.of())));
-                        }
+                        while (row.next()) sink.accept(collectionCandidate(row, request.scope()));
                     }
                 }
             }
         };
+    }
+
+    private static ReadCandidate<NetworkContactRead> collectionCandidate(
+            java.sql.ResultSet row, TypedSubject<?> scope) throws java.sql.SQLException {
+        var id = new NetworkContactId(Integer.toString(row.getInt("id")));
+        return new ReadCandidate<>(row.getString("tenant_id"), scope, new TypedSubject<>(NetworkContactId.TYPE, id),
+                new NetworkContactRead(id, "network-a", row.getString("owner"),
+                        Optional.of(new ContactReadDetails(row.getString("name"), Optional.empty())), List.of()));
     }
 
     @Test void privateFieldPredicatesRejectBeforeQueryEvenWhenNoRecordsOrOutputFieldsExist() {
@@ -563,11 +567,7 @@ class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.Authoris
                 try (var q = c.prepareStatement("SELECT * FROM collection_contact WHERE owner = ? AND name LIKE ? ORDER BY name, id LIMIT ? OFFSET ?")) {
                     q.setString(1, b.request().principal().id()); q.setString(2, "Name-2%"); q.setInt(3, limit); q.setLong(4, offset); q.setFetchSize(1);
                     try (var row = q.executeQuery()) {
-                        while (row.next()) {
-                            var id = new NetworkContactId(Integer.toString(row.getInt("id")));
-                            sink.accept(new ReadCandidate<>(row.getString("tenant_id"), request.scope(), new TypedSubject<>(NetworkContactId.TYPE, id),
-                                    new NetworkContactRead(id, "network-a", row.getString("owner"), Optional.of(new ContactReadDetails(row.getString("name"), Optional.empty())), List.of())));
-                        }
+                        while (row.next()) sink.accept(collectionCandidate(row, request.scope()));
                     }
                 }
             }
