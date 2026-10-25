@@ -1,11 +1,17 @@
 permit(principal == Owner::"member", action in [
     Action::"typed/v1/io.github.gmcnicol.crm.NetworkContactRead.read",
+    Action::"typed/v1/io.github.gmcnicol.crm.NetworkContactRead.contactId",
     Action::"typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details",
     Action::"typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details.displayName"
 ], resource) when {
     context.capabilities has EngageContact &&
     resource.network == context.readScope && resource.owner == "member"
 };
+
+// Separate scope-wide permission for Application-authored query templates.
+permit(principal == Owner::"member", action in [Action::"typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details.displayName.query",
+    Action::"typed/v1/io.github.gmcnicol.crm.NetworkContactRead.contactId.query"], resource)
+when { context.capabilities has EngageContact && context.readScope == "network-a" };
 
 // Valid policy can overflow at runtime. Any evaluation error fails the entire read.
 forbid(principal, action == Action::"typed/v1/io.github.gmcnicol.crm.NetworkContactRead.read", resource) when {

@@ -100,10 +100,12 @@ add one Application resolution per authorisation phase, not per field/Fact/Actio
 they retain the existing discovery/new-execution Cedar decision count and generated
 field converters. Opted-in reconciliation adds one current-state read, current Fact
 derivation and one Action decision; legacy reconciliation adds none.
-No new latency budget or batch performance is claimed. #70 remains blocked by
-the existing Cedar Java binding's lack of a batch API. Ordinary reads and selected
-nested scalar output use the additive [authorised-read contract](authorised-reads.md)
-from #69. Collections and final release fencing remain later work, not #68.
+No batch performance is claimed. The approved `66-existing-stack-scale-gate`
+decision permits bounded per-decision SDK calls; historical no-batch blocker notes
+are superseded. Ordinary reads and selected nested scalar output use the additive
+[authorised-read contract](authorised-reads.md); bounded collections use a current
+[Application-owned authorised index](authorised-collections.md). Final release
+fencing remains #71, not #68.
 There remains a check-to-use race: Applications needing strict serialization with
 revocation/allowance consumption must coordinate their authoritative source and
 domain transaction. This contract is not an atomic grant database.

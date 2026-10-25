@@ -92,6 +92,55 @@ class AuthorisedReadTests {
         admin.update("INSERT INTO read_filing VALUES (?, 'practice-one', '3', 'client-one', 'FOREIGN-TENANT', 'FOREIGN-SECRET')", tenant + "-foreign");
         return tenant;
     }
+    @Test void largePracticeAndClientListsUseCurrentAuthorisedRelationsAndNeverCandidateTotals() {
+        String tenant = records();
+        var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("INSERT INTO read_filing SELECT ?, 'practice-one', 'a-' || n, 'client-one', 'CLIENT-' || n, 'STAFF-ONLY' FROM generate_series(1, 179) n", tenant);
+        admin.update("INSERT INTO read_filing SELECT ?, 'practice-one', 'b-' || n, 'client-two', 'OTHER-' || n, 'STAFF-ONLY' FROM generate_series(1, 199) n", tenant);
+        for (var principal : List.of(new Principal("Staff", "employee"), new Principal("Client", "client-one"))) {
+            boolean staff = principal.type().equals("Staff");
+            var request = request(tenant, principal);
+            var index = new AuthorisedIndex<ClientFilingRead>() {
+                public Set<ReadPath<ClientFilingRead, ?>> queryFields() { return Set.of(ClientFilingRead.READ_FILING_ID); }
+                public State current(java.sql.Connection c, Binding<ClientFilingRead> b) {
+                    return new State("practice-source-1", "assigned-relation-1", checksum(), "1", staff ? OptionalLong.of(380) : OptionalLong.empty());
+                }
+                public void select(java.sql.Connection c, Binding<ClientFilingRead> b, long offset, int limit,
+                        java.util.function.Consumer<ReadCandidate<ClientFilingRead>> sink) throws Exception {
+                    // Application owns the staff/client relation and its query/index correctness, not Kernel.
+                    String sql = "SELECT * FROM read_filing WHERE practice = ?" + (staff ? "" : " AND assigned_client = ?") + " ORDER BY id LIMIT ? OFFSET ?";
+                    try (var q = c.prepareStatement(sql)) {
+                        int i = 1; q.setString(i++, b.request().scope().externalId());
+                        if (!staff) q.setString(i++, b.request().principal().id());
+                        q.setInt(i++, limit); q.setLong(i, offset); q.setFetchSize(1);
+                        try (var row = q.executeQuery()) {
+                            while (row.next()) {
+                                var id = new ClientFilingId(row.getString("id"));
+                                sink.accept(new ReadCandidate<>(row.getString("tenant_id"), request.scope(), new TypedSubject<>(ClientFilingId.TYPE, id),
+                                        new ClientFilingRead(id, row.getString("practice"), row.getString("assigned_client"),
+                                                Optional.of(new FilingReadDetails(new ClientReference(row.getString("reference")), Optional.ofNullable(row.getString("notes")))))));
+                            }
+                        }
+                    }
+                }
+            };
+            Optional<String> token = Optional.empty();
+            int total = 0;
+            do {
+                var page = reads.collection(request, index, new CollectionOptions(70, 4224, () -> false, token));
+                assertThat(page.records()).isNotEmpty().hasSizeLessThanOrEqualTo(70);
+                if (staff) assertThat(page.exactCount()).hasValue(380);
+                else {
+                    assertThat(page.exactCount()).isEmpty();
+                    assertThat(page.records().toString()).doesNotContain("OTHER", "STAFF-ONLY");
+                    assertThat(page.records()).allSatisfy(view -> assertThat(view.get(ClientFilingRead.READ_DETAILS_WORKING_NOTES)).isEqualTo(ReadValue.hidden()));
+                }
+                total += page.records().size(); token = page.continuation();
+            } while (token.isPresent());
+            assertThat(total).isEqualTo(staff ? 380 : 180);
+        }
+    }
+
     @Test void staffSeesBothAssignedClientsAndAuthorisedNullIsNotHidden() {
         var request = request(records(), new Principal("Staff", "employee"));
         var views = reads.many(request, source(request));
