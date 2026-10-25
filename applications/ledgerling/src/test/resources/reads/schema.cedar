@@ -1,5 +1,6 @@
 entity Staff;
 entity PracticeId;
+action "typed/v1/io.github.gmcnicol.ledgerling.ClientFilingRead.details.workingNotes.query" appliesTo { principal: [Staff, Client], resource: [PracticeId], context: Authority };
 action "typed/v1/io.github.gmcnicol.ledgerling.ClientFilingRead.filingId.query" appliesTo { principal: [Staff, Client], resource: [PracticeId], context: Authority };
 action "typed/v1/io.github.gmcnicol.ledgerling.ClientFilingRead.filingId" appliesTo { principal: [Staff, Client], resource: [ClientFilingId], context: Authority };
 entity Client;

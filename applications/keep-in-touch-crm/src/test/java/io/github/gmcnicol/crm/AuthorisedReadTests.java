@@ -22,17 +22,12 @@ import org.testcontainers.utility.DockerImageName;
 
 @Testcontainers
 @SpringBootTest
-class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.AuthorisedDisclosureContract<NetworkContactRead> {
+class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.AuthorisationContract<NetworkContactRead> {
     @Container static final PostgreSQLContainer postgres = new PostgreSQLContainer(
             DockerImageName.parse("postgres:18-alpine")).withInitScript("postgres-init.sql");
     @DynamicPropertySource static void properties(DynamicPropertyRegistry p) {
-        p.add("spring.datasource.url", postgres::getJdbcUrl);
-        p.add("spring.datasource.username", () -> "kernel_test_login");
-        p.add("spring.datasource.password", () -> "kernel-test");
-        p.add("spring.flyway.url", postgres::getJdbcUrl);
-        p.add("spring.flyway.user", postgres::getUsername);
-        p.add("spring.flyway.password", postgres::getPassword);
-        p.add("kernel.intent-worker.enabled", () -> "false");
+        io.github.gmcnicol.kernel.contract.WorkflowTestDatabase.register(p::add,
+                postgres::getJdbcUrl, postgres::getUsername, postgres::getPassword);
     }
     @Autowired AuthorisedReads reads;
     @Autowired AuthorisedDisclosures disclosures;
@@ -70,6 +65,25 @@ class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.Authoris
     }
     @Autowired CurrentAuthority authority;
     public AuthorisedDisclosures disclosures() { return disclosures; }
+    public AuthorisedReads reads() { return reads; }
+    public io.micrometer.core.instrument.MeterRegistry meters() { return meters; }
+    public TypedCapability<?> unrelatedCapability() { return new TypedCapability<>(ExportContacts.TYPE, new ExportContacts()); }
+    public TypedCapability<?> capabilityWithRemaining(int remaining) { return new TypedCapability<>(EngageContact.TYPE, new EngageContact(Optional.of(remaining))); }
+    public CollectionFixture<NetworkContactRead> collectionFixture() {
+        var r = request("contract-index-" + UUID.randomUUID());
+        var index = networkIndex(r, 3, 0, true);
+        var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        return new CollectionFixture<>(r, index, () -> {
+            admin.update("INSERT INTO collection_contact SELECT ?, n + 10000, 'stranger', 'HIDDEN' FROM generate_series(1, 1000) n", r.tenantId());
+            admin.update("UPDATE collection_contact SET name = 'CHANGED-HIDDEN' WHERE tenant_id = ? AND owner = 'stranger'", r.tenantId());
+        }, List.of("[{\"details\":{\"displayName\":\"Name-1\"}}]", "[{\"details\":{\"displayName\":\"Name-2\"}}]",
+                "[{\"details\":{\"displayName\":\"Name-3\"}}]"), NetworkContactRead.READ_DETAILS_PRIVATE_NOTE);
+    }
+    public ReadFixture<NetworkContactRead> readFixture() { return ordinaryReadFixture(); }
+    public void addOtherScopeProvenance(ReadFixture<NetworkContactRead> f, int copies) {
+        var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("INSERT INTO read_contact SELECT ?, 'other-network-' || n, 'same-human', 'member', 'OTHER-NETWORK', 'PRIVATE' FROM generate_series(1, ?) n", f.request().tenantId(), copies);
+    }
     public Fixture<NetworkContactRead> disclosureFixture() {
         var request = request("disclosure-" + UUID.randomUUID());
         var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
@@ -133,7 +147,10 @@ class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.Authoris
 
     static class CurrentAuthority implements EffectiveCapabilityResolver {
         final Map<String, String> states = new java.util.concurrent.ConcurrentHashMap<>();
+        final Map<String, EffectiveCapabilityResolver> contracts = new java.util.concurrent.ConcurrentHashMap<>();
         public Resolution resolve(Request request) {
+            var contract = contracts.get(request.scope().tenantId());
+            if (contract != null) return contract.resolve(request);
             String state = states.getOrDefault(request.scope().tenantId(), "current");
             if (state.equals("error")) throw new IllegalStateException("PRIVATE-GRANT-DATA");
             var scope = state.equals("foreign-tenant") ? new Scope("foreign", request.scope().principal(), request.scope().resource()) : request.scope();
@@ -964,7 +981,7 @@ class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.Authoris
             return new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).trim();
         } catch (Exception failure) { throw new AssertionError(failure); }
     }
-    @Test void wrongTenantSqlIsContainedAndSameHumanCannotBridgeNetworks() {
+    private ReadFixture<NetworkContactRead> ordinaryReadFixture() {
         String tenant = "read-" + UUID.randomUUID();
         var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
         admin.execute("""
@@ -985,9 +1002,10 @@ class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.Authoris
                 new TypedSubject<>(NetworkId.TYPE, new NetworkId("network-a")), NetworkContactRead.TYPE,
                 Set.of(NetworkContactRead.READ_DETAILS_DISPLAY_NAME, NetworkContactRead.READ_DETAILS_PRIVATE_NOTE),
                 "io.github.gmcnicol.crm.reads", checksum(), ReadLimits.DEFAULT);
-        var result = reads.many(request, new ReadSource<NetworkContactRead>() {
+        var source = new ReadSource<NetworkContactRead>() {
             @Override public String revision(java.sql.Connection connection) { return "1"; }
             @Override public void select(java.sql.Connection connection, java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception {
+                io.github.gmcnicol.kernel.contract.WorkflowTestDatabase.assertRuntimeContainment(connection, "read_contact", "tenant_id");
                 try (var statement = connection.prepareStatement("SELECT * FROM read_contact")) {
                     statement.setFetchSize(1);
                     try (var rows = statement.executeQuery()) {
@@ -1000,10 +1018,13 @@ class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.Authoris
                     }
                 }
             }
-        });
-        assertThat(result).hasSize(1);
-        assertThat(result.getFirst().get(NetworkContactRead.READ_DETAILS_DISPLAY_NAME)).isEqualTo(ReadValue.shown("Allowed"));
-        assertThat(result.getFirst().get(NetworkContactRead.READ_DETAILS_PRIVATE_NOTE)).isEqualTo(ReadValue.hidden());
-        assertThat(result.toString()).doesNotContain("HIDDEN", "OTHER", "SECRET");
+        };
+        var grants = new io.github.gmcnicol.kernel.contract.EffectiveCapabilityContract.ApplicationGrants(
+                new TypedCapability<>(EngageContact.TYPE, new EngageContact(Optional.of(2))));
+        authority.contracts.put(tenant, grants);
+        return new ReadFixture<>(request, source, new TypedSubject<>(NetworkContactId.TYPE, new NetworkContactId("same-human")), capabilityWithRemaining(2), grants, disclosureTime,
+                "[{\"details\":{\"displayName\":\"Allowed\"}}]", List.of(
+                        new ExpectedField<>(NetworkContactRead.READ_DETAILS_DISPLAY_NAME, ReadValue.shown("Allowed")),
+                        new ExpectedField<>(NetworkContactRead.READ_DETAILS_PRIVATE_NOTE, ReadValue.hidden())));
     }
 }

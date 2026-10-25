@@ -8,6 +8,14 @@ permit(principal == Owner::"member", action in [
     resource.network == context.readScope && resource.owner == "member"
 };
 
+// Explicit negative permissions must override matching permits (synthetic contract cases).
+forbid(principal, action == Action::"typed/v1/io.github.gmcnicol.crm.NetworkContactRead.read", resource) when {
+    context.capabilities has EngageContact && context.capabilities.EngageContact has remaining && context.capabilities.EngageContact.remaining == 0
+};
+forbid(principal, action == Action::"typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details.displayName", resource) when {
+    context.capabilities has EngageContact && context.capabilities.EngageContact has remaining && context.capabilities.EngageContact.remaining == 1
+};
+
 // Separate scope-wide permission for Application-authored query templates.
 permit(principal == Owner::"member", action in [Action::"typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details.displayName.query",
     Action::"typed/v1/io.github.gmcnicol.crm.NetworkContactRead.contactId.query"], resource)

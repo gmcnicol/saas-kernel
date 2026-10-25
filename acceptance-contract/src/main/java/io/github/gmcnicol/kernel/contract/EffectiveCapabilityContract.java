@@ -52,8 +52,10 @@ public abstract class EffectiveCapabilityContract {
         grants().grant(paid.tenant(), "paid", Instant.MAX);
         Flow preview = flow(UUID.randomUUID().toString());
         grants().grant(preview.tenant(), "preview", Instant.MAX);
-        assertThat(paid.discover().actionOffers()).hasSize(1);
-        assertThat(preview.discover().actionOffers()).hasSize(1);
+        assertThat(paid.discover().actionOffers()).singleElement()
+                .satisfies(offer -> assertThat(offer.actionType()).isSameAs(paid.candidate().actionType()));
+        assertThat(preview.discover().actionOffers()).singleElement()
+                .satisfies(offer -> assertThat(offer.actionType()).isSameAs(preview.candidate().actionType()));
     }
 
     @Test
@@ -369,12 +371,26 @@ public abstract class EffectiveCapabilityContract {
         private final Set<String> revokeAfterResolution = ConcurrentHashMap.newKeySet();
         private final Map<String, TypedCapability<?>> replacements = new ConcurrentHashMap<>();
         private final TypedCapability<?> capability;
+        private final Map<String, TypedCapability<?>> additions = new ConcurrentHashMap<>();
+        public void include(String tenant, TypedCapability<?> unrelated) {
+            additions.put(tenant, unrelated);
+            revisions.merge(tenant, 1, Integer::sum);
+        }
         public ApplicationGrants(TypedCapability<?> capability) { this.capability = capability; }
         public void grant(String tenant, String source, Instant expiresAt) {
-            grants.computeIfAbsent(tenant, ignored -> new ArrayList<>()).add(new Grant(source, expiresAt));
+            grants.compute(tenant, (ignored, existing) -> {
+                var updated = new ArrayList<>(existing == null ? List.<Grant>of() : existing);
+                updated.add(new Grant(source, expiresAt));
+                return List.copyOf(updated);
+            });
             revisions.merge(tenant, 1, Integer::sum);
         }
         public void revoke(String tenant) { grants.remove(tenant); revisions.merge(tenant, 1, Integer::sum); }
+        public void revoke(String tenant, String source) {
+            grants.computeIfPresent(tenant, (ignored, existing) -> existing.stream()
+                    .filter(grant -> !grant.source().equals(source)).toList());
+            revisions.merge(tenant, 1, Integer::sum);
+        }
         public void revokeAfterResolution(String tenant) { revokeAfterResolution.add(tenant); }
         public void replace(String tenant, TypedCapability<?> value) { replacements.put(tenant, value); }
         public void corrupt(String tenant, Corruption corruption) { corruptions.put(tenant, corruption); }
@@ -386,9 +402,11 @@ public abstract class EffectiveCapabilityContract {
                     ? effectiveUntil : request.evaluatedAt().plusSeconds(60);
             String tenant = request.scope().tenantId();
             String revision = "revision-" + revisions.getOrDefault(tenant, 0);
+            var values = new ArrayList<TypedCapability<?>>();
+            if (active) values.add(replacements.getOrDefault(tenant, capability));
+            if (additions.containsKey(tenant)) values.add(additions.get(tenant));
             Resolution result = new Resolution(revision, new Context(1, request.scope(), request.evaluatedAt(),
-                    expiresAt, revision,
-                    active ? List.of(replacements.getOrDefault(tenant, capability)) : List.of()));
+                    expiresAt, revision, values));
             if (revokeAfterResolution.remove(tenant)) revoke(tenant);
             return corruptions.containsKey(request.scope().tenantId())
                     ? corruptions.get(request.scope().tenantId()).apply(result) : result;
