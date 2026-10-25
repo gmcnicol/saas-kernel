@@ -1,0 +1,31 @@
+// Authored fixture vocabulary, NOT new Kernel annotations or production contracts.
+namespace review
+
+model EffectiveRead { enabled: Boolean }
+
+model ContactDetails {
+    displayName: String
+    email: String
+    privateNote: String
+}
+model Contact {
+    tenant: String
+    network: String
+    id: String
+    person: String
+    revision: Long
+    details: ContactDetails
+}
+
+model FilingDetails {
+    reference: String
+    workingNote: String
+}
+model Filing {
+    tenant: String
+    practice: String
+    id: String
+    client: String
+    revision: Long
+    details: FilingDetails
+}
