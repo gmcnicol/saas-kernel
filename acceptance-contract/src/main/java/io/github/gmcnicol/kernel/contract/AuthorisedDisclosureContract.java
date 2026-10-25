@@ -337,6 +337,27 @@ public interface AuthorisedDisclosureContract<P> {
         assertThat(provider).isEmpty();
     }
 
+    @Test default void changedCurrentPolicyWhileAnswerIsBufferedBlocksUserOutputAndIndependentExport() {
+        var f = disclosureFixture(); var r = f.request();
+        var prepared = disclosures().prepare(r, f.source(), "assistant", Duration.ofSeconds(30));
+        var export = disclosures().prepare(r, f.source(), "export", Duration.ofSeconds(30));
+        var current = new java.util.concurrent.atomic.AtomicReference<>(r);
+        var providerContexts = new ArrayList<String>();
+        var answer = disclosures().derive(prepared, r, "assistant", f.source(), json(), (context, out) -> {
+            providerContexts.add(text(context));
+            current.set(new ReadRequest<>(r.tenantId(), r.principal(), r.scope(), r.type(), r.fields(),
+                    r.bundleId(), "new-current-policy-pin", r.limits()));
+            out.write("buffered answer under former policy".getBytes(StandardCharsets.UTF_8));
+        });
+        var delivered = new ArrayList<DisclosureBytes>();
+        assertThatThrownBy(() -> disclosures().send(answer, current.get(), "assistant", f.source(), delivered::add))
+                .isExactlyInstanceOf(AuthorisationDeniedException.class).hasMessage("Authorisation denied").hasNoCause();
+        assertThatThrownBy(() -> disclosures().send(export, current.get(), "export", f.source(), json(), delivered::add))
+                .isExactlyInstanceOf(AuthorisationDeniedException.class).hasMessage("Authorisation denied").hasNoCause();
+        assertThat(providerContexts).containsExactly(f.json());
+        assertThat(delivered).isEmpty();
+    }
+
     @Test default void bufferedProviderResponseCannotOutliveOriginalSourceAuthority() {
         var f = disclosureFixture();
         var prepared = disclosures().prepare(f.request(), f.source(), "assistant", Duration.ofSeconds(30));

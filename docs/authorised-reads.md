@@ -183,6 +183,8 @@ preservation/error recovery. Malformed Cedar requests and real policy arithmetic
 errors fail the whole read, including mixed candidate/field buffers and swallowed
 sink failures, while ordinary record/field Deny still hides/redacts. Practice tests contrast staff and assigned clients and
 prove authorised nulls. Configuration-failure tests isolate missing model/resolver.
-The generator's clean-consumer build proves typed leaves/results and compile-time
+The shared [test-only authorisation contract](authorisation-contract-tests.md) adds
+reusable typed expectations, deterministic adversarial cases and static operator-only
+diagnostic categories across both Applications. The generator's clean-consumer build proves typed leaves/results and compile-time
 rejection of cross-model paths, raw DTO assignment and parent/list selections.
 The full reactor retains workflow/presentation/Action Offer and exact-Intent tests.

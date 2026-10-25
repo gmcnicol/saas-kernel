@@ -21,19 +21,16 @@ import org.testcontainers.utility.DockerImageName;
 
 @Testcontainers
 @SpringBootTest
-class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.AuthorisedDisclosureContract<ClientFilingRead> {
+class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.AuthorisationContract<ClientFilingRead> {
     @Container static final PostgreSQLContainer postgres = new PostgreSQLContainer(
             DockerImageName.parse("postgres:18-alpine")).withInitScript("postgres-init.sql");
     @DynamicPropertySource static void properties(DynamicPropertyRegistry p) {
-        p.add("spring.datasource.url", postgres::getJdbcUrl);
-        p.add("spring.datasource.username", () -> "kernel_test_login");
-        p.add("spring.datasource.password", () -> "kernel-test");
-        p.add("spring.flyway.url", postgres::getJdbcUrl);
-        p.add("spring.flyway.user", postgres::getUsername);
-        p.add("spring.flyway.password", postgres::getPassword);
-        p.add("kernel.intent-worker.enabled", () -> "false");
+        io.github.gmcnicol.kernel.contract.WorkflowTestDatabase.register(p::add,
+                postgres::getJdbcUrl, postgres::getUsername, postgres::getPassword);
     }
     @Autowired AuthorisedReads reads;
+    @Autowired io.micrometer.core.instrument.MeterRegistry meters;
+    public io.micrometer.core.instrument.MeterRegistry meters() { return meters; }
     @Autowired AuthorisedDisclosures disclosures;
     @TestBean(methodName = "disclosureClock") java.time.Clock clock;
     static final io.github.gmcnicol.kernel.contract.EffectiveCapabilityContract.TestClock disclosureTime = new io.github.gmcnicol.kernel.contract.EffectiveCapabilityContract.TestClock();
@@ -43,6 +40,67 @@ class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.Authoris
     public void inDisclosureTransaction(Runnable work) { new org.springframework.transaction.support.TransactionTemplate(transactions).executeWithoutResult(status -> work.run()); }
     @Autowired CurrentAuthority authority;
     public AuthorisedDisclosures disclosures() { return disclosures; }
+    public AuthorisedReads reads() { return reads; }
+    public TypedCapability<?> unrelatedCapability() { return new TypedCapability<>(ExportFilings.TYPE, new ExportFilings()); }
+    public TypedCapability<?> capabilityWithRemaining(int remaining) { return new TypedCapability<>(ManageFiling.TYPE, new ManageFiling(Optional.of(remaining))); }
+    public CollectionFixture<ClientFilingRead> collectionFixture() {
+        var r = request(records(), new Principal("Client", "client-one"));
+        var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("INSERT INTO read_filing VALUES (?, 'practice-one', '4', 'client-one', 'CLIENT-FOUR', 'PRIVATE')", r.tenantId());
+        admin.update("INSERT INTO read_filing VALUES (?, 'practice-one', '5', 'client-one', 'CLIENT-FIVE', 'PRIVATE')", r.tenantId());
+        var index = new AuthorisedIndex<ClientFilingRead>() {
+            public Set<ReadPath<ClientFilingRead, ?>> queryFields() { return Set.of(ClientFilingRead.READ_FILING_ID); }
+            public State current(java.sql.Connection c, Binding<ClientFilingRead> b) throws Exception {
+                try (var q = c.prepareStatement("SELECT count(*) FROM read_filing WHERE practice = ? AND assigned_client = ?")) {
+                    q.setString(1, b.request().scope().externalId()); q.setString(2, b.request().principal().id());
+                    try (var row = q.executeQuery()) {
+                        row.next();
+                        return new State("assigned-source-1", "assigned-index-1", checksum(), "1", OptionalLong.of(row.getLong(1)));
+                    }
+                }
+            }
+            public void select(java.sql.Connection c, Binding<ClientFilingRead> b, long offset, int limit,
+                    java.util.function.Consumer<ReadCandidate<ClientFilingRead>> sink) throws Exception {
+                try (var q = c.prepareStatement("SELECT * FROM read_filing WHERE practice = ? AND assigned_client = ? ORDER BY id LIMIT ? OFFSET ?")) {
+                    q.setString(1, b.request().scope().externalId()); q.setString(2, b.request().principal().id());
+                    q.setInt(3, limit); q.setLong(4, offset); q.setFetchSize(1);
+                    try (var row = q.executeQuery()) {
+                        while (row.next()) {
+                            var id = new ClientFilingId(row.getString("id"));
+                            sink.accept(new ReadCandidate<>(row.getString("tenant_id"), new TypedSubject<>(PracticeId.TYPE, new PracticeId(row.getString("practice"))),
+                                    new TypedSubject<>(ClientFilingId.TYPE, id), new ClientFilingRead(id, row.getString("practice"), row.getString("assigned_client"),
+                                            Optional.of(new FilingReadDetails(new ClientReference(row.getString("reference")), Optional.ofNullable(row.getString("notes")))))));
+                        }
+                    }
+                }
+            }
+        };
+        return new CollectionFixture<>(r, index, () -> {
+            admin.update("INSERT INTO read_filing SELECT ?, 'practice-one', 'hidden-' || n, 'client-two', 'HIDDEN', 'PRIVATE' FROM generate_series(1, 1000) n", r.tenantId());
+            admin.update("UPDATE read_filing SET reference = 'CHANGED-HIDDEN' WHERE tenant_id = ? AND assigned_client = 'client-two'", r.tenantId());
+        }, List.of("[{\"details\":{\"reference\":\"CLIENT-REF\"}}]", "[{\"details\":{\"reference\":\"CLIENT-FOUR\"}}]",
+                "[{\"details\":{\"reference\":\"CLIENT-FIVE\"}}]"), ClientFilingRead.READ_DETAILS_WORKING_NOTES);
+    }
+    public void addOtherScopeProvenance(ReadFixture<ClientFilingRead> f, int copies) {
+        var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("INSERT INTO read_filing SELECT ?, 'other-practice-' || n, '1', 'client-one', 'OTHER-PRACTICE', 'PRIVATE' FROM generate_series(1, ?) n", f.request().tenantId(), copies);
+    }
+    public ReadFixture<ClientFilingRead> readFixture() {
+        var f = disclosureFixture();
+        var grants = new io.github.gmcnicol.kernel.contract.EffectiveCapabilityContract.ApplicationGrants(
+                new TypedCapability<>(ManageFiling.TYPE, new ManageFiling(Optional.of(2))));
+        authority.contracts.put(f.request().tenantId(), grants);
+        ReadSource<ClientFilingRead> source = new ReadSource<>() {
+            public String revision(java.sql.Connection c) throws Exception { return f.source().revision(c); }
+            public void select(java.sql.Connection c, java.util.function.Consumer<ReadCandidate<ClientFilingRead>> sink) throws Exception {
+                io.github.gmcnicol.kernel.contract.WorkflowTestDatabase.assertRuntimeContainment(c, "read_filing", "tenant_id");
+                f.source().select(c, sink);
+            }
+        };
+        return new ReadFixture<>(f.request(), source, new TypedSubject<>(ClientFilingId.TYPE, new ClientFilingId("1")), capabilityWithRemaining(2), grants, disclosureTime, f.json(),
+                List.of(new ExpectedField<>(ClientFilingRead.READ_DETAILS_REFERENCE, ReadValue.shown(new ClientReference("CLIENT-REF"))),
+                        new ExpectedField<>(ClientFilingRead.READ_DETAILS_WORKING_NOTES, ReadValue.hidden())));
+    }
     public Fixture<ClientFilingRead> disclosureFixture() {
         var request = request(records(), new Principal("Client", "client-one"));
         var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
@@ -89,7 +147,10 @@ class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.Authoris
 
     static class CurrentAuthority implements EffectiveCapabilityResolver {
         final Map<String, String> states = new java.util.concurrent.ConcurrentHashMap<>();
+        final Map<String, EffectiveCapabilityResolver> contracts = new java.util.concurrent.ConcurrentHashMap<>();
         public Resolution resolve(Request request) {
+            var contract = contracts.get(request.scope().tenantId());
+            if (contract != null) return contract.resolve(request);
             String state = states.getOrDefault(request.scope().tenantId(), "current");
             if (state.equals("error")) throw new IllegalStateException("PRIVATE-GRANT");
             String revision = state.equals("changed") ? "2" : "1";

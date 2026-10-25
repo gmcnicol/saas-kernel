@@ -76,6 +76,14 @@ final class ScopedAuthorisedReads implements AuthorisedReads {
         }
     }
 
+    private enum Denial { AUTHORITY, RECORD_POLICY, FIELD_POLICY }
+
+    /** Aggregate operator telemetry only: no identifiers, values, SDK text or per-row public reasons. */
+    private void denied(Denial category) {
+        try { meters.counter("kernel.read.denials", "category", category.name().toLowerCase(java.util.Locale.ROOT)).increment(); }
+        catch (RuntimeException ignored) { /* Telemetry is not authority. */ }
+    }
+
     private <P> List<AuthorisedRecord<P>> perform(ReadRequest<P> request, ReadSource<P> source, Work work) {
         try {
             if (work.options != null && (!cedar.bundleId().equals(request.bundleId()) || !cedar.bundleChecksum().equals(request.bundleChecksum())))
@@ -130,7 +138,9 @@ final class ScopedAuthorisedReads implements AuthorisedReads {
             execute(connection, "SET LOCAL ROLE kernel_runtime");
             config(connection, "kernel.tenant_id", request.tenantId());
             config(connection, "statement_timeout", Integer.toString(request.limits().timeoutMillis()));
-            var authority = cedar.capabilityAuthority(request.tenantId(), request.principal(), request.scope(), request.type(), work.options != null);
+            CedarAuthoriser.CapabilityAuthority authority;
+            try { authority = cedar.capabilityAuthority(request.tenantId(), request.principal(), request.scope(), request.type(), work.options != null); }
+            catch (RuntimeException unavailable) { denied(Denial.AUTHORITY); throw unavailable; }
             if (source instanceof IndexedReadWindow<?> rawWindow) {
                 @SuppressWarnings("unchecked") var window = (IndexedReadWindow<P>) rawWindow;
                 window.prepare(authority.revision());
@@ -172,6 +182,7 @@ final class ScopedAuthorisedReads implements AuthorisedReads {
                     }
                     work.decision(deadline);
                     if (!cedar.allowsRead(request, candidate, request.type().qualifiedName() + ".read", authority.values())) {
+                        denied(Denial.RECORD_POLICY);
                         if (source instanceof IndexedReadWindow<?>) work.fail(CollectionReadException.Reason.STALE);
                         return;
                     }
@@ -190,7 +201,7 @@ final class ScopedAuthorisedReads implements AuthorisedReads {
                             var value = path.read().apply(candidate.value());
                             checkScalar(path, value.value(), request.limits().outputBytes(), work);
                             values.put(path, value);
-                        }
+                        } else denied(Denial.FIELD_POLICY);
                     }
                     var view = new AllowedRecord<P>(values);
                     if (!result.isEmpty()) bytes.write(',');
