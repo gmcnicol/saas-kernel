@@ -233,16 +233,19 @@ final class TypedActionService {
         P projection = projectionType.javaType().cast(current.value());
         TypedSubject<I> subject = typedSubject(projectionType.subjectType(), snapshot.subjectId());
         TypedAuthorisationModel<P> model = cedar.model(projectionType);
+        var capabilityContext = cedar.capabilityContext(tenantId, principal, subject, projectionType);
         List<TypedFact<?>> derivedFacts = deriveFacts(projectionType, projection, snapshot.evaluatedAt());
         FactSet authorisationFacts = factSet(derivedFacts);
         var fields = new ArrayList<TypedFieldValue<P, ?>>();
         model.fields().stream()
                 .sorted(Comparator.comparing(io.github.gmcnicol.kernel.application.FieldType::qualifiedName))
                 .filter(field -> cedar.allows(
-                        principal, subject, projectionType, projection, authorisationFacts, field))
+                        principal, subject, projectionType, projection, authorisationFacts,
+                        field.qualifiedName(), capabilityContext))
                 .forEach(field -> fields.add(fieldValue(field, projection)));
         List<TypedFact<?>> facts = derivedFacts.stream().filter(fact -> cedar.allows(
-                principal, subject, projectionType, projection, authorisationFacts, fact.type())).toList();
+                principal, subject, projectionType, projection, authorisationFacts,
+                fact.type().qualifiedName(), capabilityContext)).toList();
         UUID correlation = UUID.randomUUID();
         var offers = new ArrayList<TypedActionOffer<P, ?, ?>>();
         jdbc.query("""
@@ -253,7 +256,8 @@ final class TypedActionService {
                 .map(entry -> Map.entry(entry, actions.get(entry.actionId())))
                 .filter(entry -> entry.getValue() != null && entry.getValue().projectionType() == projectionType)
                 .filter(entry -> cedar.allows(
-                        principal, subject, projectionType, projection, authorisationFacts, entry.getValue()))
+                        principal, subject, projectionType, projection, authorisationFacts,
+                        entry.getValue().qualifiedName(), capabilityContext))
                 .map(entry -> typedOffer(persistOffer(
                         tenantId, snapshotId, snapshot.offerSnapshot(), principal, entry.getKey().actionId(),
                         entry.getKey().policyId(), authorisedAt, correlation), entry.getValue()))
@@ -453,16 +457,16 @@ final class TypedActionService {
                 offerId, evidence, traceparent, tracestate, payload.priorIntentId(),
                 Optional.ofNullable(exactExecutionAt));
         List<Intent> existing = existing(tenantId, intentId, offerId, requestChecksum);
-        if (!existing.isEmpty()) return existing.getFirst();
+        if (!existing.isEmpty()) return reconcileWithCurrentCapabilities(tenantId, offer, action, existing.getFirst());
         State state = currentState(tenantId, offer.subjectType(), offer.subjectId(), action.projectionType());
         existing = existing(tenantId, intentId, offerId, requestChecksum);
-        if (!existing.isEmpty()) return existing.getFirst();
+        if (!existing.isEmpty()) return reconcileWithCurrentCapabilities(tenantId, offer, action, existing.getFirst());
         Instant acceptedAt = Optional.ofNullable(exactExecutionAt).orElseGet(clock::instant)
                 .truncatedTo(ChronoUnit.MICROS);
         FactSet authorisationFacts = facts(action.projectionType(), state.value(), acceptedAt);
         if (state.version() != offer.stateVersion() || !state.evidence().checksum().equals(offer.stateChecksum())
                 || !currentlyApplicable(action, offer.policyId(), state.value(), authorisationFacts)
-                || !cedarAllows(offer.principal(), offer.subjectId(), action, state.value(), authorisationFacts)) {
+                || !cedarAllows(tenantId, offer.principal(), offer.subjectId(), action, state.value(), authorisationFacts)) {
             throw new IntentRejectedException();
         }
         payload.priorIntentId().ifPresent(priorIntentId -> {
@@ -500,6 +504,18 @@ final class TypedActionService {
         telemetry.intent(tenantId, new Subject(offer.subjectType(), offer.subjectId()), offerId, intentId,
                 IntentStatus.PENDING, KernelTelemetry.traceId(traceparent, intentId));
         return new Intent(intentId, offerId, IntentStatus.PENDING, acceptedAt);
+    }
+
+    private Intent reconcileWithCurrentCapabilities(
+            String tenantId, TypedOffer offer, ActionType<?, ?, ?> action, Intent existing) {
+        if (cedar.model(action.projectionType()).requiredCapabilities().isEmpty()) return existing;
+        try {
+            cedar.capabilityContext(tenantId, offer.principal(),
+                    typedSubject(action.projectionType(), offer.subjectId()), action.projectionType());
+            return existing;
+        } catch (io.github.gmcnicol.kernel.application.AuthorisationDeniedException exception) {
+            throw new IntentRejectedException();
+        }
     }
 
     Optional<Intent> processNext(Instant processedAt) {
@@ -574,7 +590,7 @@ final class TypedActionService {
         }
         if (!currentBundle(stored.bundleId(), stored.bundleChecksum())
                 || !cedarAllows(
-                        stored.principal(), stored.subjectId(), action, state.value(), authorisationFacts)) {
+                        claim.tenantId(), stored.principal(), stored.subjectId(), action, state.value(), authorisationFacts)) {
             return terminal(stored, token, IntentStatus.FAILED, IntentFailureReason.AUTHORISATION_DENIED, processedAt);
         }
         Intent claimed = new Intent(stored.id(), stored.offerId(), IntentStatus.CLAIMED, stored.acceptedAt());
@@ -747,10 +763,16 @@ final class TypedActionService {
 
     @SuppressWarnings("unchecked")
     private boolean cedarAllows(
-            Principal principal, String subjectId, ActionType<?, ?, ?> action,
+            String tenantId, Principal principal, String subjectId, ActionType<?, ?, ?> action,
             Object projection, FactSet facts) {
         ProjectionType<?, Object> type = (ProjectionType<?, Object>) action.projectionType();
-        return cedar.allows(principal, typedSubject(type, subjectId), type, projection, facts, action);
+        try {
+            TypedSubject<?> subject = typedSubject(type, subjectId);
+            var context = cedar.capabilityContext(tenantId, principal, subject, type);
+            return cedar.allows(principal, subject, type, projection, facts, action.qualifiedName(), context);
+        } catch (io.github.gmcnicol.kernel.application.AuthorisationDeniedException exception) {
+            return false;
+        }
     }
 
     private State currentState(String tenantId, String subjectType, String subjectId, ProjectionType<?, ?> type) {

@@ -1,3 +1,4 @@
+import io.github.gmcnicol.kernel.taxi.Capability
 import io.github.gmcnicol.kernel.taxi.Subject
 import io.github.gmcnicol.kernel.taxi.Contract
 import io.github.gmcnicol.kernel.taxi.ProjectedState
@@ -7,6 +8,12 @@ import io.github.gmcnicol.kernel.taxi.ActionService
 import io.github.gmcnicol.kernel.taxi.Published
 
 namespace io.github.gmcnicol.crm
+
+@Published @Contract(version = 1) @Capability
+model EngageContact { remaining: Int? }
+
+@Published @Contract(version = 1) @Capability
+model ExportContacts {}
 
 @Subject
 @Published

@@ -48,6 +48,7 @@ final class TaxiJavaGenerator {
     private static final String CONTRACT = "io.github.gmcnicol.kernel.taxi.Contract";
     private static final String PROJECTED_STATE = "io.github.gmcnicol.kernel.taxi.ProjectedState";
     private static final String FACT = "io.github.gmcnicol.kernel.taxi.Fact";
+    private static final String CAPABILITY = "io.github.gmcnicol.kernel.taxi.Capability";
     private static final String EVENT = "io.github.gmcnicol.kernel.taxi.Event";
     private static final String ACTION_SERVICE = "io.github.gmcnicol.kernel.taxi.ActionService";
     private static final String PUBLISHED = "io.github.gmcnicol.kernel.taxi.Published";
@@ -173,7 +174,7 @@ final class TaxiJavaGenerator {
                 .collect(java.util.stream.Collectors.toSet());
         boolean bindingsGenerated = authoredTypes.stream()
                 .anyMatch(type -> annotated(type, PROJECTED_STATE) || annotated(type, FACT)
-                        || annotated(type, EVENT))
+                        || annotated(type, EVENT) || annotated(type, CAPABILITY))
                 || !actionServices.isEmpty();
         if (bindingsGenerated) {
             for (String generated : actionServices.isEmpty()
@@ -301,8 +302,9 @@ final class TaxiJavaGenerator {
             boolean projection = annotated(type, PROJECTED_STATE);
             boolean fact = annotated(type, FACT);
             boolean event = annotated(type, EVENT);
+            boolean capability = annotated(type, CAPABILITY);
             if ((subject ? 1 : 0) + (projection ? 1 : 0) + (fact ? 1 : 0)
-                    + (event ? 1 : 0) > 1) {
+                    + (event ? 1 : 0) + (capability ? 1 : 0) > 1) {
                 fail(type, "semantic role annotations cannot be combined");
             }
             if (subject && (!(type instanceof ObjectType objectType)
@@ -351,6 +353,12 @@ final class TaxiJavaGenerator {
                         || !annotated(projectionType, PROJECTED_STATE)) {
                     fail(type, "@Fact projection must reference one @ProjectedState model: " + projectionName);
                 }
+            }
+            if (capability) {
+                if (!(type instanceof ObjectType objectType) || objectType.getTypeKind() != TypeKind.Model) {
+                    fail(type, "@Capability may only annotate a model");
+                }
+                contractVersion(type);
             }
             if (event) {
                 if (!(type instanceof ObjectType objectType) || objectType.getTypeKind() != TypeKind.Model) {
@@ -411,7 +419,7 @@ final class TaxiJavaGenerator {
             }
             ObjectType candidate = (ObjectType) input;
             if (annotated(candidate, SUBJECT) || annotated(candidate, PROJECTED_STATE)
-                    || annotated(candidate, FACT) || annotated(candidate, EVENT)) {
+                    || annotated(candidate, FACT) || annotated(candidate, EVENT) || annotated(candidate, CAPABILITY)) {
                 fail(operation, "Candidate Payload model cannot carry another semantic role");
             }
             if (candidate.getFields().stream().map(field -> constantName(field.getName())).anyMatch("TYPE"::equals)) {
@@ -620,9 +628,10 @@ final class TaxiJavaGenerator {
         var facts = authoredTypes.stream().filter(type -> annotated(type, FACT)).toList();
         var candidates = authoredTypes.stream().filter(type -> candidateNames.contains(type.getQualifiedName())).toList();
         var events = authoredTypes.stream().filter(type -> annotated(type, EVENT)).toList();
-        if (!projections.isEmpty() || !facts.isEmpty() || !actionServices.isEmpty()) {
+        var capabilities = authoredTypes.stream().filter(type -> annotated(type, CAPABILITY)).toList();
+        if (!projections.isEmpty() || !facts.isEmpty() || !capabilities.isEmpty() || !actionServices.isEmpty()) {
             files.put(Path.of(basePackage.replace('.', '/'), "GeneratedSemanticBindings.java"),
-                    renderBindings(basePackage, projections, facts, candidates, events, actionServices));
+                    renderBindings(basePackage, projections, facts, candidates, events, actionServices, capabilities));
         }
         if (!actionServices.isEmpty()) {
             files.put(Path.of(basePackage.replace('.', '/'), "GeneratedSemanticRegistry.java"),
@@ -637,7 +646,8 @@ final class TaxiJavaGenerator {
             List<Type> facts,
             List<Type> candidates,
             List<Type> events,
-            List<Service> actionServices) {
+            List<Service> actionServices,
+            List<Type> capabilities) {
         String projectionTypes = projections.stream()
                 .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
                 .collect(java.util.stream.Collectors.joining(", "));
@@ -650,6 +660,9 @@ final class TaxiJavaGenerator {
         String eventTypes = events.stream()
                 .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
                 .collect(java.util.stream.Collectors.joining(", "));
+        String capabilityTypes = capabilities.stream()
+                .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
+                .collect(java.util.stream.Collectors.joining(", "));
         String actionTypes = actionServices.stream().flatMap(service -> service.getOperations().stream()
                         .map(operation -> basePackage + "." + service.getQualifiedName() + "."
                                 + constantName(operation.getName())))
@@ -659,7 +672,8 @@ final class TaxiJavaGenerator {
                 + "    public static final io.github.gmcnicol.kernel.semanticpack.SemanticBindings INSTANCE = new "
                 + "io.github.gmcnicol.kernel.semanticpack.SemanticBindings(java.util.List.of(" + projectionTypes
                 + "), java.util.List.of(" + factTypes + "), java.util.List.of(" + candidateTypes
-                + "), java.util.List.of(" + eventTypes + "), java.util.List.of(" + actionTypes + "));\n\n"
+                + "), java.util.List.of(" + eventTypes + "), java.util.List.of(" + actionTypes
+                + "), java.util.List.of(" + capabilityTypes + "));\n\n"
                 + "    private GeneratedSemanticBindings() {}\n"
                 + "}\n";
     }
@@ -966,13 +980,14 @@ final class TaxiJavaGenerator {
     }
 
     private static boolean durable(String role) {
-        return Set.of("PROJECTION", "FACT", "CANDIDATE", "EVENT").contains(role);
+        return Set.of("PROJECTION", "FACT", "CANDIDATE", "EVENT", "CAPABILITY").contains(role);
     }
 
     private static String semanticRole(Type type, Set<String> candidates) {
         if (annotated(type, SUBJECT)) return "SUBJECT";
         if (annotated(type, PROJECTED_STATE)) return "PROJECTION";
         if (annotated(type, FACT)) return "FACT";
+        if (annotated(type, CAPABILITY)) return "CAPABILITY";
         if (annotated(type, EVENT)) return "EVENT";
         if (candidates.contains(type.getQualifiedName())) return "CANDIDATE";
         if (type instanceof ObjectType object && isEventUnion(object)) return "EVENT_UNION";
@@ -1156,6 +1171,15 @@ final class TaxiJavaGenerator {
                     .append("    public static final io.github.gmcnicol.kernel.semanticpack.FactDerivationSlot<")
                     .append(basePackage).append(".").append(projectionName).append(", ").append(name)
                     .append("> DERIVATION = new io.github.gmcnicol.kernel.semanticpack.FactDerivationSlot<>(TYPE);\n");
+        }
+        if (annotated(type, CAPABILITY)) {
+            descriptors.append("    public static final io.github.gmcnicol.kernel.application.CapabilityType<")
+                    .append(name).append("> TYPE = new io.github.gmcnicol.kernel.application.CapabilityType<>(\"")
+                    .append(type.getQualifiedName()).append("\", ").append(contractVersion(type)).append(", ")
+                    .append(name).append(".class, java.util.List.of(")
+                    .append(fields.stream().map(field -> constantName(field.getName()))
+                            .collect(java.util.stream.Collectors.joining(", ")))
+                    .append("));\n");
         }
         if (annotated(type, EVENT)) {
             descriptors.append("    public static final io.github.gmcnicol.kernel.application.EventType<")

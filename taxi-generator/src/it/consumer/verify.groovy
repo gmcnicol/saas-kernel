@@ -40,3 +40,23 @@ def taxi = new File(basedir, 'src/main/taxi/customer.taxi')
 taxi.text = taxi.text.replace('\nmodel Removable {}\n', '\n')
 assert new ProcessBuilder(command.dropRight(2) + ['generate-sources']).directory(basedir).inheritIO().start().waitFor() == 0
 assert !new File(basedir, 'target/generated-sources/taxi/example/bindings/customer/crm/Removable.java').exists()
+
+// Capabilities are principal-specific authority, never Candidate Payloads or workflow Facts.
+def originalTaxi = taxi.text
+taxi.text = taxi.text.replace('model ChangeCustomer', '@Capability\nmodel ChangeCustomer')
+assert new ProcessBuilder(command.dropRight(2) + ['generate-sources']).directory(basedir).inheritIO().start().waitFor() != 0
+taxi.text = originalTaxi
+assert new ProcessBuilder(command.dropRight(2) + ['compile']).directory(basedir).inheritIO().start().waitFor() == 0
+
+// A descriptor cannot carry another generated binding's value in a clean consumer.
+def wrong = new File(basedir, 'src/main/java/example/WrongCapability.java')
+wrong.text = '''package example;
+import example.bindings.customer.crm.*;
+import io.github.gmcnicol.kernel.application.TypedCapability;
+class WrongCapability {
+    TypedCapability<ManageCustomer> wrong = new TypedCapability<>(ManageCustomer.TYPE, new ChangeCustomer("wrong"));
+}
+'''
+assert new ProcessBuilder(command.dropRight(2) + ['compile']).directory(basedir).inheritIO().start().waitFor() != 0
+wrong.delete()
+assert new ProcessBuilder(command.dropRight(2) + ['clean', 'compile']).directory(basedir).inheritIO().start().waitFor() == 0

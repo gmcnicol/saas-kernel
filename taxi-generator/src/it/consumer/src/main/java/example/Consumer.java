@@ -44,6 +44,22 @@ public final class Consumer {
                 || !decoded.value().equals(new ChangeCustomer("changed"))) {
             throw new AssertionError("generated registry must decode only its generated Candidate Payload");
         }
+        var capability = new io.github.gmcnicol.kernel.application.TypedCapability<>(
+                example.bindings.customer.crm.ManageCustomer.TYPE,
+                new example.bindings.customer.crm.ManageCustomer(Optional.of(2)));
+        var model = new io.github.gmcnicol.kernel.application.TypedAuthorisationModel<>(
+                Customer.TYPE, Set.of(Customer.NAME), Set.of(), Set.of(capability.type()));
+        if (!example.bindings.GeneratedSemanticBindings.INSTANCE.capabilities().contains(capability.type())
+                || !model.requiredCapabilities().contains(capability.type())) {
+            throw new AssertionError("capability must be generated, assembled and explicitly required");
+        }
+        // Existing generated inventories and Application constructors remain source compatible.
+        var bindings = example.bindings.GeneratedSemanticBindings.INSTANCE;
+        new io.github.gmcnicol.kernel.semanticpack.SemanticBindings(
+                bindings.projections(), bindings.facts(), bindings.candidates(), bindings.events(), bindings.actions());
+        new io.github.gmcnicol.kernel.semanticpack.SemanticBindings(bindings.projections(), bindings.facts());
+        new io.github.gmcnicol.kernel.application.TypedAuthorisationModel<>(Customer.TYPE, Set.of(Customer.NAME));
+        new io.github.gmcnicol.kernel.application.TypedAuthorisationModel<>(Customer.TYPE, Set.of(Customer.NAME), Set.of());
         return customer;
     }
 

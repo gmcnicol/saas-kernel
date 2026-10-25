@@ -10,6 +10,11 @@ import com.cedarpolicy.value.EntityUID;
 import com.cedarpolicy.value.CedarMap;
 import com.cedarpolicy.value.Value;
 import io.github.gmcnicol.kernel.application.Principal;
+import io.github.gmcnicol.kernel.application.CapabilityType;
+import io.github.gmcnicol.kernel.application.TypedCapability;
+import io.github.gmcnicol.kernel.application.EffectiveCapabilityResolver;
+import io.github.gmcnicol.kernel.application.AuthorisationDeniedException;
+import io.github.gmcnicol.kernel.semanticpack.SemanticBindings;
 import io.github.gmcnicol.kernel.application.ActionType;
 import io.github.gmcnicol.kernel.application.FactType;
 import io.github.gmcnicol.kernel.application.FactSet;
@@ -17,6 +22,7 @@ import io.github.gmcnicol.kernel.application.FieldType;
 import io.github.gmcnicol.kernel.application.ProjectionType;
 import io.github.gmcnicol.kernel.application.TypedAuthorisationModel;
 import io.github.gmcnicol.kernel.application.TypedSubject;
+import java.time.Clock;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -32,6 +38,9 @@ final class CedarAuthoriser {
     private final List<TypedAuthorisationModel<?>> typedModels;
     private final String bundleId;
     private final String bundleChecksum;
+    private final List<CapabilityType<?>> capabilities;
+    private final List<EffectiveCapabilityResolver> resolvers;
+    private final Clock clock;
 
     CedarAuthoriser(
             Schema schema,
@@ -39,6 +48,26 @@ final class CedarAuthoriser {
             List<TypedAuthorisationModel<?>> typedModels,
             String bundleId,
             String bundleChecksum) {
+        this(schema, policies, typedModels, bundleId, bundleChecksum, List.of(), List.of(), Clock.systemUTC());
+    }
+
+    CedarAuthoriser(
+            Schema schema, PolicySet policies, List<TypedAuthorisationModel<?>> typedModels,
+            String bundleId, String bundleChecksum, List<SemanticBindings> bindings,
+            List<EffectiveCapabilityResolver> resolvers, Clock clock) {
+        this.capabilities = bindings.stream().flatMap(binding -> binding.capabilities().stream()).toList();
+        this.resolvers = List.copyOf(resolvers);
+        this.clock = clock;
+        if (capabilities.stream().map(CapabilityType::name).distinct().count() != capabilities.size()) {
+            throw new IllegalArgumentException("Capability policy names must be unique in assembled bindings");
+        }
+        typedModels.forEach(model -> model.requiredCapabilities().forEach(required -> {
+            if (capabilities.stream().noneMatch(type -> type == required)
+                    || bindings.stream().flatMap(binding -> binding.projections().stream())
+                            .noneMatch(type -> type == model.projectionType())) {
+                throw new IllegalArgumentException("Capability model requires assembled generated descriptors");
+            }
+        }));
         this.schema = schema;
         this.policies = policies;
         this.typedModels = List.copyOf(typedModels);
@@ -75,9 +104,57 @@ final class CedarAuthoriser {
         return allows(principal, subject, projectionType, projection, facts, action.qualifiedName());
     }
 
+    <P> Map<String, Value> capabilityContext(
+            String tenantId, Principal principal, TypedSubject<?> subject, ProjectionType<?, P> projectionType) {
+        if (model(projectionType).requiredCapabilities().isEmpty()) return Map.of();
+        try {
+            if (resolvers.size() != 1) throw new AuthorisationDeniedException();
+            var request = new EffectiveCapabilityResolver.Request(
+                    new EffectiveCapabilityResolver.Scope(tenantId, principal, subject), clock.instant());
+            var resolution = resolvers.getFirst().resolve(request);
+            var context = resolution.context();
+            if (context.formatVersion() != 1 || !request.scope().equals(context.scope())
+                    || context.scope().resource().type() != subject.type()
+                    || !request.evaluatedAt().equals(context.evaluatedAt())
+                    || !context.expiresAt().isAfter(request.evaluatedAt())
+                    || !context.expiresAt().isAfter(clock.instant())
+                    || resolution.currentRevision() == null || resolution.currentRevision().isBlank()
+                    || !resolution.currentRevision().equals(context.revision())) {
+                throw new AuthorisationDeniedException();
+            }
+            var values = new LinkedHashMap<String, Value>();
+            for (TypedCapability<?> capability : context.capabilities()) {
+                if (capabilities.stream().noneMatch(type -> type == capability.type())
+                        || values.putIfAbsent(capability.type().name(), capabilityRecord(capability)) != null) {
+                    throw new AuthorisationDeniedException();
+                }
+            }
+            if (model(projectionType).requiredCapabilities().stream()
+                    .anyMatch(type -> !values.containsKey(type.name()))) {
+                throw new AuthorisationDeniedException();
+            }
+            return Map.of("capabilities", new CedarMap(values));
+        } catch (RuntimeException exception) {
+            throw new AuthorisationDeniedException();
+        }
+    }
+
+    private static <C> Value capabilityRecord(TypedCapability<C> capability) {
+        var attributes = new LinkedHashMap<String, Value>();
+        C value = capability.type().javaType().cast(capability.value());
+        capability.type().fields().forEach(field -> factAttribute(attributes, field, value));
+        return new CedarMap(attributes);
+    }
+
     private <P> boolean allows(
             Principal principal, TypedSubject<?> subject, ProjectionType<?, P> projectionType,
             P projection, FactSet facts, String operation) {
+        return allows(principal, subject, projectionType, projection, facts, operation, Map.of());
+    }
+
+    <P> boolean allows(
+            Principal principal, TypedSubject<?> subject, ProjectionType<?, P> projectionType,
+            P projection, FactSet facts, String operation, Map<String, Value> context) {
         try {
             TypedAuthorisationModel<P> model = model(projectionType);
             Entity principalEntity = entity(principal.type(), principal.id());
@@ -85,7 +162,7 @@ final class CedarAuthoriser {
                     simpleName(subject.type().qualifiedName()), subject.externalId(), attributes(model, projection, facts));
             var request = new AuthorizationRequest(
                     principalEntity.getEUID(), euid("Action", TYPED_ACTION_PREFIX + operation),
-                    resourceEntity.getEUID(), Optional.of(Map.of()), Optional.of(schema), true);
+                    resourceEntity.getEUID(), Optional.of(context), Optional.of(schema), true);
             return engine.isAuthorized(request, policies, Set.of(principalEntity, resourceEntity))
                     .success.map(response -> response.isAllowed()).orElse(false);
         } catch (Exception exception) {
