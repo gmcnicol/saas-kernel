@@ -29,6 +29,17 @@ final class ScopedAuthorisedReads implements AuthorisedReads {
         this.subjects = bindings.stream().flatMap(binding -> binding.subjects().stream()).toList();
     }
 
+    record Evidence(String sourceRevision, String authorityRevision, String fingerprint) {}
+    record DisclosureRead<P>(List<AuthorisedRecord<P>> records, Evidence evidence) {}
+
+    <P> DisclosureRead<P> disclosure(ReadRequest<P> request, ReadSource<P> source) {
+        var work = new Work(null);
+        work.lineage = true;
+        var records = perform(request, source, work);
+        return new DisclosureRead<>(records, new Evidence(work.sourceRevision, work.authorityRevision,
+                java.util.HexFormat.of().formatHex(work.digest.digest())));
+    }
+
     @Override public <P> List<AuthorisedRecord<P>> many(ReadRequest<P> request, ReadSource<P> source) {
         return perform(request, source, new Work(null));
     }
@@ -132,6 +143,15 @@ final class ScopedAuthorisedReads implements AuthorisedReads {
             String revision = source.revision(connection);
             if (revision == null || revision.isBlank()) work.fail(CollectionReadException.Reason.STALE);
             work.check(deadline);
+            if (work.lineage) {
+                if (revision.length() > 4096 || authority.revision().length() > 4096) throw new AuthorisationDeniedException();
+                work.sourceRevision = revision;
+                work.authorityRevision = authority.revision();
+                // Retain only a digest, never reusable capability values/a grant snapshot.
+                var authorityValues = new TreeMap<String, String>();
+                authority.values().forEach((name, value) -> authorityValues.put(name, value.toString()));
+                JSON.writeValue(new java.security.DigestOutputStream(java.io.OutputStream.nullOutputStream(), work.digest), authorityValues);
+            }
             var result = new ArrayList<AuthorisedRecord<P>>();
             var bytes = new ByteBudget(request.limits().outputBytes(), work);
             var fields = request.fields().stream().sorted(Comparator.comparing(ReadPath::qualifiedName)).toList();
@@ -175,6 +195,13 @@ final class ScopedAuthorisedReads implements AuthorisedReads {
                     var view = new AllowedRecord<P>(values);
                     if (!result.isEmpty()) bytes.write(',');
                     JSON.writeValue(bytes, view);
+                    if (work.lineage) {
+                        // Include every contributing identity, even when its identifier leaf is hidden.
+                        var identity = candidate.record();
+                        if (identity.externalId().length() > 4096) throw new AuthorisationDeniedException();
+                        JSON.writeValue(new java.security.DigestOutputStream(java.io.OutputStream.nullOutputStream(), work.digest),
+                                List.of(identity.type().qualifiedName(), identity.externalId(), view));
+                    }
                     result.add(view);
                 } catch (RuntimeException | Error failure) {
                     failed[0] = true;
@@ -230,6 +257,14 @@ final class ScopedAuthorisedReads implements AuthorisedReads {
     private static final class Work {
         final CollectionOptions options;
         final long started = System.nanoTime();
+        boolean lineage;
+        String sourceRevision;
+        String authorityRevision;
+        final java.security.MessageDigest digest = digest();
+        private static java.security.MessageDigest digest() {
+            try { return java.security.MessageDigest.getInstance("SHA-256"); }
+            catch (java.security.NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
+        }
         int decisions;
         int candidates;
         int bytes = 2;

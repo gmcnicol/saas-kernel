@@ -22,7 +22,7 @@ import org.testcontainers.utility.DockerImageName;
 
 @Testcontainers
 @SpringBootTest
-class AuthorisedReadTests {
+class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.AuthorisedDisclosureContract<NetworkContactRead> {
     @Container static final PostgreSQLContainer postgres = new PostgreSQLContainer(
             DockerImageName.parse("postgres:18-alpine")).withInitScript("postgres-init.sql");
     @DynamicPropertySource static void properties(DynamicPropertyRegistry p) {
@@ -35,7 +35,101 @@ class AuthorisedReadTests {
         p.add("kernel.intent-worker.enabled", () -> "false");
     }
     @Autowired AuthorisedReads reads;
+    @Autowired AuthorisedDisclosures disclosures;
+    @TestBean(methodName = "disclosureClock") java.time.Clock clock;
+    static final io.github.gmcnicol.kernel.contract.EffectiveCapabilityContract.TestClock disclosureTime = new io.github.gmcnicol.kernel.contract.EffectiveCapabilityContract.TestClock();
+    static java.time.Clock disclosureClock() { return disclosureTime; }
+    public void advanceDisclosureClock(long seconds) { disclosureTime.advanceSeconds(seconds); }
+    public void inDisclosureTransaction(Runnable work) { new org.springframework.transaction.support.TransactionTemplate(transactions).executeWithoutResult(status -> work.run()); }
+
+    @Test
+    @org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
+    void sanctionedDisclosuresHaveNoPrivatePayloadLogsOrErrors(org.springframework.boot.test.system.CapturedOutput output) {
+        checkDisclosureLogBoundary(output::getAll);
+    }
+
+    @Test void minimalAssistantContextAndSeparateExportReachOnlyRecordingSinks() {
+        var request = request("disclosure-safe");
+        var source = single(request, "SELECT 'Ada'");
+        var prepared = disclosures.prepare(request, source, "assistant", java.time.Duration.ofSeconds(30));
+        var sent = new ArrayList<String>();
+        var response = disclosures.derive(prepared, request, "assistant", source,
+                (views, out) -> out.write(new tools.jackson.databind.json.JsonMapper().writeValueAsBytes(views)),
+                (bytes, out) -> {
+                    sent.add(new String(bytes.copy(), java.nio.charset.StandardCharsets.UTF_8));
+                    out.write("Answer about Ada".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                });
+        assertThat(sent).containsExactly("[{\"details\":{\"displayName\":\"Ada\"}}]");
+        disclosures.send(response, request, "assistant", source, bytes -> sent.add(new String(bytes.copy(), java.nio.charset.StandardCharsets.UTF_8)));
+        assertThat(sent).containsExactly("[{\"details\":{\"displayName\":\"Ada\"}}]", "Answer about Ada");
+        var export = disclosures.prepare(request, source, "export", java.time.Duration.ofSeconds(30));
+        disclosures.send(export, request, "export", source,
+                (views, out) -> out.write(views.getFirst().get(NetworkContactRead.READ_DETAILS_DISPLAY_NAME).value().getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                bytes -> sent.add(new String(bytes.copy(), java.nio.charset.StandardCharsets.UTF_8)));
+        assertThat(sent.getLast()).isEqualTo("Ada");
+    }
     @Autowired CurrentAuthority authority;
+    public AuthorisedDisclosures disclosures() { return disclosures; }
+    public Fixture<NetworkContactRead> disclosureFixture() {
+        var request = request("disclosure-" + UUID.randomUUID());
+        var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.execute("CREATE TABLE IF NOT EXISTS disclosure_contact (tenant text, id text, name text, private_note text, revision text, withdrawn boolean, PRIMARY KEY(tenant, id))");
+        admin.execute("ALTER TABLE disclosure_contact ENABLE ROW LEVEL SECURITY");
+        admin.execute("ALTER TABLE disclosure_contact FORCE ROW LEVEL SECURITY");
+        admin.execute("DROP POLICY IF EXISTS disclosure_tenant ON disclosure_contact");
+        admin.execute("CREATE POLICY disclosure_tenant ON disclosure_contact USING (tenant = current_setting('kernel.tenant_id', true))");
+        admin.execute("GRANT SELECT ON disclosure_contact TO kernel_runtime");
+        admin.update("INSERT INTO disclosure_contact VALUES (?, 'PRIVATE-IDENTITY', 'Ada', 'PRIVATE-NOTE', '1', false)", request.tenantId());
+        ReadSource<NetworkContactRead> source = new ReadSource<>() {
+            public String revision(java.sql.Connection c) throws Exception {
+                try (var q = c.prepareStatement("SELECT min(revision) FROM disclosure_contact" ); var row = q.executeQuery()) {
+                    return row.next() ? row.getString(1) : null;
+                }
+            }
+            public void select(java.sql.Connection c, java.util.function.Consumer<ReadCandidate<NetworkContactRead>> sink) throws Exception {
+                try (var q = c.prepareStatement("SELECT * FROM disclosure_contact WHERE NOT withdrawn")) {
+                    q.setFetchSize(1);
+                    try (var row = q.executeQuery()) {
+                        while (row.next()) {
+                            var id = new NetworkContactId(row.getString("id"));
+                            sink.accept(new ReadCandidate<>(row.getString("tenant"), request.scope(), new TypedSubject<>(NetworkContactId.TYPE, id),
+                                    new NetworkContactRead(id, "network-a", "member", Optional.of(new ContactReadDetails(row.getString("name"), Optional.of(row.getString("private_note")))), List.of())));
+                        }
+                    }
+                }
+            }
+        };
+        return new Fixture<>(request, source, change -> {
+            switch (change) {
+                case ADD_CONTRIBUTOR -> admin.update("INSERT INTO disclosure_contact VALUES (?, 'SECOND-IDENTITY', 'Ada', 'PRIVATE-SECOND-NOTE', '1', false)", request.tenantId());
+                case SECOND_IDENTITY -> admin.update("UPDATE disclosure_contact SET id = 'REPLACEMENT-IDENTITY' WHERE tenant = ? AND id = 'SECOND-IDENTITY'", request.tenantId());
+                case SECOND_VALUE -> admin.update("UPDATE disclosure_contact SET name = 'Second changed' WHERE tenant = ? AND id = 'SECOND-IDENTITY'", request.tenantId());
+                case EXPIRED_AUTHORITY -> authority.states.put(request.tenantId(), "expired");
+                case MALFORMED_AUTHORITY -> authority.states.put(request.tenantId(), "stale");
+                case MISSING_AUTHORITY -> authority.states.put(request.tenantId(), "absent");
+                case REVOKE -> authority.states.put(request.tenantId(), "revoked");
+                case AUTHORITY -> authority.states.put(request.tenantId(), "changed");
+                case AUTHORITY_VALUES -> authority.states.put(request.tenantId(), "values");
+                case DEPENDENCY -> authority.states.put(request.tenantId(), "error");
+                case VALUE -> admin.update("UPDATE disclosure_contact SET name = 'Changed' WHERE tenant = ?", request.tenantId());
+                case IDENTITY -> admin.update("UPDATE disclosure_contact SET id = 'UNRELATED-IDENTITY' WHERE tenant = ?", request.tenantId());
+                case WITHDRAW -> admin.update("UPDATE disclosure_contact SET withdrawn = true WHERE tenant = ?", request.tenantId());
+                case REVISION -> admin.update("UPDATE disclosure_contact SET revision = '2' WHERE tenant = ?", request.tenantId());
+            }
+        }, "[{\"details\":{\"displayName\":\"Ada\"}}]");
+    }
+
+    @Test void membershipRevokedDuringFormattingPreventsTheFinalSend() {
+        var request = request("disclosure-revoke-format");
+        var source = single(request, "SELECT 'Ada'");
+        var prepared = disclosures.prepare(request, source, "export", java.time.Duration.ofSeconds(30));
+        var sent = new ArrayList<DisclosureBytes>();
+        assertThatThrownBy(() -> disclosures.send(prepared, request, "export", source, (views, out) -> {
+            out.write("Ada".getBytes());
+            authority.states.put(request.tenantId(), "revoked");
+        }, sent::add)).isExactlyInstanceOf(AuthorisationDeniedException.class).hasNoCause();
+        assertThat(sent).isEmpty();
+    }
 
     static class CurrentAuthority implements EffectiveCapabilityResolver {
         final Map<String, String> states = new java.util.concurrent.ConcurrentHashMap<>();
@@ -47,7 +141,7 @@ class AuthorisedReadTests {
                     request.evaluatedAt().plusSeconds(state.equals("expired") ? -1 : 60),
                     state.equals("stale") ? "old" : state.equals("changed") ? "2" : "1", Set.of("revoked", "absent").contains(state) ? List.of()
                     : List.of(new TypedCapability<>(EngageContact.TYPE, new EngageContact(Optional.of(
-                            state.equals("cedar-record-error") ? 3 : state.equals("cedar-field-error") ? 4 : 2))))));
+                            state.equals("cedar-record-error") ? 3 : state.equals("cedar-field-error") ? 4 : state.equals("values") ? 1 : 2))))));
         }
     }
 

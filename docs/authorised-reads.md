@@ -112,7 +112,8 @@ SQL or policy errors. No private payload telemetry is added.
 These are check-to-return fences, not an atomic lock against concurrent revocation,
 withdrawal or sending. Applications needing stricter consistency own serialization
 with their writers. Authorised results are immutable values, **not grants for future
-release**. Later provider/export release/revocation work remains #71.
+release**. Use the separate [source-bound final disclosure fence](fenced-disclosures.md)
+for provider/export sends and buffered dependent output.
 
 ## Typed safe output and supported shapes
 
@@ -169,7 +170,8 @@ supersedes historical no-batch blocker notes. `many` itself adds no pagination,
 counts, search or continuation guarantees, and does not hide raw-scan timing.
 Use the [bounded collection contract](authorised-collections.md) for collection
 metadata: it requires a current Application-owned authorised index and rejects
-raw `ReadSource` metadata requests. Final release safety remains #71.
+raw `ReadSource` metadata requests. [Final release fencing](fenced-disclosures.md)
+is separate from both ordinary reads and collection navigation.
 
 ## Evidence
 

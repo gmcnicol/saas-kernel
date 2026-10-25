@@ -86,9 +86,14 @@ public class EvaluationAutoConfiguration {
 
     @Bean
     @DependsOn({"applicationValidator", "runtimeRoleValidator"})
-    io.github.gmcnicol.kernel.application.AuthorisedReads authorisedReads(
+    ScopedAuthorisedReads authorisedReads(
             DataSource dataSource, CedarAuthoriser cedar, List<SemanticBindings> bindings, MeterRegistry meters) {
         return new ScopedAuthorisedReads(dataSource, cedar, bindings, meters);
+    }
+
+    @Bean
+    io.github.gmcnicol.kernel.application.AuthorisedDisclosures authorisedDisclosures(ScopedAuthorisedReads reads, java.time.Clock clock) {
+        return new FencedDisclosures(reads, clock);
     }
 
     @Bean

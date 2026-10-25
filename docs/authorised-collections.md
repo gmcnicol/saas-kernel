@@ -20,7 +20,8 @@ unknown stays unknown, including on the last page. There are no candidate totals
 skipped counts, candidate identity metadata, raw keys, offsets, source revisions or debug metadata.
 A continuation means more **authorised** results, never merely more SQL candidates.
 No normal empty intermediate page is produced. Results remain values, not grants
-for later disclosure; release fencing is #71. Check-to-return/send races remain;
+for later disclosure; use the separate [final disclosure fence](fenced-disclosures.md).
+Check-to-return/send races remain;
 Applications needing strict revocation serialization own it.
 
 ## Required Application-owned authorised relation
