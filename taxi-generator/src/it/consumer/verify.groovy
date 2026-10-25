@@ -59,4 +59,27 @@ class WrongCapability {
 '''
 assert new ProcessBuilder(command.dropRight(2) + ['compile']).directory(basedir).inheritIO().start().waitFor() != 0
 wrong.delete()
+
+def wrongRead = new File(basedir, 'src/main/java/example/WrongRead.java')
+wrongRead.text = '''package example;
+import example.bindings.customer.crm.*;
+import io.github.gmcnicol.kernel.application.*;
+class WrongRead {
+    void consume(AuthorisedRecord<CustomerRead> view, CustomerRead raw) {
+        ReadValue<String> foreign = view.get(Customer.READ_NAME);
+        AuthorisedRecord<CustomerRead> notAuthorised = raw;
+    }
+}
+'''
+assert new ProcessBuilder(command.dropRight(2) + ['compile']).directory(basedir).inheritIO().start().waitFor() != 0
+wrongRead.delete()
+
+// Parent DTOs and collections deliberately have no generated disclosure path.
+def unsafeRead = new File(basedir, 'src/main/java/example/UnsafeRead.java')
+unsafeRead.text = '''package example;
+import example.bindings.customer.crm.*;
+class UnsafeRead { Object parent = CustomerRead.READ_DETAILS; Object list = CustomerRead.READ_CHILDREN; }
+'''
+assert new ProcessBuilder(command.dropRight(2) + ['compile']).directory(basedir).inheritIO().start().waitFor() != 0
+unsafeRead.delete()
 assert new ProcessBuilder(command.dropRight(2) + ['clean', 'compile']).directory(basedir).inheritIO().start().waitFor() == 0

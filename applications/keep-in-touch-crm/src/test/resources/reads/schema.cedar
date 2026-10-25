@@ -1,0 +1,12 @@
+entity Owner;
+entity Viewer;
+entity ContactId = { contactId: String, FollowUpDue?: { contactId: String } };
+entity NetworkContactId = { network: String, owner: String };
+type Authority = { capabilities: { EngageContact?: { remaining?: Long }, ExportContacts?: {} }, readScope: String };
+action "typed/v1/io.github.gmcnicol.crm.FollowUpDue" appliesTo { principal: [Owner, Viewer], resource: [ContactId] };
+action "typed/v1/io.github.gmcnicol.crm.TypedCrmActions.recordInteraction" appliesTo { principal: [Owner, Viewer], resource: [ContactId] };
+action "typed/v1/io.github.gmcnicol.crm.FollowUpProjection.contactId" appliesTo { principal: [Owner, Viewer], resource: [ContactId] };
+action "typed/v1/io.github.gmcnicol.crm.NetworkContactRead.read" appliesTo { principal: [Owner, Viewer], resource: [NetworkContactId], context: Authority };
+action "typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details" appliesTo { principal: [Owner, Viewer], resource: [NetworkContactId], context: Authority };
+action "typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details.displayName" appliesTo { principal: [Owner, Viewer], resource: [NetworkContactId], context: Authority };
+action "typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details.privateNote" appliesTo { principal: [Owner, Viewer], resource: [NetworkContactId], context: Authority };

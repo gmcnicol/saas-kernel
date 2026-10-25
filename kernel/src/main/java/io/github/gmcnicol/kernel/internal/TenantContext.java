@@ -31,10 +31,14 @@ final class TenantContext {
         jdbc.execute("SET LOCAL ROLE \"" + role.replace("\"", "\"\"") + "\"");
     }
 
-    static void useAfterRole(JdbcTemplate jdbc, String tenantId) {
+    static void validate(String tenantId) {
         if (tenantId == null || !VALID_TENANT.matcher(tenantId).matches()) {
             throw new IllegalArgumentException("Invalid tenant context");
         }
+    }
+
+    static void useAfterRole(JdbcTemplate jdbc, String tenantId) {
+        validate(tenantId);
         jdbc.queryForObject("SELECT set_config('kernel.tenant_id', ?, true)", String.class, tenantId);
     }
 

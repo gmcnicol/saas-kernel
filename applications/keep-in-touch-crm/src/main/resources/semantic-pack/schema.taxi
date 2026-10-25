@@ -19,6 +19,29 @@ model ExportContacts {}
 @Published
 type ContactId inherits String
 
+@Published @Subject
+type NetworkId inherits String
+
+@Published @Subject
+type NetworkContactId inherits String
+
+@Published
+model ContactReadDetails {
+    displayName: String
+    privateNote: String?
+}
+
+@Contract(version = 1)
+@ProjectedState(subject = "io.github.gmcnicol.crm.NetworkContactId")
+@Published
+model NetworkContactRead {
+    contactId: NetworkContactId
+    network: String
+    owner: String
+    details: ContactReadDetails?
+    tags: String[]
+}
+
 @Contract(version = 1)
 @ProjectedState(subject = "io.github.gmcnicol.crm.ContactId")
 @Published
