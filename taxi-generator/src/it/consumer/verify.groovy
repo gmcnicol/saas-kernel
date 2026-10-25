@@ -76,6 +76,21 @@ class WrongRead {
 assert new ProcessBuilder(command.dropRight(2) + ['compile']).directory(basedir).inheritIO().start().waitFor() != 0
 wrongRead.delete()
 
+// Each final-disclosure misuse must fail independently, without relying on another error.
+[
+    'AuthorisedDisclosures.Formatter<CustomerRead> formatter = (views, output) -> { CustomerRead raw = views.getFirst(); };',
+    'void misuse(CustomerRead raw) { AuthorisedDisclosures.Prepared<CustomerRead> handle = raw; }',
+    'AuthorisedDisclosures.Sink sink = (byte[] bytes) -> {};'
+].each { misuse ->
+    def wrongDisclosure = new File(basedir, 'src/main/java/example/WrongDisclosure.java')
+    wrongDisclosure.text = '''package example;
+import example.bindings.customer.crm.*;
+import io.github.gmcnicol.kernel.application.*;
+class WrongDisclosure { ''' + misuse + ' }'
+    assert new ProcessBuilder(command.dropRight(2) + ['compile']).directory(basedir).inheritIO().start().waitFor() != 0
+    wrongDisclosure.delete()
+}
+
 // Parent DTOs and collections deliberately have no generated disclosure path.
 def unsafeRead = new File(basedir, 'src/main/java/example/UnsafeRead.java')
 unsafeRead.text = '''package example;

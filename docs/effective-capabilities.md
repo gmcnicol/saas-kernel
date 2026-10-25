@@ -105,7 +105,8 @@ decision permits bounded per-decision SDK calls; historical no-batch blocker not
 are superseded. Ordinary reads and selected nested scalar output use the additive
 [authorised-read contract](authorised-reads.md); bounded collections use a current
 [Application-owned authorised index](authorised-collections.md). Final release
-fencing remains #71, not #68.
+fencing uses the separate [source-bound disclosure contract](fenced-disclosures.md),
+not a retained #68 authority context.
 There remains a check-to-use race: Applications needing strict serialization with
 revocation/allowance consumption must coordinate their authoritative source and
 domain transaction. This contract is not an atomic grant database.

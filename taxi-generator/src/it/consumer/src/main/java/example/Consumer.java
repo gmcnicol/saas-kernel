@@ -90,6 +90,22 @@ public final class Consumer {
         reads.collection(request, index, new io.github.gmcnicol.kernel.application.CollectionOptions(16, 100, () -> false, page.continuation()));
     }
 
+    public static void disclosureConsumer(io.github.gmcnicol.kernel.application.AuthorisedDisclosures disclosures,
+            io.github.gmcnicol.kernel.application.ReadRequest<example.bindings.customer.crm.CustomerRead> request,
+            io.github.gmcnicol.kernel.application.ReadSource<example.bindings.customer.crm.CustomerRead> source) {
+        var prepared = disclosures.prepare(request, source, "assistant", java.time.Duration.ofSeconds(30));
+        io.github.gmcnicol.kernel.application.AuthorisedDisclosures.Formatter<example.bindings.customer.crm.CustomerRead> formatter =
+                (views, output) -> {
+                    io.github.gmcnicol.kernel.application.ReadValue<String> label = views.getFirst().get(example.bindings.customer.crm.CustomerRead.READ_DETAILS_LABEL);
+                    output.write(label.visible() ? label.value().getBytes(java.nio.charset.StandardCharsets.UTF_8) : new byte[0]);
+                };
+        var response = disclosures.derive(prepared, request, "assistant", source, formatter,
+                (context, output) -> output.write(context.copy()));
+        disclosures.send(response, request, "assistant", source, bytes -> { });
+        var export = disclosures.prepare(request, source, "export", java.time.Duration.ofSeconds(30));
+        disclosures.send(export, request, "export", source, formatter, bytes -> { });
+    }
+
     private static void rejects(Runnable parser) {
         try {
             parser.run();

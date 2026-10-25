@@ -21,7 +21,7 @@ import org.testcontainers.utility.DockerImageName;
 
 @Testcontainers
 @SpringBootTest
-class AuthorisedReadTests {
+class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.AuthorisedDisclosureContract<ClientFilingRead> {
     @Container static final PostgreSQLContainer postgres = new PostgreSQLContainer(
             DockerImageName.parse("postgres:18-alpine")).withInitScript("postgres-init.sql");
     @DynamicPropertySource static void properties(DynamicPropertyRegistry p) {
@@ -34,6 +34,69 @@ class AuthorisedReadTests {
         p.add("kernel.intent-worker.enabled", () -> "false");
     }
     @Autowired AuthorisedReads reads;
+    @Autowired AuthorisedDisclosures disclosures;
+    @TestBean(methodName = "disclosureClock") java.time.Clock clock;
+    static final io.github.gmcnicol.kernel.contract.EffectiveCapabilityContract.TestClock disclosureTime = new io.github.gmcnicol.kernel.contract.EffectiveCapabilityContract.TestClock();
+    static java.time.Clock disclosureClock() { return disclosureTime; }
+    public void advanceDisclosureClock(long seconds) { disclosureTime.advanceSeconds(seconds); }
+    @Autowired org.springframework.transaction.PlatformTransactionManager transactions;
+    public void inDisclosureTransaction(Runnable work) { new org.springframework.transaction.support.TransactionTemplate(transactions).executeWithoutResult(status -> work.run()); }
+    @Autowired CurrentAuthority authority;
+    public AuthorisedDisclosures disclosures() { return disclosures; }
+    public Fixture<ClientFilingRead> disclosureFixture() {
+        var request = request(records(), new Principal("Client", "client-one"));
+        var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.execute("CREATE TABLE IF NOT EXISTS disclosure_revision (tenant text PRIMARY KEY, revision text)");
+        admin.execute("ALTER TABLE disclosure_revision ENABLE ROW LEVEL SECURITY");
+        admin.execute("ALTER TABLE disclosure_revision FORCE ROW LEVEL SECURITY");
+        admin.execute("DROP POLICY IF EXISTS disclosure_tenant ON disclosure_revision");
+        admin.execute("CREATE POLICY disclosure_tenant ON disclosure_revision USING (tenant = current_setting('kernel.tenant_id', true))");
+        admin.execute("GRANT SELECT ON disclosure_revision TO kernel_runtime");
+        admin.update("INSERT INTO disclosure_revision VALUES (?, '1')", request.tenantId());
+        var delegate = source(request);
+        ReadSource<ClientFilingRead> source = new ReadSource<>() {
+            public String revision(java.sql.Connection c) throws Exception {
+                try (var q = c.prepareStatement("SELECT revision FROM disclosure_revision"); var row = q.executeQuery()) {
+                    return row.next() ? row.getString(1) : null;
+                }
+            }
+            public void select(java.sql.Connection c, java.util.function.Consumer<ReadCandidate<ClientFilingRead>> sink) throws Exception { delegate.select(c, sink); }
+        };
+        return new Fixture<>(request, source, change -> {
+            switch (change) {
+                case ADD_CONTRIBUTOR -> admin.update("INSERT INTO read_filing VALUES (?, 'practice-one', 'SECOND-IDENTITY', 'client-one', 'CLIENT-REF', 'PRIVATE-SECOND-NOTE')", request.tenantId());
+                case SECOND_IDENTITY -> admin.update("UPDATE read_filing SET id = 'REPLACEMENT-IDENTITY' WHERE tenant_id = ? AND id = 'SECOND-IDENTITY'", request.tenantId());
+                case SECOND_VALUE -> admin.update("UPDATE read_filing SET reference = 'Second changed' WHERE tenant_id = ? AND id = 'SECOND-IDENTITY'", request.tenantId());
+                case EXPIRED_AUTHORITY -> authority.states.put(request.tenantId(), "expired");
+                case MALFORMED_AUTHORITY -> authority.states.put(request.tenantId(), "stale");
+                case MISSING_AUTHORITY -> authority.states.put(request.tenantId(), "revoked");
+                case REVOKE -> authority.states.put(request.tenantId(), "revoked");
+                case AUTHORITY -> authority.states.put(request.tenantId(), "changed");
+                case AUTHORITY_VALUES -> authority.states.put(request.tenantId(), "values");
+                case DEPENDENCY -> authority.states.put(request.tenantId(), "error");
+                case VALUE -> admin.update("UPDATE read_filing SET reference = 'Changed' WHERE tenant_id = ? AND id = '1'", request.tenantId());
+                case IDENTITY -> admin.update("UPDATE read_filing SET id = 'UNRELATED-IDENTITY' WHERE tenant_id = ? AND id = '1'", request.tenantId());
+                case WITHDRAW -> admin.update("DELETE FROM read_filing WHERE tenant_id = ? AND id = '1'", request.tenantId());
+                case REVISION -> admin.update("UPDATE disclosure_revision SET revision = '2' WHERE tenant = ?", request.tenantId());
+            }
+        }, "[{\"details\":{\"reference\":\"CLIENT-REF\"}}]");
+    }
+    @Test
+    @org.junit.jupiter.api.extension.ExtendWith(org.springframework.boot.test.system.OutputCaptureExtension.class)
+    void sanctionedDisclosuresHaveNoPrivatePayloadLogsOrErrors(org.springframework.boot.test.system.CapturedOutput output) {
+        checkDisclosureLogBoundary(output::getAll);
+    }
+
+    static class CurrentAuthority implements EffectiveCapabilityResolver {
+        final Map<String, String> states = new java.util.concurrent.ConcurrentHashMap<>();
+        public Resolution resolve(Request request) {
+            String state = states.getOrDefault(request.scope().tenantId(), "current");
+            if (state.equals("error")) throw new IllegalStateException("PRIVATE-GRANT");
+            String revision = state.equals("changed") ? "2" : "1";
+            return new Resolution(revision, new Context(1, request.scope(), request.evaluatedAt(), request.evaluatedAt().plusSeconds(state.equals("expired") ? -1 : 60), state.equals("stale") ? "old" : revision,
+                    state.equals("revoked") ? List.of() : List.of(new TypedCapability<>(ManageFiling.TYPE, new ManageFiling(Optional.of(state.equals("values") ? 1 : 2))))));
+        }
+    }
     @TestBean(methodName = "bundle") AuthorisationBundle ledgerlingAuthorisationBundle;
     static AuthorisationBundle bundle() { return () -> "reads/manifest.properties"; }
     @TestConfiguration static class Configuration {
@@ -41,11 +104,7 @@ class AuthorisedReadTests {
             return new TypedAuthorisationModel<>(ClientFilingRead.TYPE,
                     Set.of(ClientFilingRead.PRACTICE, ClientFilingRead.ASSIGNED_CLIENT), Set.of(), Set.of(ManageFiling.TYPE));
         }
-        @Bean EffectiveCapabilityResolver authority() {
-            return request -> new EffectiveCapabilityResolver.Resolution("1", new EffectiveCapabilityResolver.Context(
-                    1, request.scope(), request.evaluatedAt(), request.evaluatedAt().plusSeconds(60), "1",
-                    List.of(new TypedCapability<>(ManageFiling.TYPE, new ManageFiling(Optional.of(2))))));
-        }
+        @Bean CurrentAuthority authority() { return new CurrentAuthority(); }
     }
     static String checksum() {
         try (var input = AuthorisedReadTests.class.getResourceAsStream("/reads/checksum.sha256")) {
