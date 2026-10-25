@@ -46,7 +46,8 @@ class AuthorisedReadTests {
             return new Resolution(state.equals("changed") ? "2" : "1", new Context(1, scope, request.evaluatedAt(),
                     request.evaluatedAt().plusSeconds(state.equals("expired") ? -1 : 60),
                     state.equals("stale") ? "old" : state.equals("changed") ? "2" : "1", Set.of("revoked", "absent").contains(state) ? List.of()
-                    : List.of(new TypedCapability<>(EngageContact.TYPE, new EngageContact(Optional.of(2))))));
+                    : List.of(new TypedCapability<>(EngageContact.TYPE, new EngageContact(Optional.of(
+                            state.equals("cedar-record-error") ? 3 : state.equals("cedar-field-error") ? 4 : 2))))));
         }
     }
 
@@ -58,6 +59,20 @@ class AuthorisedReadTests {
                     assertThatThrownBy(() -> reads.one(request, single(request, "SELECT 'SECRET'")))
                             .isExactlyInstanceOf(AuthorisationDeniedException.class).hasNoCause();
                 }));
+    }
+
+    @Test void erroredCedarRecordDecisionCannotUseAnotherPermit() {
+        var request = request("cedar-record-error");
+        authority.states.put(request.tenantId(), "cedar-record-error");
+        assertThat(reads.one(request, single(request, "SELECT 'PRIVATE'"))).isEmpty();
+    }
+
+    @Test void erroredNestedFieldDecisionCannotUseItsPermit() {
+        var request = request("cedar-field-error");
+        authority.states.put(request.tenantId(), "cedar-field-error");
+        var result = reads.one(request, single(request, "SELECT 'PRIVATE'")).orElseThrow();
+        assertThat(result.get(NetworkContactRead.READ_DETAILS_DISPLAY_NAME)).isEqualTo(ReadValue.hidden());
+        assertThat(new tools.jackson.databind.json.JsonMapper().writeValueAsString(result)).isEqualTo("{}");
     }
 
     @Test void swallowedCandidateFailureCannotReleaseAnEarlierPartialResult() {
