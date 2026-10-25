@@ -6,6 +6,7 @@ import io.github.gmcnicol.kernel.application.CapabilityType;
 import io.github.gmcnicol.kernel.application.EventType;
 import io.github.gmcnicol.kernel.application.FactType;
 import io.github.gmcnicol.kernel.application.ProjectionType;
+import io.github.gmcnicol.kernel.application.SubjectType;
 import java.util.List;
 
 /** Generated inventory used to validate and prepare one typed Semantic Pack. */
@@ -15,7 +16,16 @@ public record SemanticBindings(
         List<CandidateType<?>> candidates,
         List<EventType<?>> events,
         List<ActionType<?, ?, ?>> actions,
-        List<CapabilityType<?>> capabilities) {
+        List<CapabilityType<?>> capabilities,
+        List<SubjectType<?>> subjects) {
+
+    public SemanticBindings(
+            List<ProjectionType<?, ?>> projections, List<FactType<?>> facts,
+            List<CandidateType<?>> candidates, List<EventType<?>> events, List<ActionType<?, ?, ?>> actions,
+            List<CapabilityType<?>> capabilities) {
+        this(projections, facts, candidates, events, actions, capabilities,
+                projections.stream().<SubjectType<?>>map(ProjectionType::subjectType).distinct().toList());
+    }
 
     public SemanticBindings(
             List<ProjectionType<?, ?>> projections, List<FactType<?>> facts,
@@ -34,5 +44,6 @@ public record SemanticBindings(
         events = List.copyOf(events);
         actions = List.copyOf(actions);
         capabilities = List.copyOf(capabilities);
+        subjects = List.copyOf(subjects);
     }
 }

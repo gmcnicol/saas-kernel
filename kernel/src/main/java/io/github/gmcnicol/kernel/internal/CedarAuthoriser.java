@@ -106,7 +106,14 @@ final class CedarAuthoriser {
 
     <P> Map<String, Value> capabilityContext(
             String tenantId, Principal principal, TypedSubject<?> subject, ProjectionType<?, P> projectionType) {
-        if (model(projectionType).requiredCapabilities().isEmpty()) return Map.of();
+        return capabilityAuthority(tenantId, principal, subject, projectionType).values();
+    }
+
+    record CapabilityAuthority(Map<String, Value> values, String revision) {}
+
+    <P> CapabilityAuthority capabilityAuthority(
+            String tenantId, Principal principal, TypedSubject<?> subject, ProjectionType<?, P> projectionType) {
+        if (model(projectionType).requiredCapabilities().isEmpty()) return new CapabilityAuthority(Map.of(), "");
         try {
             if (resolvers.size() != 1) throw new AuthorisationDeniedException();
             var request = new EffectiveCapabilityResolver.Request(
@@ -133,7 +140,7 @@ final class CedarAuthoriser {
                     .anyMatch(type -> !values.containsKey(type.name()))) {
                 throw new AuthorisationDeniedException();
             }
-            return Map.of("capabilities", new CedarMap(values));
+            return new CapabilityAuthority(Map.of("capabilities", new CedarMap(values)), context.revision());
         } catch (RuntimeException exception) {
             throw new AuthorisationDeniedException();
         }
@@ -168,6 +175,32 @@ final class CedarAuthoriser {
         } catch (Exception exception) {
             return false;
         }
+    }
+
+    <P> boolean allowsRead(io.github.gmcnicol.kernel.application.ReadRequest<P> read,
+            io.github.gmcnicol.kernel.application.ReadCandidate<P> candidate, String operation,
+            Map<String, Value> authority) {
+        try {
+            Entity principal = entity(read.principal().type(), read.principal().id());
+            String identity = key(read.tenantId(), candidate.scope().type().qualifiedName(), candidate.scope().externalId(),
+                    read.type().qualifiedName(), Integer.toString(read.type().contractVersion()),
+                    candidate.record().type().qualifiedName(), candidate.record().externalId());
+            Entity resource = entity(simpleName(candidate.record().type().qualifiedName()), identity,
+                    attributes(model(read.type()), candidate.value(), FactSet.empty()));
+            var context = new LinkedHashMap<String, Value>(authority);
+            context.put("readScope", new com.cedarpolicy.value.PrimString(read.scope().externalId()));
+            var request = new AuthorizationRequest(principal.getEUID(), euid("Action", TYPED_ACTION_PREFIX + operation),
+                    resource.getEUID(), Optional.of(context), Optional.of(schema), true);
+            var result = engine.isAuthorized(request, policies, Set.of(principal, resource));
+            return result.warnings.isEmpty() && result.success.isPresent()
+                    && result.success.get().getErrors().isEmpty() && result.success.get().isAllowed();
+        } catch (Exception failure) { return false; }
+    }
+
+    private static String key(String... parts) {
+        var key = new StringBuilder();
+        for (String part : parts) key.append(part.length()).append(':').append(part);
+        return key.toString();
     }
 
     private static <P> Map<String, Value> attributes(

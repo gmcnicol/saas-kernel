@@ -631,7 +631,8 @@ final class TaxiJavaGenerator {
         var capabilities = authoredTypes.stream().filter(type -> annotated(type, CAPABILITY)).toList();
         if (!projections.isEmpty() || !facts.isEmpty() || !capabilities.isEmpty() || !actionServices.isEmpty()) {
             files.put(Path.of(basePackage.replace('.', '/'), "GeneratedSemanticBindings.java"),
-                    renderBindings(basePackage, projections, facts, candidates, events, actionServices, capabilities));
+                    renderBindings(basePackage, projections, facts, candidates, events, actionServices, capabilities,
+                            authoredTypes.stream().filter(type -> annotated(type, SUBJECT)).toList()));
         }
         if (!actionServices.isEmpty()) {
             files.put(Path.of(basePackage.replace('.', '/'), "GeneratedSemanticRegistry.java"),
@@ -647,7 +648,8 @@ final class TaxiJavaGenerator {
             List<Type> candidates,
             List<Type> events,
             List<Service> actionServices,
-            List<Type> capabilities) {
+            List<Type> capabilities,
+            List<Type> subjects) {
         String projectionTypes = projections.stream()
                 .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
                 .collect(java.util.stream.Collectors.joining(", "));
@@ -663,6 +665,9 @@ final class TaxiJavaGenerator {
         String capabilityTypes = capabilities.stream()
                 .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
                 .collect(java.util.stream.Collectors.joining(", "));
+        String subjectTypes = subjects.stream()
+                .map(type -> basePackage + "." + type.getQualifiedName() + ".TYPE")
+                .collect(java.util.stream.Collectors.joining(", "));
         String actionTypes = actionServices.stream().flatMap(service -> service.getOperations().stream()
                         .map(operation -> basePackage + "." + service.getQualifiedName() + "."
                                 + constantName(operation.getName())))
@@ -673,7 +678,7 @@ final class TaxiJavaGenerator {
                 + "io.github.gmcnicol.kernel.semanticpack.SemanticBindings(java.util.List.of(" + projectionTypes
                 + "), java.util.List.of(" + factTypes + "), java.util.List.of(" + candidateTypes
                 + "), java.util.List.of(" + eventTypes + "), java.util.List.of(" + actionTypes
-                + "), java.util.List.of(" + capabilityTypes + "));\n\n"
+                + "), java.util.List.of(" + capabilityTypes + "), java.util.List.of(" + subjectTypes + "));\n\n"
                 + "    private GeneratedSemanticBindings() {}\n"
                 + "}\n";
     }
@@ -1147,6 +1152,8 @@ final class TaxiJavaGenerator {
                     .append(");\n");
         }
         if (annotated(type, PROJECTED_STATE)) {
+            var paths = new ArrayList<String>();
+            renderReadPaths(type, type, basePackage, name, "", "model", "", Set.of(), paths, descriptors);
             String subjectName = annotationString(type, PROJECTED_STATE, "subject");
             descriptors.append("    public static final io.github.gmcnicol.kernel.application.ProjectionType<")
                     .append(basePackage).append(".").append(subjectName).append(", ").append(name)
@@ -1156,7 +1163,7 @@ final class TaxiJavaGenerator {
                     .append(basePackage).append(".").append(subjectName).append(".TYPE, ")
                     .append(name).append(".class, java.util.List.of(")
                     .append(fields.stream().map(field -> constantName(field.getName())).collect(java.util.stream.Collectors.joining(", ")))
-                    .append("));\n");
+                    .append("), java.util.List.of(").append(String.join(", ", paths)).append("));\n");
         }
         if (annotated(type, FACT)) {
             String projectionName = annotationString(type, FACT, "projection");
@@ -1203,6 +1210,43 @@ final class TaxiJavaGenerator {
                 .map(union -> basePackage + "." + union).collect(java.util.stream.Collectors.joining(", "));
         return "package " + packageName + ";\n\npublic record " + name + "(\n" + components + "\n)" + implemented + " {\n"
                 + descriptors + "    public " + name + " {\n" + body + "    }\n}\n";
+    }
+
+    private static void renderReadPaths(ObjectType root, ObjectType model, String basePackage, String rootName,
+            String prefix, String access, String guards, Set<String> ancestors,
+            List<String> paths, StringBuilder output) {
+        if (ancestors.contains(model.getQualifiedName())) return; // Recursive/collection shapes fail closed: no path.
+        var visited = new HashSet<>(ancestors);
+        visited.add(model.getQualifiedName());
+        for (Field field : model.getFields()) {
+            String path = prefix + field.getName();
+            String read = access + "." + field.getName() + "()";
+            Type leaf = field.getType();
+            if (leaf instanceof ArrayType) continue;
+            if (leaf instanceof ObjectType object && object.getTypeKind() == TypeKind.Model) {
+                renderReadPaths(root, object, basePackage, rootName, path + ".",
+                        read + (field.getNullable() ? ".get()" : ""),
+                        guards + (field.getNullable() ? "if (" + read + ".isEmpty()) return io.github.gmcnicol.kernel.application.ReadValue.hidden(); " : ""),
+                        visited, paths, output);
+                continue;
+            }
+            String constant = "READ_" + constantName(path.replace('.', '_'));
+            if (paths.contains(constant) || root.getFields().stream()
+                    .anyMatch(existing -> constantName(existing.getName()).equals(constant))) {
+                fail(field, "generated read path name collision");
+            }
+            paths.add(constant);
+            String scalar = leaf instanceof EnumType ? "value.name()"
+                    : leaf instanceof ObjectType ? "value.value()" : "value";
+            output.append("    public static final io.github.gmcnicol.kernel.application.ReadPath<")
+                    .append(rootName).append(", ").append(javaType(leaf, false, basePackage))
+                    .append("> ").append(constant).append(" = new io.github.gmcnicol.kernel.application.ReadPath<>(\"")
+                    .append(root.getQualifiedName()).append(".").append(path).append("\", \"")
+                    .append(path).append("\", model -> { ").append(guards)
+                    .append("return io.github.gmcnicol.kernel.application.ReadValue.shown(")
+                    .append(read).append(field.getNullable() ? ".orElse(null)" : "")
+                    .append("); }, value -> ").append(scalar).append(");\n");
+        }
     }
 
     private static String renderUnion(ObjectType type, String basePackage) {

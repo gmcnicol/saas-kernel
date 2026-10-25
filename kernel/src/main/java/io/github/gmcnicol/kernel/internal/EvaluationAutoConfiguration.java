@@ -85,6 +85,13 @@ public class EvaluationAutoConfiguration {
     }
 
     @Bean
+    @DependsOn({"applicationValidator", "runtimeRoleValidator"})
+    io.github.gmcnicol.kernel.application.AuthorisedReads authorisedReads(
+            DataSource dataSource, CedarAuthoriser cedar, List<SemanticBindings> bindings) {
+        return new ScopedAuthorisedReads(dataSource, cedar, bindings);
+    }
+
+    @Bean
     IntentQueryService intentQueryService(JdbcTemplate jdbc, PlatformTransactionManager transactionManager) {
         return new IntentQueryService(jdbc, new TransactionTemplate(transactionManager));
     }

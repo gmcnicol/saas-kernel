@@ -32,6 +32,15 @@ model Customer {
     status: Status
 }
 
+@Subject
+type CustomerReadId inherits String
+
+model ReadDetails { label: String note: String? }
+
+@Contract(version = 1)
+@ProjectedState(subject = "customer.crm.CustomerReadId")
+model CustomerRead { id: CustomerReadId details: ReadDetails? children: ReadDetails[] }
+
 model Removable {}
 
 @Contract(version = 1) @Capability

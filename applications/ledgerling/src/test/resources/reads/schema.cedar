@@ -1,0 +1,13 @@
+entity Staff;
+entity Client;
+entity FilingId = { clientReference: String, RecordsOutstanding?: { requestId: String } };
+entity ClientFilingId = { practice: String, assignedClient: String };
+type Authority = { capabilities: { ManageFiling?: { remaining?: Long }, ExportFilings?: {} }, readScope: String };
+action "typed/v1/io.github.gmcnicol.ledgerling.RecordsOutstanding" appliesTo { principal: [Staff, Client], resource: [FilingId] };
+action "typed/v1/io.github.gmcnicol.ledgerling.FilingProjection.clientReference" appliesTo { principal: [Staff, Client], resource: [FilingId] };
+action "typed/v1/io.github.gmcnicol.ledgerling.LedgerlingActions.recordRecordsReceived" appliesTo { principal: [Staff, Client], resource: [FilingId] };
+action "typed/v1/io.github.gmcnicol.ledgerling.LedgerlingActions.startPreparation" appliesTo { principal: [Staff, Client], resource: [FilingId] };
+action "typed/v1/io.github.gmcnicol.ledgerling.ClientFilingRead.read" appliesTo { principal: [Staff, Client], resource: [ClientFilingId], context: Authority };
+action "typed/v1/io.github.gmcnicol.ledgerling.ClientFilingRead.details" appliesTo { principal: [Staff, Client], resource: [ClientFilingId], context: Authority };
+action "typed/v1/io.github.gmcnicol.ledgerling.ClientFilingRead.details.reference" appliesTo { principal: [Staff, Client], resource: [ClientFilingId], context: Authority };
+action "typed/v1/io.github.gmcnicol.ledgerling.ClientFilingRead.details.workingNotes" appliesTo { principal: [Staff, Client], resource: [ClientFilingId], context: Authority };
