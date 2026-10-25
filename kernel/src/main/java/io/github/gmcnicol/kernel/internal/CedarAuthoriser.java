@@ -171,7 +171,9 @@ final class CedarAuthoriser {
                     principalEntity.getEUID(), euid("Action", TYPED_ACTION_PREFIX + operation),
                     resourceEntity.getEUID(), Optional.of(context), Optional.of(schema), true);
             return engine.isAuthorized(request, policies, Set.of(principalEntity, resourceEntity))
-                    .success.map(response -> response.isAllowed()).orElse(false);
+                    .success.map(response -> response.isAllowed()
+                            && (model.requiredCapabilities().isEmpty() || response.getErrors().isEmpty()))
+                    .orElse(false);
         } catch (Exception exception) {
             return false;
         }

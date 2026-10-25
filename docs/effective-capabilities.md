@@ -59,8 +59,13 @@ type Authority = { capabilities: { Engage?: { remaining?: Long } } };
 
 Policies may require `context.capabilities has Engage`, check a typed allowance,
 **and** require resource ownership/membership. A capability does not override a
-Cedar denial. Kernel neither reserves nor decrements allowances: the Application
-must atomically reserve/consume them in its domain transaction when required.
+Cedar denial. Opted-in decisions require an **error-free Allow**: Cedar normally
+skips policies that fail during evaluation, but Kernel denies a capability-protected
+decision if any policy evaluation reports an error, even when another permit matches.
+Legacy models retain their existing decision handling. Diagnostics do not expose
+policy errors or capability values. Kernel neither reserves nor decrements
+allowances: the Application must atomically reserve/consume them in its domain
+transaction when required.
 
 ## Rechecks, compatibility and cost
 
@@ -70,8 +75,19 @@ execution retains its separate acceptance and execution checks. No authority is
 stored in snapshots, Offers or Intents, and no cross-request authority cache is
 introduced. Existing bundle, state, payload integrity and applicability checks
 remain. On opted-in paths acceptance retries (including exact reconciliation of
-committed work) also validate current capabilities; legacy reconciliation is
-unchanged. A retry does not execute already committed work again.
+committed work) re-read current Application state, derive Facts at the current
+Kernel time, resolve current capability values and require an error-free Cedar
+Allow for the Action under the current bundle. A still-present capability with
+an exhausted allowance, or a current resource restriction, can therefore deny
+reconciliation. A missing current resource also denies; Kernel does not reconstruct
+historical domain values.
+
+Reconciliation does not rerun business applicability or require the Offer's
+pre-success state version/checksum: committed work may have changed both. Policy
+is evaluated against the **current**, possibly post-success resource and Facts,
+not a fabricated pre-success projection. Denial neither recalls committed effects
+nor changes the existing Intent's status. Restored authority can reconcile that
+same request without executing it again. Legacy reconciliation is unchanged.
 
 Tests run the shared public workflow contract against the CRM Contact and practice
 Filing PostgreSQL/Cedar adapters, including overlapping grants, revocation,
@@ -81,7 +97,9 @@ constructors and rejects mismatched capability values and Candidate roles.
 
 Structural performance review: legacy paths add no resolver I/O. Opted-in paths
 add one Application resolution per authorisation phase, not per field/Fact/Action;
-they retain the existing Cedar decision count and generated field converters.
+they retain the existing discovery/new-execution Cedar decision count and generated
+field converters. Opted-in reconciliation adds one current-state read, current Fact
+derivation and one Action decision; legacy reconciliation adds none.
 No new latency budget or batch performance is claimed. #70 remains blocked by
 the existing Cedar Java binding's lack of a batch API. Ordinary reads, nested
 output, collections and final release fencing belong to later tickets, not #68.

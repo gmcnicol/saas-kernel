@@ -3,6 +3,7 @@ package io.github.gmcnicol.ledgerling;
 import io.github.gmcnicol.ledgerling.bindings.io.github.gmcnicol.ledgerling.*;
 import io.github.gmcnicol.kernel.application.*;
 import io.github.gmcnicol.kernel.contract.EffectiveCapabilityContract;
+import io.github.gmcnicol.kernel.contract.WorkflowTestDatabase;
 import java.time.Instant;
 import java.util.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,13 +27,8 @@ class EffectiveCapabilityTests extends EffectiveCapabilityContract {
             DockerImageName.parse("postgres:18-alpine")).withInitScript("postgres-init.sql");
     @DynamicPropertySource
     static void databaseProperties(DynamicPropertyRegistry properties) {
-        properties.add("spring.datasource.url", postgres::getJdbcUrl);
-        properties.add("spring.datasource.username", () -> "kernel_test_login");
-        properties.add("spring.datasource.password", () -> "kernel-test");
-        properties.add("spring.flyway.url", postgres::getJdbcUrl);
-        properties.add("spring.flyway.user", postgres::getUsername);
-        properties.add("spring.flyway.password", postgres::getPassword);
-        properties.add("kernel.intent-worker.enabled", () -> "false");
+        WorkflowTestDatabase.register(properties::add,
+                postgres::getJdbcUrl, postgres::getUsername, postgres::getPassword);
     }
     @Autowired Kernel kernel;
     @Autowired LedgerlingFilingQueries filings;
@@ -57,6 +53,20 @@ class EffectiveCapabilityTests extends EffectiveCapabilityContract {
     @Override protected ApplicationGrants grants() { return resolver; }
     @Override protected TypedCapability<?> unrelatedCapability() {
         return new TypedCapability<>(ExportFilings.TYPE, new ExportFilings());
+    }
+    @Override protected TypedCapability<?> capabilityWithRemaining(int remaining) {
+        return new TypedCapability<>(ManageFiling.TYPE, new ManageFiling(Optional.of(remaining)));
+    }
+    @Override protected void restrictResource(Flow flow) {
+        var admin = new JdbcTemplate(new DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("UPDATE ledger_filing_projection SET client_reference = 'other-client' WHERE tenant_id = ?",
+                flow.tenant());
+    }
+    @Override protected void removeResource(Flow flow) {
+        var admin = new JdbcTemplate(new DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("DELETE FROM ledger_filing_projection WHERE tenant_id = ?", flow.tenant());
     }
     @Override protected Flow flow(String id) {
         String tenant = "capability-" + id;
