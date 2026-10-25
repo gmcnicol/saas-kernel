@@ -3,6 +3,7 @@ package io.github.gmcnicol.crm;
 import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.*;
 import io.github.gmcnicol.kernel.application.*;
 import io.github.gmcnicol.kernel.contract.EffectiveCapabilityContract;
+import io.github.gmcnicol.kernel.contract.WorkflowTestDatabase;
 import java.time.Instant;
 import java.util.*;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,13 +27,8 @@ class EffectiveCapabilityTests extends EffectiveCapabilityContract {
             DockerImageName.parse("postgres:18-alpine")).withInitScript("postgres-init.sql");
     @DynamicPropertySource
     static void databaseProperties(DynamicPropertyRegistry properties) {
-        properties.add("spring.datasource.url", postgres::getJdbcUrl);
-        properties.add("spring.datasource.username", () -> "kernel_test_login");
-        properties.add("spring.datasource.password", () -> "kernel-test");
-        properties.add("spring.flyway.url", postgres::getJdbcUrl);
-        properties.add("spring.flyway.user", postgres::getUsername);
-        properties.add("spring.flyway.password", postgres::getPassword);
-        properties.add("kernel.intent-worker.enabled", () -> "false");
+        WorkflowTestDatabase.register(properties::add,
+                postgres::getJdbcUrl, postgres::getUsername, postgres::getPassword);
     }
     @Autowired Kernel kernel;
     @Autowired CrmContactQueries contacts;
@@ -49,7 +45,8 @@ class EffectiveCapabilityTests extends EffectiveCapabilityContract {
     static AuthorisationBundle capabilityBundle() { return () -> "capabilities/manifest.properties"; }
 
     static TypedAuthorisationModel<FollowUpProjection> requiredModel() {
-        return new TypedAuthorisationModel<>(FollowUpProjection.TYPE, Set.of(FollowUpProjection.CONTACT_ID),
+        return new TypedAuthorisationModel<>(FollowUpProjection.TYPE,
+                Set.of(FollowUpProjection.CONTACT_ID, FollowUpProjection.NEXT_CONTACT_DUE_AT),
                 Set.of(FollowUpDue.TYPE), Set.of(EngageContact.TYPE));
     }
     static ApplicationGrants applicationGrants() {
@@ -58,6 +55,22 @@ class EffectiveCapabilityTests extends EffectiveCapabilityContract {
     @Override protected ApplicationGrants grants() { return resolver; }
     @Override protected TypedCapability<?> unrelatedCapability() {
         return new TypedCapability<>(ExportContacts.TYPE, new ExportContacts());
+    }
+    @Override protected TypedCapability<?> capabilityWithRemaining(int remaining) {
+        return new TypedCapability<>(EngageContact.TYPE, new EngageContact(Optional.of(remaining)));
+    }
+    @Override protected void restrictResource(Flow flow) {
+        var admin = new JdbcTemplate(new DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("""
+                UPDATE crm_contact_engagement_projection SET next_contact_due_at = '2099-01-01'
+                WHERE tenant_id = ?
+                """, flow.tenant());
+    }
+    @Override protected void removeResource(Flow flow) {
+        var admin = new JdbcTemplate(new DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+        admin.update("DELETE FROM crm_contact_engagement_projection WHERE tenant_id = ?", flow.tenant());
     }
     @Override protected Flow flow(String id) {
         String tenant = "capability-" + id;

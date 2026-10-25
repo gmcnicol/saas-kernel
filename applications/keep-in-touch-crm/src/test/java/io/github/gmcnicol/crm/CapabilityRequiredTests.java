@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.gmcnicol.crm.bindings.io.github.gmcnicol.crm.*;
 import io.github.gmcnicol.kernel.application.*;
+import io.github.gmcnicol.kernel.contract.WorkflowTestDatabase;
 import java.time.Instant;
 import java.util.Set;
 import java.util.UUID;
@@ -28,13 +29,8 @@ class CapabilityRequiredTests {
 
     @DynamicPropertySource
     static void databaseProperties(DynamicPropertyRegistry properties) {
-        properties.add("spring.datasource.url", postgres::getJdbcUrl);
-        properties.add("spring.datasource.username", () -> "kernel_test_login");
-        properties.add("spring.datasource.password", () -> "kernel-test");
-        properties.add("spring.flyway.url", postgres::getJdbcUrl);
-        properties.add("spring.flyway.user", postgres::getUsername);
-        properties.add("spring.flyway.password", postgres::getPassword);
-        properties.add("kernel.intent-worker.enabled", () -> "false");
+        WorkflowTestDatabase.register(properties::add,
+                postgres::getJdbcUrl, postgres::getUsername, postgres::getPassword);
     }
 
     @Autowired Kernel kernel;
