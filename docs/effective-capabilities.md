@@ -101,8 +101,9 @@ they retain the existing discovery/new-execution Cedar decision count and genera
 field converters. Opted-in reconciliation adds one current-state read, current Fact
 derivation and one Action decision; legacy reconciliation adds none.
 No new latency budget or batch performance is claimed. #70 remains blocked by
-the existing Cedar Java binding's lack of a batch API. Ordinary reads, nested
-output, collections and final release fencing belong to later tickets, not #68.
+the existing Cedar Java binding's lack of a batch API. Ordinary reads and selected
+nested scalar output use the additive [authorised-read contract](authorised-reads.md)
+from #69. Collections and final release fencing remain later work, not #68.
 There remains a check-to-use race: Applications needing strict serialization with
 revocation/allowance consumption must coordinate their authoritative source and
 domain transaction. This contract is not an atomic grant database.
