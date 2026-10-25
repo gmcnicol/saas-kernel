@@ -19,6 +19,9 @@ public abstract class EffectiveCapabilityContract {
     protected abstract ApplicationGrants grants();
     protected abstract TestClock clock();
     protected abstract TypedCapability<?> unrelatedCapability();
+    protected abstract TypedCapability<?> capabilityWithRemaining(int remaining);
+    protected abstract void restrictResource(Flow flow);
+    protected abstract void removeResource(Flow flow);
 
     public static final class TestClock extends Clock {
         private Instant now = Instant.parse("2031-01-01T00:00:00Z");
@@ -51,6 +54,41 @@ public abstract class EffectiveCapabilityContract {
         grants().grant(preview.tenant(), "preview", Instant.MAX);
         assertThat(paid.discover().actionOffers()).hasSize(1);
         assertThat(preview.discover().actionOffers()).hasSize(1);
+    }
+
+    @Test
+    void cedarEvaluationErrorCannotPermitThroughAnotherMatchingPermit() {
+        Flow flow = flow(UUID.randomUUID().toString());
+        grants().grant(flow.tenant(), "paid", Instant.MAX);
+        grants().replace(flow.tenant(), capabilityWithRemaining(3));
+        var envelope = flow.discover();
+        assertThat(envelope.actionOffers()).isEmpty();
+        assertThat(envelope.fields()).isEmpty();
+        assertThat(envelope.facts()).isEmpty();
+    }
+
+    @Test
+    void cedarEvaluationErrorAfterDiscoveryRejectsAcceptanceAndExactExecution() {
+        Flow flow = flow(UUID.randomUUID().toString());
+        grants().grant(flow.tenant(), "paid", Instant.MAX);
+        UUID offer = flow.discover().actionOffers().getFirst().id();
+        grants().replace(flow.tenant(), capabilityWithRemaining(3));
+        assertThatThrownBy(() -> flow.accept(offer, UUID.randomUUID())).isInstanceOf(IntentRejectedException.class)
+                .hasMessage("Intent rejected");
+        assertThatThrownBy(() -> flow.execute(offer, UUID.randomUUID())).isInstanceOf(IntentRejectedException.class)
+                .hasMessage("Intent rejected");
+        assertThat(flow.kernel().findIntents(IntentQuery.tenant(flow.tenant()))).isEmpty();
+    }
+
+    @Test
+    void cedarEvaluationErrorAfterAcceptanceDeniesAsyncExecution() {
+        Flow flow = flow(UUID.randomUUID().toString());
+        grants().grant(flow.tenant(), "paid", Instant.MAX);
+        Intent accepted = flow.accept(flow.discover().actionOffers().getFirst().id(), UUID.randomUUID());
+        grants().replace(flow.tenant(), capabilityWithRemaining(3));
+        Intent completed = flow.kernel().processNext(clock().instant()).orElseThrow();
+        assertThat(completed.failureReason()).contains(IntentFailureReason.AUTHORISATION_DENIED);
+        assertThat(flow.kernel().findIntentEvents(flow.tenant(), accepted.id())).isEmpty();
     }
 
     @Test
@@ -120,6 +158,26 @@ public abstract class EffectiveCapabilityContract {
     }
 
     @Test
+    void acceptanceRetryRejectsPresentButExhaustedCapability() {
+        Flow flow = flow(UUID.randomUUID().toString());
+        grants().grant(flow.tenant(), "paid", Instant.MAX);
+        UUID offer = flow.discover().actionOffers().getFirst().id();
+        UUID intent = UUID.randomUUID();
+        flow.accept(offer, intent);
+        for (int remaining : List.of(0, 3)) { // Exhausted authority, then a policy evaluation error.
+            grants().replace(flow.tenant(), capabilityWithRemaining(remaining));
+            assertThatThrownBy(() -> flow.accept(offer, intent)).isInstanceOf(IntentRejectedException.class)
+                    .hasMessage("Intent rejected");
+            assertThatThrownBy(() -> flow.kernel().accept(offer, intent, flow.candidate()))
+                    .isInstanceOf(IntentRejectedException.class).hasMessage("Intent rejected");
+        }
+        grants().replace(flow.tenant(), capabilityWithRemaining(2));
+        assertThat(flow.accept(offer, intent).id()).isEqualTo(intent);
+        assertThat(flow.kernel().processNext(clock().instant()).orElseThrow().status()).isEqualTo(IntentStatus.SUCCEEDED);
+        assertThat(flow.kernel().findIntentEvents(flow.tenant(), intent)).hasSize(1);
+    }
+
+    @Test
     void revocationAfterAcceptanceDeniesAsyncExecution() {
         Flow flow = flow(UUID.randomUUID().toString());
         grants().grant(flow.tenant(), "preview", Instant.MAX);
@@ -173,6 +231,70 @@ public abstract class EffectiveCapabilityContract {
         flow.execute(offer, intent);
         grants().revoke(flow.tenant());
         assertThatThrownBy(() -> flow.execute(offer, intent)).isInstanceOf(IntentRejectedException.class);
+        assertThat(flow.kernel().findIntentEvents(flow.tenant(), intent)).hasSize(1);
+    }
+
+    @Test
+    void exactReconciliationRejectsExhaustedCapabilityWithoutRecallingOrRepeatingWork() {
+        Flow flow = flow(UUID.randomUUID().toString());
+        grants().grant(flow.tenant(), "paid", Instant.MAX);
+        UUID offer = flow.discover().actionOffers().getFirst().id();
+        UUID intent = UUID.randomUUID();
+        flow.execute(offer, intent);
+        for (int remaining : List.of(0, 3)) { // Neither denial may recall the already committed effect.
+            grants().replace(flow.tenant(), capabilityWithRemaining(remaining));
+            assertThatThrownBy(() -> flow.execute(offer, intent)).isInstanceOf(IntentRejectedException.class)
+                    .hasMessage("Intent rejected");
+            assertThat(flow.kernel().findIntentEvents(flow.tenant(), intent)).hasSize(1);
+        }
+        grants().replace(flow.tenant(), capabilityWithRemaining(2));
+        flow.execute(offer, intent);
+        assertThat(flow.kernel().findIntentEvents(flow.tenant(), intent)).hasSize(1);
+        assertThat(flow.kernel().findIntents(IntentQuery.tenant(flow.tenant()))).singleElement()
+                .extracting(IntentView::status).isEqualTo(IntentStatus.SUCCEEDED);
+    }
+
+    @Test
+    void acceptanceRetryUsesCurrentResourcePolicy() {
+        Flow flow = flow(UUID.randomUUID().toString());
+        grants().grant(flow.tenant(), "paid", Instant.MAX);
+        UUID offer = flow.discover().actionOffers().getFirst().id();
+        UUID intent = UUID.randomUUID();
+        flow.accept(offer, intent);
+        restrictResource(flow);
+        assertThatThrownBy(() -> flow.accept(offer, intent)).isInstanceOf(IntentRejectedException.class)
+                .hasMessage("Intent rejected");
+        assertThat(flow.kernel().findIntents(IntentQuery.tenant(flow.tenant()))).singleElement()
+                .extracting(IntentView::status).isEqualTo(IntentStatus.PENDING);
+        // Drain this fixture's now-stale pending work through the public worker seam.
+        assertThat(flow.kernel().processNext(clock().instant()).orElseThrow().id()).isEqualTo(intent);
+    }
+
+    @Test
+    void exactReconciliationUsesCurrentResourcePolicyWithoutRecallingWork() {
+        Flow flow = flow(UUID.randomUUID().toString());
+        grants().grant(flow.tenant(), "paid", Instant.MAX);
+        UUID offer = flow.discover().actionOffers().getFirst().id();
+        UUID intent = UUID.randomUUID();
+        flow.execute(offer, intent);
+        restrictResource(flow);
+        assertThatThrownBy(() -> flow.execute(offer, intent)).isInstanceOf(IntentRejectedException.class)
+                .hasMessage("Intent rejected");
+        assertThat(flow.kernel().findIntentEvents(flow.tenant(), intent)).hasSize(1);
+        assertThat(flow.kernel().findIntents(IntentQuery.tenant(flow.tenant()))).singleElement()
+                .extracting(IntentView::status).isEqualTo(IntentStatus.SUCCEEDED);
+    }
+
+    @Test
+    void exactReconciliationDeniesMissingCurrentResourceWithoutFabricatingHistory() {
+        Flow flow = flow(UUID.randomUUID().toString());
+        grants().grant(flow.tenant(), "paid", Instant.MAX);
+        UUID offer = flow.discover().actionOffers().getFirst().id();
+        UUID intent = UUID.randomUUID();
+        flow.execute(offer, intent);
+        removeResource(flow);
+        assertThatThrownBy(() -> flow.execute(offer, intent)).isInstanceOf(IntentRejectedException.class)
+                .hasMessage("Intent rejected").hasNoCause();
         assertThat(flow.kernel().findIntentEvents(flow.tenant(), intent)).hasSize(1);
     }
 

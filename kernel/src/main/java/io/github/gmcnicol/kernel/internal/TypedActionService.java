@@ -457,10 +457,10 @@ final class TypedActionService {
                 offerId, evidence, traceparent, tracestate, payload.priorIntentId(),
                 Optional.ofNullable(exactExecutionAt));
         List<Intent> existing = existing(tenantId, intentId, offerId, requestChecksum);
-        if (!existing.isEmpty()) return reconcileWithCurrentCapabilities(tenantId, offer, action, existing.getFirst());
+        if (!existing.isEmpty()) return reconcileWithCurrentAuthority(tenantId, offer, action, existing.getFirst());
         State state = currentState(tenantId, offer.subjectType(), offer.subjectId(), action.projectionType());
         existing = existing(tenantId, intentId, offerId, requestChecksum);
-        if (!existing.isEmpty()) return reconcileWithCurrentCapabilities(tenantId, offer, action, existing.getFirst());
+        if (!existing.isEmpty()) return reconcileWithCurrentAuthority(tenantId, offer, action, existing.getFirst());
         Instant acceptedAt = Optional.ofNullable(exactExecutionAt).orElseGet(clock::instant)
                 .truncatedTo(ChronoUnit.MICROS);
         FactSet authorisationFacts = facts(action.projectionType(), state.value(), acceptedAt);
@@ -493,7 +493,7 @@ final class TypedActionService {
         if (inserted == 0) {
             existing = existing(tenantId, intentId, offerId, requestChecksum);
             if (existing.isEmpty()) throw new IntentConflictException();
-            return existing.getFirst();
+            return reconcileWithCurrentAuthority(tenantId, offer, action, existing.getFirst());
         }
         applicationData.saveCandidate(tenantId, intentId, new Subject(offer.subjectType(), offer.subjectId()), payload);
         if (!canonical.encode(action.candidateType(), applicationData.readCandidate(tenantId, intentId, action))
@@ -506,14 +506,19 @@ final class TypedActionService {
         return new Intent(intentId, offerId, IntentStatus.PENDING, acceptedAt);
     }
 
-    private Intent reconcileWithCurrentCapabilities(
+    private Intent reconcileWithCurrentAuthority(
             String tenantId, TypedOffer offer, ActionType<?, ?, ?> action, Intent existing) {
         if (cedar.model(action.projectionType()).requiredCapabilities().isEmpty()) return existing;
         try {
-            cedar.capabilityContext(tenantId, offer.principal(),
-                    typedSubject(action.projectionType(), offer.subjectId()), action.projectionType());
+            State state = currentState(tenantId, offer.subjectType(), offer.subjectId(), action.projectionType());
+            // Reconciliation checks current authority, not pre-success state or business applicability.
+            // Committed work may have changed both, and is never handled again here.
+            FactSet currentFacts = facts(action.projectionType(), state.value(), clock.instant());
+            if (!cedarAllows(tenantId, offer.principal(), offer.subjectId(), action, state.value(), currentFacts)) {
+                throw new IntentRejectedException();
+            }
             return existing;
-        } catch (io.github.gmcnicol.kernel.application.AuthorisationDeniedException exception) {
+        } catch (RuntimeException exception) {
             throw new IntentRejectedException();
         }
     }
