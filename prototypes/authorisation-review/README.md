@@ -2,7 +2,9 @@
 
 Test-only Java/Taxi/PostgreSQL/Cedar evidence, outside the reactor; install/deploy
 skipped. No production permissions or public Kernel interfaces change. See
-[proposed ADR 0003](../../docs/adr/0003-authorised-disclosure-review.md).
+[final ADR 0003](../../docs/adr/0003-authorised-disclosure-review.md). This is historical
+review evidence, not the implemented API or adoption path; use the
+[packaged consumer](../../taxi-generator/src/it/adoption/README.md) instead.
 
 With the existing Java 25 installation and Docker:
 
@@ -31,5 +33,7 @@ byte/time limits, pagination, nullable/list output and runtime release are absen
 
 `Baseline` is the already-completed manual measurement, not a test threshold.
 It counts single Cedar calls, including denied records; **not batching**. Existing
-binding has no batch interface, so #70 no-N+1 remains blocked. No further backend
-or infrastructure exploration is part of this spike.
+binding has no batch interface. The later approved `bounded-current-api` decision
+superseded the old #70 no-N+1 blocker: implemented collections use bounded,
+benchmarked single calls, not batching or a guaranteed speedup. No further backend
+or infrastructure exploration is part of this historical spike.

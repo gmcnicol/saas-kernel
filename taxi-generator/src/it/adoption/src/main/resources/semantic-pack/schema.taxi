@@ -1,0 +1,27 @@
+import io.github.gmcnicol.kernel.taxi.Subject
+import io.github.gmcnicol.kernel.taxi.Contract
+import io.github.gmcnicol.kernel.taxi.ProjectedState
+import io.github.gmcnicol.kernel.taxi.Capability
+import io.github.gmcnicol.kernel.taxi.Event
+import io.github.gmcnicol.kernel.taxi.ActionService
+
+namespace example.directory {
+  @Subject type DirectoryId inherits String
+  @Subject type EntryId inherits String
+  @Contract(version = 1) @Capability model Access { actor: String }
+  model Details { name: String, privateNote: String? }
+  @Contract(version = 1) @ProjectedState(subject = "example.directory.EntryId")
+  model Entry { id: EntryId, directory: String, owner: String, details: Details, reviewed: Boolean }
+  @Contract(version = 1) model Review { note: String }
+  @Contract(version = 1) @Event model Reviewed { id: EntryId }
+  @ActionService(projection = "example.directory.Entry")
+  service DirectoryActions { operation review(input: Review): Reviewed[] }
+}
+
+namespace example.practice {
+  @Subject type PracticeId inherits String
+  @Subject type FileId inherits String
+  @Contract(version = 1) @Capability model PracticeAccess { actor: String }
+  @Contract(version = 1) @ProjectedState(subject = "example.practice.FileId")
+  model ClientFile { id: FileId, practice: String, assignedTo: String, reference: String, notes: String? }
+}

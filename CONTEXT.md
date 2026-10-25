@@ -40,6 +40,24 @@ _Avoid_: Cedar pack, policy pack, semantic pack
 A product-shaped scenario that validates the Kernel contract. Acceptance Fixtures are contrasting peers, not levels in a complexity ladder.
 _Avoid_: Demo app, complexity stage
 
+## Access and disclosure
+
+**Effective Capability**:
+A current, scope-bound right resolved by the Application from its valid grants, independent of how those grants originated. It is necessary authority, not a substitute for resource and field permission.
+_Avoid_: Subscription, workflow Fact, caller claim
+
+**Authorised Record**:
+An immutable ordinary-read projection containing only explicitly selected, permitted semantic leaves. It is not a workflow Evaluation Snapshot or authority for a future disclosure.
+_Avoid_: Raw DTO, Authorisation Envelope, reusable grant
+
+**Authorised Index**:
+An Application-owned current relation of records permitted for a principal's scoped query, including permission to query its predicate and ordering fields.
+_Avoid_: Raw candidate scan, Kernel repository
+
+**Disclosure Lineage**:
+The binding of a bounded disclosure to its original contributing resources, selected values, authority, policy, purpose and expiry. A derived response retains that lineage rather than acquiring authority from new sources.
+_Avoid_: Payload archive, signed download, permission snapshot
+
 ## Workflow
 
 **Projected State**:

@@ -14,7 +14,8 @@ jobs:
           distribution: temurin
           java-version: 25
           cache: maven
-      - run: ./mvnw --batch-mode verify
+      - name: Clean verify (includes isolated staged adoption consumer)
+        run: ./mvnw --batch-mode clean verify
       - name: Verify distributable artefacts
         shell: bash
         run: |
