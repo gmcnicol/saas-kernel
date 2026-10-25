@@ -65,18 +65,18 @@ final class FencedDisclosures implements AuthorisedDisclosures {
                 || !handle.request.equals(current) || !handle.purpose.equals(purpose)) throw new AuthorisationDeniedException();
     }
 
-    private <P> void fence(Lineage<P> handle, ReadRequest<P> current, String purpose, ReadSource<P> source) {
-        context(handle, current, purpose);
-        if (!handle.evidence.equals(reads.disclosure(current, source).evidence())) throw new AuthorisationDeniedException();
-        context(handle, current, purpose);
-    }
-
-    private <P> DisclosureBytes format(Lineage<P> handle, ReadRequest<P> current, String purpose,
-            ReadSource<P> source, Formatter<P> formatter) throws Exception {
+    private <P> ScopedAuthorisedReads.DisclosureRead<P> validatedRead(
+            Lineage<P> handle, ReadRequest<P> current, String purpose, ReadSource<P> source) {
         context(handle, current, purpose);
         var fresh = reads.disclosure(current, source);
         if (!handle.evidence.equals(fresh.evidence())) throw new AuthorisationDeniedException();
         context(handle, current, purpose);
+        return fresh;
+    }
+
+    private <P> DisclosureBytes format(Lineage<P> handle, ReadRequest<P> current, String purpose,
+            ReadSource<P> source, Formatter<P> formatter) throws Exception {
+        var fresh = validatedRead(handle, current, purpose, source);
         var output = new BoundedOutput(current.limits().outputBytes());
         formatter.format(fresh.records(), output);
         return output.freeze();
@@ -87,7 +87,7 @@ final class FencedDisclosures implements AuthorisedDisclosures {
         safe(() -> {
             var handle = lineage(prepared);
             var bytes = format(handle, current, purpose, source, formatter);
-            fence(handle, current, purpose, source);
+            validatedRead(handle, current, purpose, source);
             sink.send(bytes);
             return null;
         });
@@ -99,7 +99,7 @@ final class FencedDisclosures implements AuthorisedDisclosures {
             var handle = lineage(prepared);
             var bytes = format(handle, current, purpose, source, formatter);
             var output = new BoundedOutput(current.limits().outputBytes());
-            fence(handle, current, purpose, source);
+            validatedRead(handle, current, purpose, source);
             provider.exchange(bytes, output);
             return new Buffered<>(handle, output.freeze());
         });
@@ -110,7 +110,7 @@ final class FencedDisclosures implements AuthorisedDisclosures {
             if (!(derived instanceof Buffered<?>)) throw new AuthorisationDeniedException();
             @SuppressWarnings("unchecked") var buffered = (Buffered<P>) derived;
             var handle = lineage(buffered.lineage);
-            fence(handle, current, purpose, source);
+            validatedRead(handle, current, purpose, source);
             sink.send(buffered.bytes);
             return null;
         });

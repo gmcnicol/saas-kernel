@@ -66,10 +66,7 @@ class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.Authoris
                     q.setInt(3, limit); q.setLong(4, offset); q.setFetchSize(1);
                     try (var row = q.executeQuery()) {
                         while (row.next()) {
-                            var id = new ClientFilingId(row.getString("id"));
-                            sink.accept(new ReadCandidate<>(row.getString("tenant_id"), new TypedSubject<>(PracticeId.TYPE, new PracticeId(row.getString("practice"))),
-                                    new TypedSubject<>(ClientFilingId.TYPE, id), new ClientFilingRead(id, row.getString("practice"), row.getString("assigned_client"),
-                                            Optional.of(new FilingReadDetails(new ClientReference(row.getString("reference")), Optional.ofNullable(row.getString("notes")))))));
+                            sink.accept(filingCandidate(row, new TypedSubject<>(PracticeId.TYPE, new PracticeId(row.getString("practice")))));
                         }
                     }
                 }
@@ -185,19 +182,22 @@ class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.Authoris
                     q.setFetchSize(1);
                     try (var row = q.executeQuery()) {
                         while (row.next()) {
-                            var id = new ClientFilingId(row.getString("id"));
-                            sink.accept(new ReadCandidate<>(row.getString("tenant_id"),
-                                    new TypedSubject<>(PracticeId.TYPE, new PracticeId(row.getString("practice"))),
-                                    new TypedSubject<>(ClientFilingId.TYPE, id),
-                                    new ClientFilingRead(id, row.getString("practice"), row.getString("assigned_client"),
-                                            Optional.of(new FilingReadDetails(new ClientReference(row.getString("reference")),
-                                                    Optional.ofNullable(row.getString("notes")))))));
+                            sink.accept(filingCandidate(row, new TypedSubject<>(PracticeId.TYPE, new PracticeId(row.getString("practice")))));
                         }
                     }
                 }
             }
         };
     }
+    private static ReadCandidate<ClientFilingRead> filingCandidate(
+            java.sql.ResultSet row, TypedSubject<?> scope) throws java.sql.SQLException {
+        var id = new ClientFilingId(row.getString("id"));
+        return new ReadCandidate<>(row.getString("tenant_id"), scope, new TypedSubject<>(ClientFilingId.TYPE, id),
+                new ClientFilingRead(id, row.getString("practice"), row.getString("assigned_client"),
+                        Optional.of(new FilingReadDetails(new ClientReference(row.getString("reference")),
+                                Optional.ofNullable(row.getString("notes"))))));
+    }
+
     String records() {
         String tenant = "practice-read-" + UUID.randomUUID();
         var admin = new JdbcTemplate(new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
@@ -235,10 +235,7 @@ class AuthorisedReadTests implements io.github.gmcnicol.kernel.contract.Authoris
                         q.setInt(i++, limit); q.setLong(i, offset); q.setFetchSize(1);
                         try (var row = q.executeQuery()) {
                             while (row.next()) {
-                                var id = new ClientFilingId(row.getString("id"));
-                                sink.accept(new ReadCandidate<>(row.getString("tenant_id"), request.scope(), new TypedSubject<>(ClientFilingId.TYPE, id),
-                                        new ClientFilingRead(id, row.getString("practice"), row.getString("assigned_client"),
-                                                Optional.of(new FilingReadDetails(new ClientReference(row.getString("reference")), Optional.ofNullable(row.getString("notes")))))));
+                                sink.accept(filingCandidate(row, request.scope()));
                             }
                         }
                     }

@@ -198,40 +198,35 @@ final class CedarAuthoriser {
             io.github.gmcnicol.kernel.application.ReadCandidate<P> candidate, String operation,
             Map<String, Value> authority) {
         try {
-            Entity principal = entity(read.principal().type(), read.principal().id());
             String identity = key(read.tenantId(), candidate.scope().type().qualifiedName(), candidate.scope().externalId(),
                     read.type().qualifiedName(), Integer.toString(read.type().contractVersion()),
                     candidate.record().type().qualifiedName(), candidate.record().externalId());
             Entity resource = entity(simpleName(candidate.record().type().qualifiedName()), identity,
                     attributes(model(read.type()), candidate.value(), FactSet.empty()));
-            var context = new LinkedHashMap<String, Value>(authority);
-            context.put("readScope", new com.cedarpolicy.value.PrimString(read.scope().externalId()));
-            var request = new AuthorizationRequest(principal.getEUID(), euid("Action", TYPED_ACTION_PREFIX + operation),
-                    resource.getEUID(), Optional.of(context), Optional.of(schema), true);
-            var result = engine.isAuthorized(request, policies, Set.of(principal, resource));
-            if (!result.warnings.isEmpty() || result.success.isEmpty()
-                    || !result.success.get().getErrors().isEmpty()) {
-                throw new AuthorisationDeniedException();
-            }
-            return result.success.get().isAllowed();
+            return strictReadDecision(read, resource, operation, authority);
         } catch (Exception failure) { throw new AuthorisationDeniedException(); }
     }
 
     <P> boolean allowsReadQuery(io.github.gmcnicol.kernel.application.ReadRequest<P> read,
             io.github.gmcnicol.kernel.application.ReadPath<P, ?> path, Map<String, Value> authority) {
         try {
-            Entity principal = entity(read.principal().type(), read.principal().id());
             Entity resource = entity(simpleName(read.scope().type().qualifiedName()),
                     key(read.tenantId(), read.scope().type().qualifiedName(), read.scope().externalId()), Map.of());
-            var context = new LinkedHashMap<String, Value>(authority);
-            context.put("readScope", new com.cedarpolicy.value.PrimString(read.scope().externalId()));
-            var request = new AuthorizationRequest(principal.getEUID(), euid("Action", TYPED_ACTION_PREFIX + path.qualifiedName() + ".query"),
-                    resource.getEUID(), Optional.of(context), Optional.of(schema), true);
-            var result = engine.isAuthorized(request, policies, Set.of(principal, resource));
-            if (!result.warnings.isEmpty() || result.success.isEmpty() || !result.success.get().getErrors().isEmpty())
-                throw new AuthorisationDeniedException();
-            return result.success.get().isAllowed();
+            return strictReadDecision(read, resource, path.qualifiedName() + ".query", authority);
         } catch (Exception failure) { throw new AuthorisationDeniedException(); }
+    }
+
+    private boolean strictReadDecision(io.github.gmcnicol.kernel.application.ReadRequest<?> read,
+            Entity resource, String operation, Map<String, Value> authority) throws Exception {
+        Entity principal = entity(read.principal().type(), read.principal().id());
+        var context = new LinkedHashMap<String, Value>(authority);
+        context.put("readScope", new com.cedarpolicy.value.PrimString(read.scope().externalId()));
+        var request = new AuthorizationRequest(principal.getEUID(), euid("Action", TYPED_ACTION_PREFIX + operation),
+                resource.getEUID(), Optional.of(context), Optional.of(schema), true);
+        var result = engine.isAuthorized(request, policies, Set.of(principal, resource));
+        if (!result.warnings.isEmpty() || result.success.isEmpty() || !result.success.get().getErrors().isEmpty())
+            throw new AuthorisationDeniedException();
+        return result.success.get().isAllowed();
     }
 
     private static String key(String... parts) {
