@@ -194,9 +194,12 @@ final class CedarAuthoriser {
             var request = new AuthorizationRequest(principal.getEUID(), euid("Action", TYPED_ACTION_PREFIX + operation),
                     resource.getEUID(), Optional.of(context), Optional.of(schema), true);
             var result = engine.isAuthorized(request, policies, Set.of(principal, resource));
-            return result.warnings.isEmpty() && result.success.isPresent()
-                    && result.success.get().getErrors().isEmpty() && result.success.get().isAllowed();
-        } catch (Exception failure) { return false; }
+            if (!result.warnings.isEmpty() || result.success.isEmpty()
+                    || !result.success.get().getErrors().isEmpty()) {
+                throw new AuthorisationDeniedException();
+            }
+            return result.success.get().isAllowed();
+        } catch (Exception failure) { throw new AuthorisationDeniedException(); }
     }
 
     private static String key(String... parts) {

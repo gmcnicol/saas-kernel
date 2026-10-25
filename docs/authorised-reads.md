@@ -46,8 +46,13 @@ Cedar actions use the existing `typed/v1/` namespace:
 
 Author resource/field rules in the Application's validated bundle. A parent permit
 never authorises a leaf. Successful, error-free Cedar record permission is required
-before any selected field decision or extraction. Denied records disappear; denied
-fields are not extracted into the output. Foreign candidate scope IDs disappear;
+before any selected field decision or extraction. Ordinary policy-denied records
+disappear; policy-denied fields are not extracted into the output. An unsuccessful
+SDK evaluation, SDK warning, policy evaluation error (whether the decision is Allow
+or Deny), or evaluation exception instead fails the **entire operation**. It cannot
+be treated as a missing record/redacted field or release an earlier buffered result,
+even if the source catches the sink's failure. Diagnostics remain fixed and cause-free.
+Foreign candidate scope IDs disappear;
 wrong tenant, scope descriptor or record Subject descriptor fails the operation.
 Resource UIDs are unambiguous length-prefixed tenant + scope type/ID + root type/version
 + record Subject type/ID. Shared-human provenance is not a resource identity.
@@ -171,7 +176,9 @@ claimed here.
 non-owner runtime roles and real Cedar. Network tests cover wrong-tenant SQL,
 same-human/different-Network isolation, independent record/nested-field denial,
 current authority and source fences, output safety, budgets and caller transaction
-preservation/error recovery. Practice tests contrast staff and assigned clients and
+preservation/error recovery. Malformed Cedar requests and real policy arithmetic
+errors fail the whole read, including mixed candidate/field buffers and swallowed
+sink failures, while ordinary record/field Deny still hides/redacts. Practice tests contrast staff and assigned clients and
 prove authorised nulls. Configuration-failure tests isolate missing model/resolver.
 The generator's clean-consumer build proves typed leaves/results and compile-time
 rejection of cross-model paths, raw DTO assignment and parent/list selections.
