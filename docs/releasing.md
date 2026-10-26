@@ -5,6 +5,8 @@ One release publishes exactly two same-version Maven Central artefacts:
 - `io.github.gmcnicol:saas-kernel`, Java 25 runtime
 - `io.github.gmcnicol:saas-kernel-taxi-generator`, Java 21 build-only Maven plugin
 
+The runtime includes the [prepared scalar Cedar binary, source/lock and provenance](prepared-cedar.md), built with the pinned isolated Docker toolchain during resource generation. Artifact building requires POSIX bash and a Linux-amd64 Docker builder; no host Rust install is required. Prepared support is Linux x86_64/glibc>=2.36; unsupported prepared targets retain the explicitly identified original SDK adapter, without new platform certification.
+
 There is no starter, BOM, shared generated-binding artefact, or third runtime surface. Both modules inherit project URL, Apache-2.0 licence, developer, and SCM metadata. The build attaches source and Javadoc JARs, generates checksums, and signs release files.
 
 ## CI staged artifact proof (not a public release)

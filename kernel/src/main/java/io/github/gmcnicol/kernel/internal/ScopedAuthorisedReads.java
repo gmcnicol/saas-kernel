@@ -146,7 +146,7 @@ final class ScopedAuthorisedReads implements AuthorisedReads {
                 window.prepare(authority.revision());
                 for (var path : window.queryFields.stream().sorted(Comparator.comparing(ReadPath::qualifiedName)).toList()) {
                     work.decision(deadline);
-                    if (!cedar.allowsReadQuery(request, path, authority.values())) work.fail(CollectionReadException.Reason.DENIED);
+                    if (!cedar.allowsReadQuery(request, path, authority.values(), deadline)) work.fail(CollectionReadException.Reason.DENIED);
                 }
             }
             work.check(deadline);
@@ -181,7 +181,7 @@ final class ScopedAuthorisedReads implements AuthorisedReads {
                         return;
                     }
                     work.decision(deadline);
-                    if (!cedar.allowsRead(request, candidate, request.type().qualifiedName() + ".read", authority.values())) {
+                    if (!cedar.allowsRead(request, candidate, request.type().qualifiedName() + ".read", authority.values(), deadline)) {
                         denied(Denial.RECORD_POLICY);
                         if (source instanceof IndexedReadWindow<?>) work.fail(CollectionReadException.Reason.STALE);
                         return;
@@ -190,13 +190,13 @@ final class ScopedAuthorisedReads implements AuthorisedReads {
                         @SuppressWarnings("unchecked") var window = (IndexedReadWindow<P>) rawWindow;
                         for (var path : window.queryFields.stream().sorted(Comparator.comparing(ReadPath::qualifiedName)).toList()) {
                             work.decision(deadline);
-                            if (!cedar.allowsRead(request, candidate, path.qualifiedName(), authority.values())) work.fail(CollectionReadException.Reason.STALE);
+                            if (!cedar.allowsRead(request, candidate, path.qualifiedName(), authority.values(), deadline)) work.fail(CollectionReadException.Reason.STALE);
                         }
                     }
                     var values = new LinkedHashMap<ReadPath<P, ?>, ReadValue<?>>();
                     for (var path : fields) {
                         work.decision(deadline);
-                        if (cedar.allowsRead(request, candidate, path.qualifiedName(), authority.values())) {
+                        if (cedar.allowsRead(request, candidate, path.qualifiedName(), authority.values(), deadline)) {
                             work.check(deadline);
                             var value = path.read().apply(candidate.value());
                             checkScalar(path, value.value(), request.limits().outputBytes(), work);
