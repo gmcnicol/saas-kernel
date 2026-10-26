@@ -29,7 +29,8 @@ interface ReadPolicyEvaluator extends AutoCloseable {
             return new ReadPolicyEvaluator() {
                 public ReadDecision evaluate(Principal principal, String type, String id, Map<String, Value> attributes,
                         String operation, Map<String, Value> context, long deadline) throws Exception {
-                    counter.increment();
+                    try { counter.increment(); }
+                    catch (RuntimeException ignored) { /* Telemetry is not authority. */ }
                     var actor = new Entity(uid(principal.type(), principal.id()), Map.of(), Set.of());
                     var resource = new Entity(uid(type, id), attributes, Set.of());
                     var request = new AuthorizationRequest(actor.getEUID(), uid("Action", operation), resource.getEUID(), Optional.of(context), Optional.of(schema), true);
@@ -57,13 +58,14 @@ interface ReadPolicyEvaluator extends AutoCloseable {
         return new ReadPolicyEvaluator() {
             public ReadDecision evaluate(Principal principal, String type, String id, Map<String, Value> attributes,
                     String operation, Map<String, Value> context, long deadline) {
-                counter.increment();
+                try { counter.increment(); }
+                catch (RuntimeException ignored) { /* Telemetry is not authority. */ }
                 var actor = Map.of("type", principal.type(), "id", principal.id());
                 var resource = Map.of("type", type, "id", id);
                 var entities = List.of(Map.of("uid", actor, "attrs", Map.of(), "parents", List.of()),
-                        Map.of("uid", resource, "attrs", values(attributes, 0), "parents", List.of()));
+                        Map.of("uid", resource, "attrs", attributes, "parents", List.of()));
                 return prepared.evaluate(Map.of("principal", actor, "action", Map.of("type", "Action", "id", operation),
-                        "resource", resource, "context", values(context, 0), "entities", entities), deadline);
+                        "resource", resource, "context", context, "entities", entities), deadline);
             }
             public void close() { prepared.close(); }
         };
@@ -73,25 +75,5 @@ interface ReadPolicyEvaluator extends AutoCloseable {
     }
     private static Map<String, String> uid(EntityUID uid) {
         var value = uid.asJson(); return Map.of("type", value.type, "id", value.id);
-    }
-    private static Map<String, Object> values(Map<String, Value> input, int depth) {
-        if (depth > 64) throw new ReadEvaluationLimit(io.github.gmcnicol.kernel.application.CollectionReadException.Reason.BUDGET);
-        var out = new LinkedHashMap<String, Object>();
-        input.forEach((k, v) -> out.put(k, value(v, depth + 1)));
-        return out;
-    }
-    private static Object value(Value input, int depth) {
-        if (depth > 64) throw new ReadEvaluationLimit(io.github.gmcnicol.kernel.application.CollectionReadException.Reason.BUDGET);
-        return switch (input) {
-            case PrimBool bool -> bool.getValue();
-            case PrimLong number -> number.getValue();
-            case PrimString text -> text.toString();
-            case CedarMap map -> values(map, depth + 1);
-            case CedarList list -> list.stream().map(v -> value(v, depth + 1)).toList();
-            case EntityUID entity -> Map.of("__entity", uid(entity));
-            case Decimal decimal -> Map.of("__extn", Map.of("fn", "decimal", "arg", decimal.toString()));
-            case IpAddress ip -> Map.of("__extn", Map.of("fn", "ip", "arg", ip.toString()));
-            default -> throw new IllegalArgumentException("Unsupported complete Cedar value");
-        };
     }
 }

@@ -1,5 +1,6 @@
 package io.github.gmcnicol.kernel.internal;
 
+import com.cedarpolicy.value.*;
 import java.io.ByteArrayOutputStream;
 import java.lang.ref.Cleaner;
 import java.nio.charset.StandardCharsets;
@@ -7,12 +8,24 @@ import java.util.*;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import tools.jackson.core.JsonGenerator;
+import tools.jackson.databind.SerializationContext;
+import tools.jackson.databind.SerializationFeature;
+import tools.jackson.databind.ValueSerializer;
 import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.module.SimpleModule;
 import io.github.gmcnicol.kernel.application.CollectionReadException.Reason;
 
 /** Scalar-only owned codec and bounded execution/lifetime boundary. No SDK reflection or batch API. */
 final class PreparedCedarEvaluator implements AutoCloseable {
-    private static final JsonMapper JSON = JsonMapper.builder().build();
+    private static final JsonMapper JSON = JsonMapper.builder()
+            .addModule(new SimpleModule().addSerializer(Value.class, new ValueSerializer<Value>() {
+                @Override public void serialize(Value value, JsonGenerator json, SerializationContext context) {
+                    writeValue(json, value, 1);
+                }
+            }))
+            .disable(SerializationFeature.WRAP_EXCEPTIONS)
+            .build();
     private static final Cleaner CLEANER = Cleaner.create();
     private static final Semaphore ADMISSION = new Semaphore(16, true);
     private static final Semaphore WORKERS = new Semaphore(4, true);
@@ -77,6 +90,36 @@ final class PreparedCedarEvaluator implements AutoCloseable {
         } finally {
             if (acquired) WORKERS.release();
             ADMISSION.release();
+        }
+    }
+    // Traverse decision-local Cedar values only inside admitted, byte-bounded encoding; never copy a whole tree.
+    private static void writeValue(JsonGenerator json, Value value, int depth) {
+        if (depth > 64) throw new ReadEvaluationLimit(Reason.BUDGET);
+        switch (value) {
+            case PrimBool bool -> json.writeBoolean(bool.getValue());
+            case PrimLong number -> json.writeNumber(number.getValue());
+            case PrimString text -> json.writeString(text.toString());
+            case CedarMap map -> {
+                if (depth + 1 > 64) throw new ReadEvaluationLimit(Reason.BUDGET);
+                json.writeStartObject();
+                for (var entry : map.entrySet()) {
+                    json.writeName(entry.getKey());
+                    writeValue(json, entry.getValue(), depth + 2);
+                }
+                json.writeEndObject();
+            }
+            case CedarList list -> {
+                json.writeStartArray();
+                for (var item : list) writeValue(json, item, depth + 1);
+                json.writeEndArray();
+            }
+            case EntityUID entity -> {
+                var uid = entity.asJson();
+                json.writePOJO(Map.of("__entity", Map.of("type", uid.type, "id", uid.id)));
+            }
+            case Decimal decimal -> json.writePOJO(Map.of("__extn", Map.of("fn", "decimal", "arg", decimal.toString())));
+            case IpAddress ip -> json.writePOJO(Map.of("__extn", Map.of("fn", "ip", "arg", ip.toString())));
+            default -> throw new IllegalArgumentException("Unsupported complete Cedar value");
         }
     }
     static String encode(Object value, int limit) {
