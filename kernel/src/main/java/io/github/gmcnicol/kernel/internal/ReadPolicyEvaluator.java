@@ -75,13 +75,13 @@ interface ReadPolicyEvaluator extends AutoCloseable {
         var value = uid.asJson(); return Map.of("type", value.type, "id", value.id);
     }
     private static Map<String, Object> values(Map<String, Value> input, int depth) {
-        if (depth > 64) throw new IllegalArgumentException("Cedar value depth exceeds bound");
+        if (depth > 64) throw new ReadEvaluationLimit(io.github.gmcnicol.kernel.application.CollectionReadException.Reason.BUDGET);
         var out = new LinkedHashMap<String, Object>();
         input.forEach((k, v) -> out.put(k, value(v, depth + 1)));
         return out;
     }
     private static Object value(Value input, int depth) {
-        if (depth > 64) throw new IllegalArgumentException("Cedar value depth exceeds bound");
+        if (depth > 64) throw new ReadEvaluationLimit(io.github.gmcnicol.kernel.application.CollectionReadException.Reason.BUDGET);
         return switch (input) {
             case PrimBool bool -> bool.getValue();
             case PrimLong number -> number.getValue();

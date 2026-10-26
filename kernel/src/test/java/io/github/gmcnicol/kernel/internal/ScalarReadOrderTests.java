@@ -39,6 +39,9 @@ class ScalarReadOrderTests {
     @Test void jsonByteFailureDoesNotReleaseAnEarlierPartialProjection() throws Exception {
         compare("bytes", 3, List.of("a", "encode-a", "b", "encode-b", "encode-a", "encode-b"));
     }
+    @Test void elapsedScalarPreparationIsStillACollectionBudgetFailure() throws Exception {
+        compare("deadline", 1, List.of("policy"));
+    }
     private void compare(String failure, int decisions, List<String> expected) throws Exception {
         for (String mode : List.of("sdk", "prepared")) {
             var trace = new ArrayList<String>();
@@ -53,14 +56,19 @@ class ScalarReadOrderTests {
             });
             var b = new ReadPath<Row, String>("order.View.b", "b", row -> { trace.add("b"); return ReadValue.shown(row.value()); },
                     value -> { trace.add("encode-b"); return value; });
-            var projection = new ProjectionType<>("order.View", 1, ROW, Row.class, List.of(), List.of(a, b));
+            var slow = new FieldType<Row, Boolean>("order.View.slow", row -> {
+                trace.add("policy");
+                try { Thread.sleep(1200); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IllegalStateException(); }
+                return true;
+            }, value -> Optional.of(new com.cedarpolicy.value.PrimBool(value)));
+            var projection = new ProjectionType<>("order.View", 1, ROW, Row.class, List.of(slow), List.of(a, b));
             var cap = new CapabilityType<>("order.CanRead", 1, Boolean.class, List.of(new FieldType<Boolean, Boolean>("order.CanRead.active", v -> v,
                     v -> Optional.of(new com.cedarpolicy.value.PrimBool(v)))));
             var bindings = new SemanticBindings(List.of(projection), List.of(), List.of(), List.of(), List.of(), List.of(cap), List.of(ROW, SCOPE));
             EffectiveCapabilityResolver resolver = request -> new EffectiveCapabilityResolver.Resolution("r1", new EffectiveCapabilityResolver.Context(
                     1, request.scope(), request.evaluatedAt(), request.evaluatedAt().plusSeconds(60), "r1", List.of(new TypedCapability<>(cap, true))));
-            var model = new TypedAuthorisationModel<>(projection, Set.of(), Set.of(), Set.of(cap));
-            var schema = new Schema("entity User; entity RowId;" + List.of("read", "a", "b").stream()
+            var model = new TypedAuthorisationModel<>(projection, failure.equals("deadline") ? Set.of(slow) : Set.of(), Set.of(), Set.of(cap));
+            var schema = new Schema("entity User; entity RowId { slow?: Bool };" + List.of("read", "a", "b").stream()
                     .map(operation -> "action \"typed/v1/order.View." + operation + "\" appliesTo { principal: User, resource: RowId,"
                             + " context: { readScope: String, capabilities: { CanRead: { active: Bool } } } };")
                     .collect(java.util.stream.Collectors.joining()));
@@ -70,14 +78,21 @@ class ScalarReadOrderTests {
                 AuthorisedReads reads = new ScopedAuthorisedReads(source(), cedar, List.of(bindings), meters);
                 var scope = new TypedSubject<>(SCOPE, "scope");
                 var request = new ReadRequest<>("tenant", new Principal("User", "u"), scope, projection, Set.of(a, b),
-                        "bundle", "c".repeat(64), new ReadLimits(1, 2, 64, 1000));
+                        "bundle", "c".repeat(64), new ReadLimits(2, 2, 64, 1000));
                 var rows = new ReadSource<Row>() {
                     public String revision(java.sql.Connection c) { return "source-1"; }
                     public void select(java.sql.Connection c, java.util.function.Consumer<ReadCandidate<Row>> sink) {
                         sink.accept(new ReadCandidate<>("tenant", scope, new TypedSubject<>(ROW, "same"), new Row("visible")));
                     }
                 };
-                assertThatThrownBy(() -> reads.many(request, rows)).isExactlyInstanceOf(AuthorisationDeniedException.class)
+                if (failure.equals("deadline")) {
+                    var index = new AuthorisedIndex<Row>() {
+                        public State current(java.sql.Connection c, Binding<Row> binding) { return new State("source-1", "index-1", "c".repeat(64), "r1", OptionalLong.empty()); }
+                        public void select(java.sql.Connection c, Binding<Row> binding, long offset, int limit, java.util.function.Consumer<ReadCandidate<Row>> sink) { rows.select(c, sink); }
+                    };
+                    assertThatThrownBy(() -> reads.collection(request, index, CollectionOptions.page(1)))
+                            .isInstanceOfSatisfying(CollectionReadException.class, error -> assertThat(error.reason()).isEqualTo(CollectionReadException.Reason.BUDGET));
+                } else assertThatThrownBy(() -> reads.many(request, rows)).isExactlyInstanceOf(AuthorisationDeniedException.class)
                         .hasMessage("Authorisation denied").hasNoCause();
                 assertThat(meters.find("kernel.read.authorization.calls").counter().count()).as(mode + ":" + failure).isEqualTo(decisions);
                 assertThat(trace).as(mode + ":" + failure).containsExactlyElementsOf(expected);

@@ -216,7 +216,8 @@ final class CedarAuthoriser implements AutoCloseable {
                     candidate.record().type().qualifiedName(), candidate.record().externalId());
             return strictReadDecision(read, simpleName(candidate.record().type().qualifiedName()), identity,
                     attributes(model(read.type()), candidate.value(), FactSet.empty()), operation, authority, deadline);
-        } catch (Exception failure) { throw new AuthorisationDeniedException(); }
+        } catch (ReadEvaluationLimit limit) { throw new CollectionReadException(limit.reason); }
+        catch (Exception failure) { throw new AuthorisationDeniedException(); }
     }
 
     <P> boolean allowsReadQuery(io.github.gmcnicol.kernel.application.ReadRequest<P> read,
@@ -225,7 +226,8 @@ final class CedarAuthoriser implements AutoCloseable {
             return strictReadDecision(read, simpleName(read.scope().type().qualifiedName()),
                     key(read.tenantId(), read.scope().type().qualifiedName(), read.scope().externalId()), Map.of(),
                     path.qualifiedName() + ".query", authority, deadline);
-        } catch (Exception failure) { throw new AuthorisationDeniedException(); }
+        } catch (ReadEvaluationLimit limit) { throw new CollectionReadException(limit.reason); }
+        catch (Exception failure) { throw new AuthorisationDeniedException(); }
     }
 
     private boolean strictReadDecision(io.github.gmcnicol.kernel.application.ReadRequest<?> read,
@@ -235,8 +237,12 @@ final class CedarAuthoriser implements AutoCloseable {
         context.put("readScope", new com.cedarpolicy.value.PrimString(read.scope().externalId()));
         var result = readEvaluator.evaluate(read.principal(), resourceType, resourceId, attributes,
                 TYPED_ACTION_PREFIX + operation, context, deadline);
-        if (result == ReadDecision.INVALID) throw new AuthorisationDeniedException();
-        return result == ReadDecision.ALLOW;
+        return switch (result) {
+            case ALLOW -> true;
+            case DENY -> false;
+            case INVALID -> throw new AuthorisationDeniedException();
+            case EXPIRED -> throw new ReadEvaluationLimit(CollectionReadException.Reason.BUDGET);
+        };
     }
 
     private static String key(String... parts) {

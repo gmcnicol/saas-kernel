@@ -8,6 +8,7 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import tools.jackson.databind.json.JsonMapper;
+import io.github.gmcnicol.kernel.application.CollectionReadException.Reason;
 
 /** Scalar-only owned codec and bounded execution/lifetime boundary. No SDK reflection or batch API. */
 final class PreparedCedarEvaluator implements AutoCloseable {
@@ -53,22 +54,26 @@ final class PreparedCedarEvaluator implements AutoCloseable {
     ReadDecision evaluate(Map<String, ?> request, long deadline) {
         long handle = state.handle.get();
         if (handle == 0) throw new IllegalStateException("Cedar bundle is closed");
-        if (!ADMISSION.tryAcquire()) throw new IllegalStateException("Cedar admission exhausted");
+        if (!ADMISSION.tryAcquire()) throw new ReadEvaluationLimit(Reason.BUDGET);
         boolean acquired = false;
         try {
             long remaining = deadline - System.nanoTime();
-            if (remaining <= 0 || !WORKERS.tryAcquire(remaining, TimeUnit.NANOSECONDS)) throw new IllegalStateException("Cedar deadline exhausted");
+            if (remaining <= 0 || !WORKERS.tryAcquire(remaining, TimeUnit.NANOSECONDS)) throw new ReadEvaluationLimit(Reason.BUDGET);
             acquired = true;
-            if (Thread.currentThread().isInterrupted()) throw new IllegalStateException("Cedar evaluation cancelled");
+            if (Thread.currentThread().isInterrupted()) throw new ReadEvaluationLimit(Reason.CANCELLED);
             String encoded = encode(request, 1_048_576);
             remaining = deadline - System.nanoTime();
-            if (remaining <= 0) throw new IllegalStateException("Cedar deadline exhausted");
-            long result = NativeCedar.evaluate(handle, encoded, Math.min(remaining, 5_000_000_000L));
-            if (state.handle.get() != handle || System.nanoTime() - deadline >= 0 || Thread.currentThread().isInterrupted())
-                throw new IllegalStateException("Cedar evaluation no longer current");
-            return ReadDecision.decode(result);
+            if (remaining <= 0) throw new ReadEvaluationLimit(Reason.BUDGET);
+            var result = ReadDecision.decode(NativeCedar.evaluate(handle, encoded, Math.min(remaining, 5_000_000_000L)));
+            if (state.handle.get() != handle) throw new IllegalStateException("Cedar bundle closed during evaluation");
+            // Preserve policy/validation error precedence; do not turn an errored SDK-equivalent
+            // response into a timeout/cancellation merely because its callback returned late.
+            if (result == ReadDecision.INVALID) return result;
+            if (Thread.currentThread().isInterrupted()) throw new ReadEvaluationLimit(Reason.CANCELLED);
+            if (result == ReadDecision.EXPIRED || System.nanoTime() - deadline >= 0) throw new ReadEvaluationLimit(Reason.BUDGET);
+            return result;
         } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt(); throw new IllegalStateException("Cedar evaluation cancelled");
+            Thread.currentThread().interrupt(); throw new ReadEvaluationLimit(Reason.CANCELLED);
         } finally {
             if (acquired) WORKERS.release();
             ADMISSION.release();
@@ -76,11 +81,13 @@ final class PreparedCedarEvaluator implements AutoCloseable {
     }
     static String encode(Object value, int limit) {
         var bytes = new ByteArrayOutputStream(Math.min(limit, 16_384)) {
-            private void bound(int length) { if (length < 0 || count > limit - length) throw new IllegalStateException("Cedar input exceeds byte bound"); }
+            boolean exceeded;
+            private void bound(int length) { if (length < 0 || count > limit - length) { exceeded = true; throw new ReadEvaluationLimit(Reason.BUDGET); } }
             @Override public synchronized void write(int b) { bound(1); super.write(b); }
             @Override public synchronized void write(byte[] b, int start, int length) { bound(length); super.write(b, start, length); }
         };
-        JSON.writeValue(bytes, value);
+        try { JSON.writeValue(bytes, value); }
+        catch (RuntimeException failure) { if (bytes.exceeded) throw new ReadEvaluationLimit(Reason.BUDGET); throw failure; }
         return bytes.toString(StandardCharsets.UTF_8);
     }
     @Override public void close() { cleanable.clean(); }
