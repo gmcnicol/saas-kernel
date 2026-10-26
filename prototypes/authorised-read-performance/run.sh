@@ -42,7 +42,7 @@ PY
 verify() {
   cd "$ROOT"
   run evaluator-green "${mvn[@]}" -pl kernel -am test -Dtest=PreparedReadEvaluatorExperiment -Dsurefire.failIfNoSpecifiedTests=false "-Dkernel.prototype.native=$LIB"
-  for mode in sdk scalar batch; do
+  for mode in ${1:-sdk scalar batch}; do
     run "kernel-$mode-contract" "${mvn[@]}" -pl applications/keep-in-touch-crm -am test -Dtest=AuthorisedReadTests -Dsurefire.failIfNoSpecifiedTests=false "-Dkernel.prototype.evaluator=$mode" "-Dkernel.prototype.native=$LIB"
     mkdir -p "$OUT/reports/kernel-$mode"; cp "$ROOT"/applications/keep-in-touch-crm/target/surefire-reports/*AuthorisedReadTests* "$OUT/reports/kernel-$mode/"
     cd "$KIT"
@@ -53,7 +53,7 @@ verify() {
 }
 kit() {
   cd "$KIT"
-  for mode in scalar batch sdk-profile sdk; do
+  for mode in ${1:-scalar batch sdk-profile sdk}; do
     run "kit-$mode-measured" "${mvn[@]}" "-Dkernel.prototype.evaluator=$mode" "-Dkernel.prototype.native=$LIB" -Dtest=PrivateReadBenchmark package
     mkdir -p "$OUT/reports/kit-$mode-measured"; cp target/surefire-reports/*PrivateReadBenchmark* "$OUT/reports/kit-$mode-measured/"
     sha256sum target/kitt-saas-0.0.1-SNAPSHOT.jar > "$OUT/kit-$mode-package.sha256"
@@ -62,7 +62,7 @@ kit() {
 kernel() {
   cd "$ROOT"
   for mode in sdk scalar batch; do
-    run "kernel-$mode-measured" "${mvn[@]}" -pl applications/keep-in-touch-crm -am test -Dtest=CollectionReadBenchmark#measure -Dsurefire.failIfNoSpecifiedTests=false "-Dkernel.prototype.evaluator=$mode" "-Dkernel.prototype.native=$LIB"
+    run "kernel-$mode-measured" "${mvn[@]}" -pl applications/keep-in-touch-crm -am test -Dtest=CollectionReadBenchmark#measure -Dkernel.prototype.benchmark.rows=32 -Dkernel.prototype.benchmark.leaves=2 -Dsurefire.failIfNoSpecifiedTests=false "-Dkernel.prototype.evaluator=$mode" "-Dkernel.prototype.native=$LIB"
   done
 }
 proof() {
@@ -86,7 +86,7 @@ PY
   run noble-runtime-smoke docker run --rm --network none --user "$(id -u):$(id -g)" -v "$OUT:$OUT:ro" -v "$ROOT:$ROOT:ro" -v "$JAVA_HOME:$JAVA_HOME:ro" ubuntu@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 "$JAVA_HOME/bin/java" "-Dkernel.prototype.native=$LIB" -cp "$OUT/linux-smoke:$cp" io.github.gmcnicol.kernel.internal.NativeRuntimeSmoke
 }
 case ${1:-all} in
-  build) build;; verify) verify;; kit) kit;; kernel) kernel;; proof) proof;; runtime) runtime;;
+  build) build;; verify) verify;; verify-native) verify 'scalar batch';; kit) kit;; kit-native) kit 'scalar batch';; kernel) kernel;; proof) proof;; runtime) runtime;;
   all) build; verify; kit; kernel; proof; runtime; python3 "$PROTO/summarize.py" "$OUT" --gate;;
-  *) echo "Usage: $0 [all|build|verify|kit|kernel|proof|runtime]" >&2; exit 2;;
+  *) echo "Usage: $0 [all|build|verify|verify-native|kit|kit-native|kernel|proof|runtime]" >&2; exit 2;;
 esac

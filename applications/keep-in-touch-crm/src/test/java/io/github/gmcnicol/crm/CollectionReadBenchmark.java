@@ -17,6 +17,8 @@ class CollectionReadBenchmark extends AuthorisedReadTests {
         admin.execute("SELECT pg_reload_conf()");
         Thread.sleep(100);
         for (int fields : List.of(1, 2)) for (int rows : List.of(1, 8, 32, 96)) {
+            if (Integer.getInteger("kernel.prototype.benchmark.rows", rows) != rows
+                    || Integer.getInteger("kernel.prototype.benchmark.leaves", fields) != fields) continue;
             var base = request("bench-" + fields + "-" + rows);
             var request = new ReadRequest<>(base.tenantId(), base.principal(), base.scope(), base.type(),
                     fields == 1 ? Set.of(NetworkContactRead.READ_DETAILS_DISPLAY_NAME) : base.fields(), base.bundleId(), base.bundleChecksum(), base.limits());
