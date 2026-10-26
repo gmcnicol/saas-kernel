@@ -1,0 +1,11 @@
+[package]
+name = "throwaway-prepared-cedar"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[lib]
+crate-type = ["cdylib"]
+[dependencies]
+cedar-policy = { path = "/cedar/cedar-policy" }
+jni = "=0.21.1"
+serde_json = "=1.0.145"

@@ -180,23 +180,29 @@ final class ScopedAuthorisedReads implements AuthorisedReads {
                         if (source instanceof IndexedReadWindow<?>) work.fail(CollectionReadException.Reason.STALE);
                         return;
                     }
+                    var frame = cedar.readFrame(request, candidate, authority.values(), deadline);
                     work.decision(deadline);
-                    if (!cedar.allowsRead(request, candidate, request.type().qualifiedName() + ".read", authority.values())) {
+                    if (!frame.allows(request.type().qualifiedName() + ".read")) {
                         denied(Denial.RECORD_POLICY);
                         if (source instanceof IndexedReadWindow<?>) work.fail(CollectionReadException.Reason.STALE);
                         return;
                     }
                     if (source instanceof IndexedReadWindow<?> rawWindow) {
                         @SuppressWarnings("unchecked") var window = (IndexedReadWindow<P>) rawWindow;
-                        for (var path : window.queryFields.stream().sorted(Comparator.comparing(ReadPath::qualifiedName)).toList()) {
+                        var queryPaths = window.queryFields.stream().sorted(Comparator.comparing(ReadPath::qualifiedName)).toList();
+                        var queryPlan = frame.plan(queryPaths.stream().map(ReadPath::qualifiedName).toList(), true,
+                                () -> work.options == null ? 64 : work.options.decisions() - work.decisions + 1);
+                        for (var path : queryPaths) {
                             work.decision(deadline);
-                            if (!cedar.allowsRead(request, candidate, path.qualifiedName(), authority.values())) work.fail(CollectionReadException.Reason.STALE);
+                            if (!queryPlan.next()) work.fail(CollectionReadException.Reason.STALE);
                         }
                     }
                     var values = new LinkedHashMap<ReadPath<P, ?>, ReadValue<?>>();
+                    var fieldPlan = frame.plan(fields.stream().map(ReadPath::qualifiedName).toList(), false,
+                            () -> work.options == null ? 64 : work.options.decisions() - work.decisions + 1);
                     for (var path : fields) {
                         work.decision(deadline);
-                        if (cedar.allowsRead(request, candidate, path.qualifiedName(), authority.values())) {
+                        if (fieldPlan.next()) {
                             work.check(deadline);
                             var value = path.read().apply(candidate.value());
                             checkScalar(path, value.value(), request.limits().outputBytes(), work);

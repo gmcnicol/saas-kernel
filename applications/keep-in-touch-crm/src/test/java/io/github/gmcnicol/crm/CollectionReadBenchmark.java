@@ -44,11 +44,17 @@ class CollectionReadBenchmark extends AuthorisedReadTests {
                 if (statements == 0) throw new AssertionError("PostgreSQL statement logging was not active");
                 double calls = mode.equals("many") ? (long) rows * (fields + 1)
                         : meters.find("kernel.read.collection.decisions").tag("mode", mode).summary().totalAmount() - before;
+                var metricsBefore = io.github.gmcnicol.kernel.internal.PrototypeReadMetrics.snapshot();
+                var bean = (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
+                long allocated = bean.getThreadAllocatedBytes(Thread.currentThread().threadId());
                 var samples = new long[20];
                 for (int i = 0; i < samples.length; i++) { long start = System.nanoTime(); read.run(); samples[i] = System.nanoTime() - start; }
+                var metricsAfter = io.github.gmcnicol.kernel.internal.PrototypeReadMetrics.snapshot();
+                long bytesPerOp = (bean.getThreadAllocatedBytes(Thread.currentThread().threadId()) - allocated) / samples.length;
                 Arrays.sort(samples);
-                System.out.printf(Locale.ROOT, "COLLECTION_BENCH rows=%d leaves=%d mode=%s cedar=%.0f sql=%d p50_ms=%.3f p95_ms=%.3f%n",
-                        rows, fields, mode, calls, statements, samples[9] / 1e6, samples[18] / 1e6);
+                System.out.printf(Locale.ROOT, "COLLECTION_BENCH rows=%d leaves=%d mode=%s cedar=%.0f native_calls=%d native_checks=%d sql=%d java_thread_bytes_per_op=%d p50_ms=%.3f p95_ms=%.3f%n",
+                        rows, fields, mode, calls, (metricsAfter[4] - metricsBefore[4]) / samples.length,
+                        (metricsAfter[5] - metricsBefore[5]) / samples.length, statements, bytesPerOp, samples[9] / 1e6, samples[18] / 1e6);
             }
         }
     }

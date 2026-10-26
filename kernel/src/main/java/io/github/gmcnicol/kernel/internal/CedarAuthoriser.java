@@ -34,6 +34,8 @@ final class CedarAuthoriser {
     private static final String TYPED_ACTION_PREFIX = "typed/v1/";
 
     private final BasicAuthorizationEngine engine = new BasicAuthorizationEngine();
+    private final PreparedReadEvaluator prepared;
+    private final String prototypeMode = System.getProperty("kernel.prototype.evaluator", "sdk");
     private final Schema schema;
     private final PolicySet policies;
     private final List<TypedAuthorisationModel<?>> typedModels;
@@ -71,6 +73,9 @@ final class CedarAuthoriser {
         }));
         this.schema = schema;
         this.policies = policies;
+        if (!Set.of("sdk", "sdk-profile", "scalar", "batch").contains(prototypeMode)) throw new IllegalArgumentException("Prototype mode");
+        try { this.prepared = prototypeMode.startsWith("sdk") ? null : new PreparedReadEvaluator(schema, policies); }
+        catch (Exception failure) { throw new IllegalStateException("Prototype evaluator unavailable"); }
         this.typedModels = List.copyOf(typedModels);
         if (this.typedModels.stream().map(TypedAuthorisationModel::projectionType).distinct().count()
                 != this.typedModels.size()) {
@@ -198,11 +203,13 @@ final class CedarAuthoriser {
             io.github.gmcnicol.kernel.application.ReadCandidate<P> candidate, String operation,
             Map<String, Value> authority) {
         try {
+            long started = System.nanoTime();
             String identity = key(read.tenantId(), candidate.scope().type().qualifiedName(), candidate.scope().externalId(),
                     read.type().qualifiedName(), Integer.toString(read.type().contractVersion()),
                     candidate.record().type().qualifiedName(), candidate.record().externalId());
             Entity resource = entity(simpleName(candidate.record().type().qualifiedName()), identity,
                     attributes(model(read.type()), candidate.value(), FactSet.empty()));
+            PrototypeReadMetrics.prep.add(System.nanoTime() - started);
             return strictReadDecision(read, resource, operation, authority);
         } catch (Exception failure) { throw new AuthorisationDeniedException(); }
     }
@@ -218,15 +225,91 @@ final class CedarAuthoriser {
 
     private boolean strictReadDecision(io.github.gmcnicol.kernel.application.ReadRequest<?> read,
             Entity resource, String operation, Map<String, Value> authority) throws Exception {
+        long started = System.nanoTime();
         Entity principal = entity(read.principal().type(), read.principal().id());
         var context = new LinkedHashMap<String, Value>(authority);
         context.put("readScope", new com.cedarpolicy.value.PrimString(read.scope().externalId()));
         var request = new AuthorizationRequest(principal.getEUID(), euid("Action", TYPED_ACTION_PREFIX + operation),
                 resource.getEUID(), Optional.of(context), Optional.of(schema), true);
-        var result = engine.isAuthorized(request, policies, Set.of(principal, resource));
+        PrototypeReadMetrics.prep.add(System.nanoTime() - started);
+        var result = evaluateRead(request, Set.of(principal, resource));
+        return strict(result);
+    }
+
+    private com.cedarpolicy.model.AuthorizationResponse evaluateRead(AuthorizationRequest request, Set<Entity> entities) throws Exception {
+        if (prototypeMode.equals("sdk-profile")) return PreparedReadEvaluator.profileSdk(request, policies, entities);
+        if (prepared != null) return prepared.evaluate(List.of(new PreparedReadEvaluator.Input(request, entities)), 0).getFirst();
+        long started = System.nanoTime();
+        var result = engine.isAuthorized(request, policies, entities);
+        PrototypeReadMetrics.nativeNanos.add(System.nanoTime() - started); // SDK includes encoding/decoding, not native-only.
+        PrototypeReadMetrics.invocations.increment(); PrototypeReadMetrics.checks.increment();
+        return result;
+    }
+
+    private static boolean strict(com.cedarpolicy.model.AuthorizationResponse result) {
         if (!result.warnings.isEmpty() || result.success.isEmpty() || !result.success.get().getErrors().isEmpty())
             throw new AuthorisationDeniedException();
         return result.success.get().isAllowed();
+    }
+
+    /** THROWAWAY immutable candidate frame; never retained across candidates, reads or release fences. */
+    <P> ReadFrame<P> readFrame(io.github.gmcnicol.kernel.application.ReadRequest<P> read,
+            io.github.gmcnicol.kernel.application.ReadCandidate<P> candidate, Map<String, Value> authority, long deadline) {
+        return new ReadFrame<>(read, candidate, authority, deadline);
+    }
+    final class ReadFrame<P> {
+        final io.github.gmcnicol.kernel.application.ReadRequest<P> read;
+        final io.github.gmcnicol.kernel.application.ReadCandidate<P> candidate;
+        final Map<String, Value> authority;
+        Entity principal, resource;
+        Map<String, Value> context;
+        final long deadline;
+        ReadFrame(io.github.gmcnicol.kernel.application.ReadRequest<P> read,
+                io.github.gmcnicol.kernel.application.ReadCandidate<P> candidate, Map<String, Value> authority, long deadline) {
+            this.read = read; this.candidate = candidate; this.authority = authority; this.deadline = deadline;
+        }
+        private PreparedReadEvaluator.Input input(String operation) {
+            long started = System.nanoTime();
+            if (resource == null) {
+                String identity = key(read.tenantId(), candidate.scope().type().qualifiedName(), candidate.scope().externalId(),
+                        read.type().qualifiedName(), Integer.toString(read.type().contractVersion()),
+                        candidate.record().type().qualifiedName(), candidate.record().externalId());
+                resource = entity(simpleName(candidate.record().type().qualifiedName()), identity,
+                        attributes(model(read.type()), candidate.value(), FactSet.empty()));
+                principal = entity(read.principal().type(), read.principal().id());
+                context = new LinkedHashMap<>(authority);
+                context.put("readScope", new com.cedarpolicy.value.PrimString(read.scope().externalId()));
+            }
+            var q = new AuthorizationRequest(principal.getEUID(), euid("Action", TYPED_ACTION_PREFIX + operation), resource.getEUID(),
+                    Optional.of(context), Optional.of(schema), true);
+            PrototypeReadMetrics.prep.add(System.nanoTime() - started);
+            return new PreparedReadEvaluator.Input(q, Set.of(principal, resource));
+        }
+        boolean allows(String operation) {
+            if (prepared == null) return allowsRead(read, candidate, operation, authority);
+            try { return strict(prepared.evaluate(List.of(input(operation)), 0, deadline - System.nanoTime()).getFirst()); }
+            catch (Exception failure) { throw new AuthorisationDeniedException(); }
+        }
+        java.util.Iterator<Boolean> plan(List<String> operations, boolean gates, java.util.function.IntSupplier capacity) {
+            return new java.util.Iterator<>() {
+                int next;
+                List<com.cedarpolicy.model.AuthorizationResponse> results;
+                public boolean hasNext() { return next < operations.size(); }
+                public Boolean next() {
+                    if (!hasNext()) throw new java.util.NoSuchElementException();
+                    if (!prototypeMode.equals("batch")) return allows(operations.get(next++));
+                    try {
+                        if (results == null) {
+                            int limit = Math.min(operations.size(), capacity.getAsInt());
+                            if (limit < 1) throw new AuthorisationDeniedException();
+                            var inputs = operations.subList(0, limit).stream().map(ReadFrame.this::input).toList();
+                            results = prepared.evaluate(inputs, gates ? inputs.size() : 0, deadline - System.nanoTime());
+                        }
+                        return strict(results.get(next++));
+                    } catch (Exception failure) { throw new AuthorisationDeniedException(); }
+                }
+            };
+        }
     }
 
     private static String key(String... parts) {
