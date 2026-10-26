@@ -342,10 +342,18 @@ struct Call {
     entities: Value,
 }
 fn evaluate(handle: u64, text: String, deadline: Instant) -> Result<u64, ()> {
+    evaluate_with_clock(handle, text, deadline, Instant::now)
+}
+fn evaluate_with_clock(
+    handle: u64,
+    text: String,
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+) -> Result<u64, ()> {
     if text.len() > INPUT {
         return Err(());
     }
-    if Instant::now() >= deadline {
+    if now() >= deadline {
         return Ok(EXPIRED);
     }
     let bundle = registry()
@@ -366,14 +374,16 @@ fn evaluate(handle: u64, text: String, deadline: Instant) -> Result<u64, ()> {
             .map_err(|_| ())?;
         let entities =
             Entities::from_json_value(c.entities, Some(&bundle.schema)).map_err(|_| ())?;
-        if Instant::now() >= deadline {
+        if now() >= deadline {
             return Ok(EXPIRED);
         }
         EVALUATIONS.fetch_add(1, Ordering::Relaxed);
         let answer = Authorizer::new().is_authorized(&request, &bundle.policies, &entities);
         let errors = answer.diagnostics().errors().count().min(65535) as u64;
         let warnings = bundle.warnings.min(255) as u64;
-        if Instant::now() >= deadline {
+        // Known strict diagnostics take precedence over a late evaluation timeout.
+        let expired = now() >= deadline;
+        if errors == 0 && warnings == 0 && expired {
             return Ok(EXPIRED);
         }
         Ok(MAGIC | u64::from(answer.decision() == Decision::Allow) | warnings << 8 | errors << 16)
@@ -729,6 +739,41 @@ mod tests {
         assert_eq!(local_allocated() - before_local, 4096 + 8192 + 4096);
         flush_allocations();
         assert!(ALLOCATED.load(Ordering::Relaxed) >= before_global + 4096 + 8192 + 4096);
+    }
+
+    #[test]
+    fn late_policy_errors_and_schema_warnings_keep_original_scalar_diagnostics() {
+        let request = serde_json::json!({
+            "principal": {"type":"User", "id":"u"}, "action":{"type":"Action", "id":"read"},
+            "resource":{"type":"Row", "id":"r"}, "context":{}, "entities":[]
+        }).to_string();
+        let start = Instant::now();
+        let deadline = start + Duration::from_secs(1);
+        for (schema_prefix, policy, expected) in [
+            ("", "forbid(principal, action, resource) when { resource.missing };", MAGIC | 1 | 1 << 16),
+            ("entity String;", "permit(principal, action, resource);", MAGIC | 1 | 1 << 8),
+            ("", "permit(principal, action, resource);", EXPIRED),
+        ] {
+            let source = serde_json::json!({
+                "schema": format!("{schema_prefix} entity User; entity Row {{ missing?: Bool }}; action read appliesTo {{ principal: User, resource: Row, context: {{}} }};"),
+                "policies": {"permit": "permit(principal, action, resource);", "diagnostic": policy}
+            }).to_string();
+            let id = prepare(source).unwrap();
+            let original = evaluate_with_clock(id, request.clone(), deadline, || start).unwrap();
+            let mut checks = 0;
+            let late = evaluate_with_clock(id, request.clone(), deadline, || {
+                checks += 1;
+                if checks < 3 { start } else { deadline }
+            }).unwrap();
+            // Only the post-evaluation clock crosses the deadline; the real Cedar response is unchanged.
+            let before_execution = evaluate_with_clock(id, request.clone(), deadline, || deadline).unwrap();
+            close(id).unwrap();
+            assert_eq!(before_execution, EXPIRED);
+            assert_eq!(checks, 3);
+            assert_eq!(late, expected);
+            if expected != EXPIRED { assert_eq!(late, original); }
+            else { assert_eq!(original, MAGIC | 1); }
+        }
     }
 
     #[test]
