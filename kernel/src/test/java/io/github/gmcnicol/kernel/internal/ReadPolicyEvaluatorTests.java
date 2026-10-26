@@ -53,6 +53,31 @@ class ReadPolicyEvaluatorTests {
         }
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"sdk", "prepared"})
+    void throwingTelemetryCannotGrantOrDenyReads(String backend) throws Exception {
+        var schema = new Schema("entity User; entity Row { visible: Bool }; action read appliesTo { principal: User, resource: Row, context: {} };");
+        var policy = PolicySet.parsePolicies("permit(principal, action, resource) when { resource.visible };");
+        var meters = new SimpleMeterRegistry() {
+            @Override protected io.micrometer.core.instrument.Counter newCounter(io.micrometer.core.instrument.Meter.Id id) {
+                return new io.micrometer.core.instrument.Counter() {
+                    public void increment(double amount) { throw new IllegalStateException("operator telemetry unavailable"); }
+                    public double count() { return 0; }
+                    public io.micrometer.core.instrument.Meter.Id getId() { return id; }
+                };
+            }
+        };
+        try (var evaluator = ReadPolicyEvaluator.create(schema, policy, backend, meters)) {
+            for (boolean visible : List.of(true, false)) {
+                assertThat(evaluator.evaluate(new Principal("User", "u"), "Row", "r",
+                        Map.of("visible", new PrimBool(visible)), "read", Map.of(), System.nanoTime() + 1_000_000_000L))
+                        .isEqualTo(visible ? ReadDecision.ALLOW : ReadDecision.DENY);
+            }
+            assertThat(evaluator.evaluate(new Principal("User", "u"), "Row", "r",
+                    Map.of(), "read", Map.of(), System.nanoTime() + 1_000_000_000L)).isEqualTo(ReadDecision.INVALID);
+        }
+    }
+
     private ReadDecision outcome(ReadPolicyEvaluator evaluator, Principal principal, Map<String, Value> attrs, String action) {
         try { return evaluator.evaluate(principal, "Row", "same", attrs, action, Map.of(), System.nanoTime() + 1_000_000_000L); }
         catch (Exception failure) { return ReadDecision.INVALID; }

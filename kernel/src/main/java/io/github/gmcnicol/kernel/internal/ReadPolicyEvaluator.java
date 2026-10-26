@@ -29,7 +29,8 @@ interface ReadPolicyEvaluator extends AutoCloseable {
             return new ReadPolicyEvaluator() {
                 public ReadDecision evaluate(Principal principal, String type, String id, Map<String, Value> attributes,
                         String operation, Map<String, Value> context, long deadline) throws Exception {
-                    counter.increment();
+                    try { counter.increment(); }
+                    catch (RuntimeException ignored) { /* Telemetry is not authority. */ }
                     var actor = new Entity(uid(principal.type(), principal.id()), Map.of(), Set.of());
                     var resource = new Entity(uid(type, id), attributes, Set.of());
                     var request = new AuthorizationRequest(actor.getEUID(), uid("Action", operation), resource.getEUID(), Optional.of(context), Optional.of(schema), true);
@@ -57,7 +58,8 @@ interface ReadPolicyEvaluator extends AutoCloseable {
         return new ReadPolicyEvaluator() {
             public ReadDecision evaluate(Principal principal, String type, String id, Map<String, Value> attributes,
                     String operation, Map<String, Value> context, long deadline) {
-                counter.increment();
+                try { counter.increment(); }
+                catch (RuntimeException ignored) { /* Telemetry is not authority. */ }
                 var actor = Map.of("type", principal.type(), "id", principal.id());
                 var resource = Map.of("type", type, "id", id);
                 var entities = List.of(Map.of("uid", actor, "attrs", Map.of(), "parents", List.of()),
