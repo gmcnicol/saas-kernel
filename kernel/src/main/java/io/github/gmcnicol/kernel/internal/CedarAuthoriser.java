@@ -30,10 +30,11 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-final class CedarAuthoriser {
+final class CedarAuthoriser implements AutoCloseable {
     private static final String TYPED_ACTION_PREFIX = "typed/v1/";
 
     private final BasicAuthorizationEngine engine = new BasicAuthorizationEngine();
+    private final ReadPolicyEvaluator readEvaluator;
     private final Schema schema;
     private final PolicySet policies;
     private final List<TypedAuthorisationModel<?>> typedModels;
@@ -56,6 +57,15 @@ final class CedarAuthoriser {
             Schema schema, PolicySet policies, List<TypedAuthorisationModel<?>> typedModels,
             String bundleId, String bundleChecksum, List<SemanticBindings> bindings,
             List<EffectiveCapabilityResolver> resolvers, Clock clock) {
+        this(schema, policies, typedModels, bundleId, bundleChecksum, bindings, resolvers, clock,
+                System.getProperty("kernel.authorisation.read-evaluator", "auto"), new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+    }
+
+    CedarAuthoriser(
+            Schema schema, PolicySet policies, List<TypedAuthorisationModel<?>> typedModels,
+            String bundleId, String bundleChecksum, List<SemanticBindings> bindings,
+            List<EffectiveCapabilityResolver> resolvers, Clock clock, String selection,
+            io.micrometer.core.instrument.MeterRegistry meters) {
         this.capabilities = bindings.stream().flatMap(binding -> binding.capabilities().stream()).toList();
         this.resolvers = List.copyOf(resolvers);
         this.clock = clock;
@@ -78,7 +88,10 @@ final class CedarAuthoriser {
         }
         this.bundleId = bundleId;
         this.bundleChecksum = bundleChecksum;
+        this.readEvaluator = ReadPolicyEvaluator.create(schema, policies, selection, meters);
     }
+
+    @Override public void close() { readEvaluator.close(); }
 
     <P> TypedAuthorisationModel<P> model(ProjectionType<?, P> projectionType) {
         for (TypedAuthorisationModel<?> candidate : typedModels) {
@@ -196,37 +209,34 @@ final class CedarAuthoriser {
 
     <P> boolean allowsRead(io.github.gmcnicol.kernel.application.ReadRequest<P> read,
             io.github.gmcnicol.kernel.application.ReadCandidate<P> candidate, String operation,
-            Map<String, Value> authority) {
+            Map<String, Value> authority, long deadline) {
         try {
             String identity = key(read.tenantId(), candidate.scope().type().qualifiedName(), candidate.scope().externalId(),
                     read.type().qualifiedName(), Integer.toString(read.type().contractVersion()),
                     candidate.record().type().qualifiedName(), candidate.record().externalId());
-            Entity resource = entity(simpleName(candidate.record().type().qualifiedName()), identity,
-                    attributes(model(read.type()), candidate.value(), FactSet.empty()));
-            return strictReadDecision(read, resource, operation, authority);
+            return strictReadDecision(read, simpleName(candidate.record().type().qualifiedName()), identity,
+                    attributes(model(read.type()), candidate.value(), FactSet.empty()), operation, authority, deadline);
         } catch (Exception failure) { throw new AuthorisationDeniedException(); }
     }
 
     <P> boolean allowsReadQuery(io.github.gmcnicol.kernel.application.ReadRequest<P> read,
-            io.github.gmcnicol.kernel.application.ReadPath<P, ?> path, Map<String, Value> authority) {
+            io.github.gmcnicol.kernel.application.ReadPath<P, ?> path, Map<String, Value> authority, long deadline) {
         try {
-            Entity resource = entity(simpleName(read.scope().type().qualifiedName()),
-                    key(read.tenantId(), read.scope().type().qualifiedName(), read.scope().externalId()), Map.of());
-            return strictReadDecision(read, resource, path.qualifiedName() + ".query", authority);
+            return strictReadDecision(read, simpleName(read.scope().type().qualifiedName()),
+                    key(read.tenantId(), read.scope().type().qualifiedName(), read.scope().externalId()), Map.of(),
+                    path.qualifiedName() + ".query", authority, deadline);
         } catch (Exception failure) { throw new AuthorisationDeniedException(); }
     }
 
     private boolean strictReadDecision(io.github.gmcnicol.kernel.application.ReadRequest<?> read,
-            Entity resource, String operation, Map<String, Value> authority) throws Exception {
-        Entity principal = entity(read.principal().type(), read.principal().id());
+            String resourceType, String resourceId, Map<String, Value> attributes, String operation,
+            Map<String, Value> authority, long deadline) throws Exception {
         var context = new LinkedHashMap<String, Value>(authority);
         context.put("readScope", new com.cedarpolicy.value.PrimString(read.scope().externalId()));
-        var request = new AuthorizationRequest(principal.getEUID(), euid("Action", TYPED_ACTION_PREFIX + operation),
-                resource.getEUID(), Optional.of(context), Optional.of(schema), true);
-        var result = engine.isAuthorized(request, policies, Set.of(principal, resource));
-        if (!result.warnings.isEmpty() || result.success.isEmpty() || !result.success.get().getErrors().isEmpty())
-            throw new AuthorisationDeniedException();
-        return result.success.get().isAllowed();
+        var result = readEvaluator.evaluate(read.principal(), resourceType, resourceId, attributes,
+                TYPED_ACTION_PREFIX + operation, context, deadline);
+        if (result == ReadDecision.INVALID) throw new AuthorisationDeniedException();
+        return result == ReadDecision.ALLOW;
     }
 
     private static String key(String... parts) {

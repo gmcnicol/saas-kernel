@@ -133,14 +133,16 @@ public class EvaluationAutoConfiguration {
         return new ReevaluationWorker(kernel, policy, clock);
     }
 
-    @Bean
+    @Bean(destroyMethod = "close")
     CedarAuthoriser cedarAuthoriser(
             List<AuthorisationBundle> bundles,
             List<io.github.gmcnicol.kernel.application.TypedAuthorisationModel<?>> typedModels,
             List<SemanticBindings> bindings,
             List<io.github.gmcnicol.kernel.application.EffectiveCapabilityResolver> resolvers,
             Clock clock,
-            ResourceLoader resources) {
+            ResourceLoader resources,
+            org.springframework.core.env.Environment environment,
+            MeterRegistry meters) {
         Properties manifest = load(resources, bundles.getFirst().manifestResource());
         String schema = read(resources, manifest.getProperty("schema"));
         String policies = java.util.Arrays.stream(manifest.getProperty("policies").split(","))
@@ -154,7 +156,8 @@ public class EvaluationAutoConfiguration {
                     PolicySet.parsePolicies(policies),
                     typedModels,
                     manifest.getProperty("id"),
-                    checksum, bindings, resolvers, clock);
+                    checksum, bindings, resolvers, clock,
+                    environment.getProperty("kernel.authorisation.read-evaluator", "auto"), meters);
         } catch (Exception exception) {
             throw new IllegalStateException("Cannot initialise Authorisation Bundle", exception);
         }

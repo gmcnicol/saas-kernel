@@ -1,0 +1,42 @@
+# Prepared scalar Cedar reads
+
+[ADR 0004](adr/0004-prepared-scalar-cedar-reads.md) permits immutable schema/policy preparation, not batched decisions or reusable permission results. Public read/disclosure interfaces and Application data, SQL/RLS, policy and revision ownership are unchanged. The existing per-record, query-leaf, selected-leaf, accessor, scalar validation and output-encoding sequence remains in `ScopedAuthorisedReads`; each admitted decision invokes the scalar evaluator separately. Policy attributes are reconstructed for every decision, not cached candidate projections. All current authority/source/admission/release fences remain fresh.
+
+## Source and release inventory
+
+The installed Cedar Java 4.2.3 uber JAR contains native entries for Linux x86_64/aarch64, macOS x86_64/aarch64 and Windows x86_64. This inventories existing SDK resources, not independent certification of those platforms. Kernel's existing build/release CI is Ubuntu. The release contract remains exactly two same-version Maven artifacts: runtime and Taxi generator. Native code/resources are embedded inside the existing runtime, never published as another artifact or service.
+
+The prepared engine pins Cedar Git commit **09e21d967f1da2cf2abbe1e0b0b2067b41867735**, with all dependency resolution recorded in `kernel/native/Cargo.lock`. The installed SDK Linux x86_64 binary embeds `git/checkouts/cedar-79b5bb6b8289a73a/09e21d9`; coordinator independently resolved that prefix and recorded JAR SHA256 `8f12d3d98deeef09781c4dd0d628b57f07712e6f2d89a5d400c8b74b5e77dd11` and native-entry SHA256 `ebaafb3ba13a464f5865c281ea8a523f5ff1d4384ef0134d39dde8543d479b07`. This is strong embedded source-lineage evidence for that entry, **not cryptographic build attestation**, exact compiler/dependency/binary equivalence or automatic provenance for every SDK platform. The captured prototype used an earlier two-commits-behind source. No large Cedar engine upgrade is included here.
+
+No upstream source patch or private SDK codec/reflection is used. Owned bounded JSON encoding represents public Cedar values/entities; the pinned engine's public Schema, Policy, Template, Request, Context and Entities parsers perform complete request/entity validation. The scalar ABI carries allow/deny plus bounded warning/error indicators; any warning, policy error, request failure, bad ABI or worker failure invalidates the entire strict read. Private diagnostic text never becomes a permit or payload log. Existing public errors remain fixed and cause-free.
+
+## Platform selection and loading
+
+`kernel.authorisation.read-evaluator` is a production configuration property:
+
+- `auto` (default): prepared scalar on Linux x86_64, glibc >=2.36; explicitly identified original-SDK adapter on genuinely unsupported prepared targets.
+- `prepared`: requires that ABI and its packaged binary. Unsupported ABI, missing resource, wrong digest/identity or load failure fails assembly. Execution failure denies; **there is no fallback after native failure**.
+- `sdk`: explicitly select the original SDK scalar adapter for differential checks/compatibility operations; it is not reported as prepared or fast.
+
+Operator meter `kernel.read.authorization.backend{backend=...}` distinguishes `prepared-scalar`, `sdk-explicit` and `sdk-unsupported-platform`. Retaining the SDK path preserves its existing platform behavior, not a new promise that an untested SDK platform works. Only Linux x86_64/glibc is being exercised for the new path. No macOS/Windows/aarch64 prepared binary or all-platform publication is advertised.
+
+The loader probes glibc through Java25's public Foreign Function API, verifies a bounded packaged binary against its packaged SHA256, extracts into an owner-only directory/file, verifies ABI/source identity, loads it and unlinks the temporary file. No user-supplied native path or prototype launch flag exists. Checksums detect artifact/extraction mismatch; authenticity still relies on trusted runtime artifact distribution/signing, not an unauthenticated checksum alone. Supported/configured native loading problems are not treated as unsupported-platform fallback. Java's normal native-access startup flag remains appropriate (`--enable-native-access=ALL-UNNAMED`).
+
+## Bounds, lifetime and failure
+
+- At most 128 nonrecycled handle tokens and 32 distinct live immutable bundles per native module. Identical full bundle content shares reference-counted parsed state. Different assembly IDs do not share authority: public binding/policy pins remain checked separately.
+- Conservative gross-allocation charging bounds retained compiled bundles to 64MiB, plus bounded registry metadata. Concurrent allocations can overcharge, never discount, a compile. This is a conservative admission budget, not a hard process RSS quota. Allocation-accounting overflow prevents new bundle retention.
+- Bundle wire bytes <=256KiB; each scalar request <=1MiB; no batch/chunk API. Owned value traversal is depth-bounded. Four reusable 8MiB-stack workers, four native payload admissions, four executing Java permits and sixteen total Java admissions bound queued payloads. Invalid/duplicate close requests cannot grow a queue. UTF-16/modified-UTF-8 conversion has bounded transient amplification; requested native heap/peak are measured separately from worker stacks and Java heap.
+- Explicit Spring bean close and a Cleaner backstop release handles. In-flight evaluations hold an Arc, so close cannot free live parsed state. Results are rejected after close. The last handle/job drains and joins the pool before the final JNI frame returns; reopening starts a new bounded pool, not threads per decision. `JNI_OnUnload` cleans orphaned handles on workers before unloading code.
+- Queue wait/encoding consume the absolute Java deadline; native wait/evaluation use the remaining budget, checked before/after evaluation. A single Cedar evaluation is **not interruptible**. Java checkpoint cancellation is preserved and interrupted admission restores interruption. No hard-preemption or zero check-to-return/send race is claimed.
+- A panicked job returns failure without retry or payload logging. Immutable parsed state is not mutated by evaluation, and each job constructs a fresh Authorizer; healthy later jobs can proceed. Poisoned lifecycle/registry locks fail closed; process restart is the recovery boundary for unrecoverable shared-state failure. Host/JVM/process OOM is not sandboxed by this library.
+
+Only immutable parsed schema/policy state is shared. Contexts, entities, permissions, capabilities and source snapshots are not retained across decisions/reads/fences. Native statistics contain aggregate counters only.
+
+## Build and evidence
+
+Normal Maven resource generation invokes `kernel/native/build.sh`: isolated official Rust1.90/bookworm image pinned by digest, committed Cargo.lock, no host Rust install, no moving source branch. The specific Rust1.90 text-direction-literal lint is allowed for unchanged upstream legacy BIDI test literals. Packaged native metadata includes source/toolchain identity and dependency lock. Artifact builds require POSIX bash and a Linux-amd64 Docker builder (emulation is not separately certified); CI/release artifact building stays on Linux, while unsupported prepared-runtime targets retain the SDK adapter.
+
+Use a private copied Maven repository for adoption proofs; never replace shared coordinates. Full clean verification includes the owned Rust worker test, Java scalar/lifecycle/differential tests, public PostgreSQL contracts and the existing isolated packaged-generator/runtime consumer. Native gauges separately expose handles, bundles, conservative cache charge, requested live/peak/cumulative Rust heap bytes, allocations, authorizer evaluations, JNI scalar invocations, all owned ABI entries, queue and worker counts. These are not SDK-helper crossings, all-process native RSS or portable performance guarantees.
+
+The #74 samples motivate prepared scalar but do not prove native parsing alone caused the gain: worker, encoding and Java preparation also differed. Performance acceptance requires enough controlled sequential and declared-concurrent observations of the same protected fields/data/query/order and fresh fences. Faster reads do not solve Kit's separate erasure/history/sidebar/channel-navigation gaps. No deployment/public publication or production-readiness claim follows from a local build.
