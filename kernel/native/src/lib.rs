@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
+    cell::Cell,
     collections::{BTreeMap, HashMap, HashSet},
     panic::{catch_unwind, AssertUnwindSafe},
     str::FromStr,
@@ -31,8 +32,16 @@ const MAGIC: u64 = 0x4b75000100000000;
 const INVALID: u64 = MAGIC | 2;
 const FAILURE: u64 = MAGIC | 3;
 const EXPIRED: u64 = MAGIC | 4;
-static LIVE: AtomicU64 = AtomicU64::new(0);
-static PEAK: AtomicU64 = AtomicU64::new(0);
+#[repr(align(64))]
+struct HotCounter(AtomicU64);
+impl std::ops::Deref for HotCounter {
+    type Target = AtomicU64;
+    fn deref(&self) -> &AtomicU64 {
+        &self.0
+    }
+}
+static LIVE: HotCounter = HotCounter(AtomicU64::new(0));
+static PEAK: HotCounter = HotCounter(AtomicU64::new(0));
 static ALLOCATED: AtomicU64 = AtomicU64::new(0);
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static ACCOUNTING_VALID: AtomicBool = AtomicBool::new(true);
@@ -42,6 +51,59 @@ static QUEUED: AtomicUsize = AtomicUsize::new(0);
 static INPUTS: AtomicUsize = AtomicUsize::new(0);
 static INVOCATIONS: AtomicU64 = AtomicU64::new(0);
 static FFI_ENTRIES: AtomicU64 = AtomicU64::new(0);
+#[derive(Clone, Copy)]
+struct Accounting {
+    bytes: u64,
+    count: u64,
+    flushed_bytes: u64,
+    flushed_count: u64,
+}
+thread_local! {
+    static LOCAL_ACCOUNTING: Cell<Accounting> = const { Cell::new(Accounting { bytes: 0, count: 0, flushed_bytes: 0, flushed_count: 0 }) };
+}
+fn local_allocated() -> u64 {
+    LOCAL_ACCOUNTING.try_with(|c| c.get().bytes).unwrap_or(0)
+}
+fn record_allocation(size: u64) {
+    if LOCAL_ACCOUNTING
+        .try_with(|cell| {
+            let mut local = cell.get();
+            match (local.bytes.checked_add(size), local.count.checked_add(1)) {
+                (Some(bytes), Some(count)) => {
+                    local.bytes = bytes;
+                    local.count = count;
+                    cell.set(local);
+                }
+                _ => {
+                    ACCOUNTING_VALID.store(false, Ordering::Relaxed);
+                }
+            }
+        })
+        .is_err()
+    {
+        ACCOUNTING_VALID.store(false, Ordering::Relaxed);
+    }
+}
+fn flush_allocations() {
+    let _ = LOCAL_ACCOUNTING.try_with(|cell| {
+        let mut local = cell.get();
+        let bytes = local.bytes - local.flushed_bytes;
+        let count = local.count - local.flushed_count;
+        if bytes != 0
+            && ALLOCATED
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    n.checked_add(bytes)
+                })
+                .is_err()
+        {
+            ACCOUNTING_VALID.store(false, Ordering::Relaxed);
+        }
+        ALLOCATIONS.fetch_add(count, Ordering::Relaxed);
+        local.flushed_bytes = local.bytes;
+        local.flushed_count = local.count;
+        cell.set(local);
+    });
+}
 struct InputAdmission;
 impl InputAdmission {
     fn acquire() -> Result<Self, ()> {
@@ -59,6 +121,7 @@ impl InputAdmission {
 }
 impl Drop for InputAdmission {
     fn drop(&mut self) {
+        flush_allocations();
         INPUTS.fetch_sub(1, Ordering::Release);
     }
 }
@@ -69,22 +132,46 @@ unsafe impl GlobalAlloc for MeasuredAllocator {
         if !p.is_null() {
             let size = layout.size() as u64;
             let live = LIVE.fetch_add(size, Ordering::Relaxed) + size;
-            PEAK.fetch_max(live, Ordering::Relaxed);
-            if ALLOCATED
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-                    n.checked_add(size)
-                })
-                .is_err()
-            {
-                ACCOUNTING_VALID.store(false, Ordering::Relaxed);
+            if live > PEAK.load(Ordering::Relaxed) {
+                PEAK.fetch_max(live, Ordering::Relaxed);
             }
-            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            record_allocation(size);
+        }
+        p
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let p = System.alloc_zeroed(layout);
+        if !p.is_null() {
+            let size = layout.size() as u64;
+            let live = LIVE.fetch_add(size, Ordering::Relaxed) + size;
+            if live > PEAK.load(Ordering::Relaxed) {
+                PEAK.fetch_max(live, Ordering::Relaxed);
+            }
+            record_allocation(size);
         }
         p
     }
     unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
         LIVE.fetch_sub(layout.size() as u64, Ordering::Relaxed);
         System.dealloc(p, layout);
+    }
+    unsafe fn realloc(&self, p: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // Preserve System's in-place realloc opportunity rather than the trait default's
+        // allocate/copy/free sequence. Layout/pointer ownership is unchanged by accounting.
+        let result = System.realloc(p, layout, new_size);
+        if !result.is_null() {
+            if new_size >= layout.size() {
+                let live = LIVE.fetch_add((new_size - layout.size()) as u64, Ordering::Relaxed)
+                    + (new_size - layout.size()) as u64;
+                if live > PEAK.load(Ordering::Relaxed) {
+                    PEAK.fetch_max(live, Ordering::Relaxed);
+                }
+            } else {
+                LIVE.fetch_sub((layout.size() - new_size) as u64, Ordering::Relaxed);
+            }
+            record_allocation(new_size as u64);
+        }
+        result
     }
 }
 #[global_allocator]
@@ -177,9 +264,10 @@ fn prepare(text: String) -> Result<u64, ()> {
             return Err(());
         }
     }
-    // Gross allocated bytes conservatively upper-bound retained bundle bytes, even
-    // if another worker allocates concurrently. This is not a process RSS quota.
-    let before = ALLOCATED.load(Ordering::Relaxed);
+    // This compile's gross allocations conservatively upper-bound its retained bytes.
+    // Thread-local accounting avoids other workers contending on, or inflating, this charge.
+    // This is not a process RSS quota.
+    let before = local_allocated();
     let input: BundleInput = serde_json::from_str(&text).map_err(|_| ())?;
     let (schema, warnings) = Schema::from_cedarschema_str(&input.schema).map_err(|_| ())?;
     let warnings = warnings.count();
@@ -225,7 +313,7 @@ fn prepare(text: String) -> Result<u64, ()> {
         policies,
         warnings,
     });
-    let charge = ALLOCATED.load(Ordering::Relaxed).saturating_sub(before) + text.capacity() as u64;
+    let charge = local_allocated().saturating_sub(before) + text.capacity() as u64;
     if !ACCOUNTING_VALID.load(Ordering::Relaxed) {
         return Err(());
     }
@@ -325,6 +413,7 @@ static WORKER_THREADS: AtomicUsize = AtomicUsize::new(0);
 struct WorkerLife;
 impl Drop for WorkerLife {
     fn drop(&mut self) {
+        flush_allocations();
         WORKER_THREADS.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -364,6 +453,8 @@ impl Pool {
                             }
                         };
                         // No failed decision is retried. Fresh jobs use a fresh Authorizer.
+                        // Publish exact cumulative allocation totals once per job, not per malloc.
+                        flush_allocations();
                         let _ = reply.send(value);
                     }
                 });
@@ -461,9 +552,12 @@ pub extern "system" fn Java_io_github_gmcnicol_kernel_internal_NativeCedar_ident
     _: JClass,
 ) -> jstring {
     FFI_ENTRIES.fetch_add(1, Ordering::Relaxed);
-    env.new_string("kernel-cedar/1;cedar/09e21d967f1da2cf2abbe1e0b0b2067b41867735")
+    let result = env
+        .new_string("kernel-cedar/1;cedar/09e21d967f1da2cf2abbe1e0b0b2067b41867735")
         .map(|s| s.into_raw())
-        .unwrap_or(std::ptr::null_mut())
+        .unwrap_or(std::ptr::null_mut());
+    flush_allocations();
+    result
 }
 #[no_mangle]
 pub extern "system" fn Java_io_github_gmcnicol_kernel_internal_NativeCedar_open(
@@ -519,7 +613,7 @@ pub extern "system" fn Java_io_github_gmcnicol_kernel_internal_NativeCedar_close
     handle: jlong,
 ) -> jlong {
     FFI_ENTRIES.fetch_add(1, Ordering::Relaxed);
-    catch_unwind(AssertUnwindSafe(|| {
+    let result = catch_unwind(AssertUnwindSafe(|| {
         // At most one queued close per live token; malformed/duplicate closes cannot grow the queue.
         let valid = match registry().lock() {
             Ok(mut r) => {
@@ -532,7 +626,9 @@ pub extern "system" fn Java_io_github_gmcnicol_kernel_internal_NativeCedar_close
         }
         dispatch(Operation::Close(handle as u64))
     }))
-    .unwrap_or(FAILURE) as jlong
+    .unwrap_or(FAILURE) as jlong;
+    flush_allocations();
+    result
 }
 #[no_mangle]
 pub extern "system" fn Java_io_github_gmcnicol_kernel_internal_NativeCedar_statistics(
@@ -540,6 +636,7 @@ pub extern "system" fn Java_io_github_gmcnicol_kernel_internal_NativeCedar_stati
     _: JClass,
 ) -> jlongArray {
     FFI_ENTRIES.fetch_add(1, Ordering::Relaxed);
+    flush_allocations();
     let values = catch_unwind(AssertUnwindSafe(|| {
         let mut r = registry().lock().map_err(|_| ())?;
         r.prune();
@@ -609,6 +706,31 @@ pub extern "system" fn JNI_OnUnload(_: *mut jni::sys::JavaVM, _: *mut std::ffi::
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn job_local_accounting_records_requested_bytes_without_losing_global_totals() {
+        let before_local = local_allocated();
+        let before_global = ALLOCATED.load(Ordering::Relaxed);
+        let layout = Layout::from_size_align(4096, 8).unwrap();
+        let pointer = unsafe { ALLOCATOR.alloc(layout) };
+        assert!(!pointer.is_null());
+        assert_eq!(local_allocated() - before_local, 4096);
+        let pointer = unsafe { ALLOCATOR.realloc(pointer, layout, 8192) };
+        assert!(!pointer.is_null());
+        assert_eq!(local_allocated() - before_local, 4096 + 8192);
+        unsafe {
+            ALLOCATOR.dealloc(pointer, Layout::from_size_align(8192, 8).unwrap());
+        }
+        let zeroed = unsafe { ALLOCATOR.alloc_zeroed(layout) };
+        assert!(!zeroed.is_null());
+        assert_eq!(unsafe { *zeroed.add(4095) }, 0);
+        unsafe {
+            ALLOCATOR.dealloc(zeroed, layout);
+        }
+        assert_eq!(local_allocated() - before_local, 4096 + 8192 + 4096);
+        flush_allocations();
+        assert!(ALLOCATED.load(Ordering::Relaxed) >= before_global + 4096 + 8192 + 4096);
+    }
+
     #[test]
     fn failed_job_is_not_retried_and_healthy_scalar_work_can_continue() {
         let source = serde_json::json!({
