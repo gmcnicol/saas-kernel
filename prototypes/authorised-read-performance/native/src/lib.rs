@@ -4,10 +4,10 @@ use jni::{JNIEnv, objects::{JClass, JString}, sys::jstring};
 use serde_json::{json, Value};
 use std::{sync::{mpsc::{sync_channel, SyncSender}, Mutex, OnceLock}, panic::{catch_unwind, AssertUnwindSafe}};
 const BYTES: usize = 1024 * 1024;
-type Job = (String, SyncSender<String>);
+type Job = (String, SyncSender<String>, std::time::Instant);
 static WORKER: OnceLock<Mutex<SyncSender<Job>>> = OnceLock::new();
 static ENTRY: Mutex<()> = Mutex::new(());
-fn work(input: &str, bundles: &mut Vec<(String, PrototypePrepared)>) -> Result<Value, &'static str> {
+fn work(input: &str, bundles: &mut Vec<(String, PrototypePrepared)>, started: std::time::Instant) -> Result<Value, &'static str> {
     let v: Value = serde_json::from_str(input).map_err(|_| "input")?;
     match v["op"].as_str() {
         Some("prepare") => {
@@ -26,7 +26,7 @@ fn work(input: &str, bundles: &mut Vec<(String, PrototypePrepared)>) -> Result<V
             let gates = v["gates"].as_u64().ok_or("gates")? as usize;
             if calls.is_empty() || calls.len() > 64 || gates > calls.len() { return Err("chunk"); }
             let nanos = v["timeoutNanos"].as_u64().filter(|n| *n > 0 && *n <= 5_000_000_000).ok_or("deadline")?;
-            let deadline = std::time::Instant::now() + std::time::Duration::from_nanos(nanos);
+            let deadline = started + std::time::Duration::from_nanos(nanos);
             let mut out = vec![];
             for (i, call) in calls.iter().enumerate() {
                 if std::time::Instant::now() >= deadline { return Err("deadline"); }
@@ -46,7 +46,7 @@ fn work(input: &str, bundles: &mut Vec<(String, PrototypePrepared)>) -> Result<V
         _ => Err("operation"),
     }
 }
-fn dispatch(input: String) -> String {
+fn dispatch(input: String, started: std::time::Instant) -> String {
     if input.len() > BYTES { return "{}".into(); }
     let worker = WORKER.get_or_init(|| {
         // Never log policy inputs/panics. A panic permanently poisons this worker.
@@ -55,8 +55,8 @@ fn dispatch(input: String) -> String {
         std::thread::Builder::new().name("throwaway-cedar".into()).stack_size(8 * 1024 * 1024).spawn(move || {
             let mut bundles = vec![];
             let mut poisoned = false;
-            while let Ok((input, reply)) = rx.recv() {
-                let result = if poisoned { Ok(Err("poisoned")) } else { catch_unwind(AssertUnwindSafe(|| work(&input, &mut bundles))) };
+            while let Ok((input, reply, started)) = rx.recv() {
+                let result = if poisoned { Ok(Err("poisoned")) } else { catch_unwind(AssertUnwindSafe(|| work(&input, &mut bundles, started))) };
                 let output = match result { Ok(Ok(v)) => v.to_string(), Ok(Err(_)) => "{}".into(), Err(_) => { poisoned = true; "{}".into() } };
                 let output = if output.len() <= BYTES { output } else { "{}".into() };
                 let _ = reply.send(output);
@@ -66,18 +66,20 @@ fn dispatch(input: String) -> String {
     });
     let Ok(tx) = worker.lock() else { return "{}".into() };
     let (reply, rx) = sync_channel(1);
-    if tx.send((input, reply)).is_err() { return "{}".into(); }
+    if tx.send((input, reply, started)).is_err() { return "{}".into(); }
     rx.recv().unwrap_or_else(|_| "{}".into())
 }
 #[no_mangle]
 pub extern "system" fn Java_io_github_gmcnicol_kernel_internal_PreparedReadEvaluator_invoke(mut env: JNIEnv, _: JClass, input: JString) -> jstring {
-    let guard = ENTRY.try_lock();
+    let started = std::time::Instant::now();
+    // Wait before copying input: contention retains only Java-owned strings, not native payloads.
+    let guard = ENTRY.lock();
     if guard.is_err() { return env.new_string("{}").map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut()); }
     let output = catch_unwind(AssertUnwindSafe(|| {
         // Check UTF-16 length before copying; UTF-8 is bounded again in dispatch.
         if env.call_method(&input, "length", "()I", &[]).and_then(|v| v.i()).unwrap_or(i32::MAX) as usize > BYTES { return "{}".to_string(); }
         let input: String = match env.get_string(&input) { Ok(s) => s.into(), Err(_) => return "{}".into() };
-        dispatch(input)
+        dispatch(input, started)
     })).unwrap_or_else(|_| "{}".into());
     env.new_string(output).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
 }
