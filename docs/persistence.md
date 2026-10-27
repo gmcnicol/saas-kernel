@@ -8,7 +8,7 @@ values mean. It does not prescribe tables, columns, joins, materialised views, o
 An Application may supply Kernel Projected State from any normal Application-owned query shape.
 
 Kernel persistence contains execution metadata only: evaluation provenance and state identity,
-Action Offers, Intent status, Event receipts, audit, leases and reevaluation schedules.
+Action Offers, Intent status, Execution Receipts, audit, leases and reevaluation schedules.
 It does not store Projected State values, Facts, Candidate Payload bodies or Event bodies.
 Canonical encoding validates typed values in memory and computes integrity checks; encoded
 bytes are not an evidence archive. Kernel cannot reconstruct deleted Application records.
@@ -21,6 +21,12 @@ remove the unapplied input in the same transaction that commits the result. Fail
 Intents discard unapplied input; retryable work retains it. Never create a parallel Event store,
 snapshot archive or generic historical payload table in the Application to replace the removed
 Kernel copies.
+
+`Kernel.execute(...)` can compose one exact Intent with other Application writes only when the
+caller transaction uses this same datasource and Kernel transaction manager. Its completion is
+provisional until outer commit; rollback removes both Kernel and Application effects. It does not
+select unrelated due work. See [Exact Intent execution](exact-intent-execution.md) for transaction,
+replay, conflict, queue-processing, and external-side-effect guidance.
 
 State readers must return the requested tenant, subject, descriptor and actual domain version.
 Application mutations must use the same subject lock or an equivalent optimistic version check.

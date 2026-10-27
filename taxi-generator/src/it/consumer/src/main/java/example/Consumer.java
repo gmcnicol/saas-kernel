@@ -44,7 +44,66 @@ public final class Consumer {
                 || !decoded.value().equals(new ChangeCustomer("changed"))) {
             throw new AssertionError("generated registry must decode only its generated Candidate Payload");
         }
+        var capability = new io.github.gmcnicol.kernel.application.TypedCapability<>(
+                example.bindings.customer.crm.ManageCustomer.TYPE,
+                new example.bindings.customer.crm.ManageCustomer(Optional.of(2)));
+        var model = new io.github.gmcnicol.kernel.application.TypedAuthorisationModel<>(
+                Customer.TYPE, Set.of(Customer.NAME), Set.of(), Set.of(capability.type()));
+        if (!example.bindings.GeneratedSemanticBindings.INSTANCE.capabilities().contains(capability.type())
+                || !model.requiredCapabilities().contains(capability.type())) {
+            throw new AssertionError("capability must be generated, assembled and explicitly required");
+        }
+        io.github.gmcnicol.kernel.application.ReadPath<Customer, String> namePath = Customer.READ_NAME;
+        if (!Customer.TYPE.readPaths().contains(namePath)) throw new AssertionError("generated read path missing");
+        io.github.gmcnicol.kernel.application.ReadPath<example.bindings.customer.crm.CustomerRead, String> nested =
+                example.bindings.customer.crm.CustomerRead.READ_DETAILS_LABEL;
+        if (!example.bindings.customer.crm.CustomerRead.TYPE.readPaths().contains(nested)
+                || !example.bindings.GeneratedSemanticBindings.INSTANCE.subjects().contains(RatioId.TYPE)) {
+            throw new AssertionError("nested leaves and standalone scope Subjects must be inventoried");
+        }
+        // Existing generated inventories and Application constructors remain source compatible.
+        var bindings = example.bindings.GeneratedSemanticBindings.INSTANCE;
+        new io.github.gmcnicol.kernel.semanticpack.SemanticBindings(
+                bindings.projections(), bindings.facts(), bindings.candidates(), bindings.events(), bindings.actions());
+        new io.github.gmcnicol.kernel.semanticpack.SemanticBindings(bindings.projections(), bindings.facts());
+        new io.github.gmcnicol.kernel.semanticpack.SemanticBindings(bindings.projections(), bindings.facts(), bindings.candidates(), bindings.events(), bindings.actions(), bindings.capabilities());
+        new io.github.gmcnicol.kernel.application.TypedAuthorisationModel<>(Customer.TYPE, Set.of(Customer.NAME));
+        new io.github.gmcnicol.kernel.application.TypedAuthorisationModel<>(Customer.TYPE, Set.of(Customer.NAME), Set.of());
         return customer;
+    }
+
+    public static void readConsumer(io.github.gmcnicol.kernel.application.AuthorisedReads reads,
+            io.github.gmcnicol.kernel.application.ReadRequest<example.bindings.customer.crm.CustomerRead> request,
+            io.github.gmcnicol.kernel.application.ReadSource<example.bindings.customer.crm.CustomerRead> source) {
+        java.util.Optional<io.github.gmcnicol.kernel.application.AuthorisedRecord<example.bindings.customer.crm.CustomerRead>> one = reads.one(request, source);
+        java.util.List<io.github.gmcnicol.kernel.application.AuthorisedRecord<example.bindings.customer.crm.CustomerRead>> many = reads.many(request, source);
+        one.ifPresent(view -> {
+            io.github.gmcnicol.kernel.application.ReadValue<String> label = view.get(example.bindings.customer.crm.CustomerRead.READ_DETAILS_LABEL);
+        });
+    }
+
+    public static void indexedReadConsumer(io.github.gmcnicol.kernel.application.AuthorisedReads reads,
+            io.github.gmcnicol.kernel.application.ReadRequest<example.bindings.customer.crm.CustomerRead> request,
+            io.github.gmcnicol.kernel.application.AuthorisedIndex<example.bindings.customer.crm.CustomerRead> index) {
+        io.github.gmcnicol.kernel.application.ReadPage<example.bindings.customer.crm.CustomerRead> page =
+                reads.collection(request, index, io.github.gmcnicol.kernel.application.CollectionOptions.page(16));
+        reads.collection(request, index, new io.github.gmcnicol.kernel.application.CollectionOptions(16, 100, () -> false, page.continuation()));
+    }
+
+    public static void disclosureConsumer(io.github.gmcnicol.kernel.application.AuthorisedDisclosures disclosures,
+            io.github.gmcnicol.kernel.application.ReadRequest<example.bindings.customer.crm.CustomerRead> request,
+            io.github.gmcnicol.kernel.application.ReadSource<example.bindings.customer.crm.CustomerRead> source) {
+        var prepared = disclosures.prepare(request, source, "assistant", java.time.Duration.ofSeconds(30));
+        io.github.gmcnicol.kernel.application.AuthorisedDisclosures.Formatter<example.bindings.customer.crm.CustomerRead> formatter =
+                (views, output) -> {
+                    io.github.gmcnicol.kernel.application.ReadValue<String> label = views.getFirst().get(example.bindings.customer.crm.CustomerRead.READ_DETAILS_LABEL);
+                    output.write(label.visible() ? label.value().getBytes(java.nio.charset.StandardCharsets.UTF_8) : new byte[0]);
+                };
+        var response = disclosures.derive(prepared, request, "assistant", source, formatter,
+                (context, output) -> output.write(context.copy()));
+        disclosures.send(response, request, "assistant", source, bytes -> { });
+        var export = disclosures.prepare(request, source, "export", java.time.Duration.ofSeconds(30));
+        disclosures.send(export, request, "export", source, formatter, bytes -> { });
     }
 
     private static void rejects(Runnable parser) {

@@ -9,7 +9,13 @@ public record ProjectionType<I, P>(
         int contractVersion,
         SubjectType<I> subjectType,
         Class<P> javaType,
-        List<FieldType<P, ?>> fields) implements SemanticType<P> {
+        List<FieldType<P, ?>> fields,
+        List<ReadPath<P, ?>> readPaths) implements SemanticType<P> {
+
+    public ProjectionType(String qualifiedName, int contractVersion, SubjectType<I> subjectType,
+            Class<P> javaType, List<FieldType<P, ?>> fields) {
+        this(qualifiedName, contractVersion, subjectType, javaType, fields, List.of());
+    }
 
     public ProjectionType {
         if (qualifiedName == null || qualifiedName.isBlank() || contractVersion < 1) {
@@ -18,5 +24,6 @@ public record ProjectionType<I, P>(
         Objects.requireNonNull(subjectType, "subjectType");
         Objects.requireNonNull(javaType, "javaType");
         fields = List.copyOf(fields);
+        readPaths = List.copyOf(readPaths);
     }
 }

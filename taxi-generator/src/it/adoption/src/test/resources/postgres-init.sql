@@ -1,0 +1,4 @@
+CREATE ROLE kernel_runtime NOLOGIN NOINHERIT NOBYPASSRLS;
+CREATE ROLE kernel_worker NOLOGIN NOINHERIT NOBYPASSRLS;
+CREATE ROLE adoption_login LOGIN PASSWORD 'local-test' NOSUPERUSER NOBYPASSRLS NOINHERIT;
+GRANT kernel_runtime, kernel_worker TO adoption_login;

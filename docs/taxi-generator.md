@@ -16,11 +16,22 @@ The generator deliberately uses the Taxi compiler as the front-end. Taxi owns pa
 | `String`, `Boolean`, `Int`, `Long`, `Decimal`, `Double` | boxed Java value |
 | `Date`, `Time`, `DateTime`, `Instant` | `java.time` value |
 
-`@Subject`, `@Contract`, `@ProjectedState`, `@Fact`, `@Event`, and `@ActionService` generate typed descriptors and implementation slots. Candidate Payload role comes only from an Action operation input. `@Published` controls schema publication, not runtime authority.
+`@Subject`, `@Contract`, `@ProjectedState`, `@Fact`, `@Event`, `@ActionService`, and `@Capability` generate typed descriptors/inventories and the applicable implementation slots. Candidate Payload role comes only from an Action operation input. `@Published` controls schema publication, not runtime authority.
 
 Supported Services have named operations and supported parameter and return types. Ordinary Services are descriptions only. Action Services require exactly one named Candidate Payload and a non-empty Event array containing one Event model or a closed Event union.
 
 Generation rejects invalid Java identifiers, generated-name collisions, record component collisions, inheritance, aliases, general unions, recursion, maps, intersections, streams, constraints, computed expressions, anonymous or partial models, lenient or object-valued enums, unsupported primitives, malformed roles, and invalid Action signatures. Taxi compiler linter findings remain Maven warnings. Errors include source, line, column, and the unsupported construct.
+
+## Authorised-read output subset
+
+Generated model-bound `READ_...` paths expose only scalar and nested scalar leaves
+of generated Projection roots, including nullable scalars. General binding support
+for immutable lists does **not** make lists selectable for ordinary reads: parent,
+list (including scalar-list), recursive and whole structured-Fact output are closed.
+No raw DTO assignment is an authorised result. Query paths reuse the same generated
+leaf identity; Application SQL and Cedar query permissions remain authored, not generated.
+See [reads](authorised-reads.md), [version labels](migration-to-typed.md#current-version-labels-not-interchangeable)
+and the [packaged adoption consumer](../taxi-generator/src/it/adoption/README.md).
 
 ## Pinned imports
 

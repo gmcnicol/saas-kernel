@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>4.1.0</version><relativePath/></parent>
+  <groupId>example</groupId><artifactId>adoption</artifactId><version>1.0.0</version>
+  <properties><java.version>25</java.version><kernel.version>@project.version@</kernel.version><maven.deploy.skip>true</maven.deploy.skip></properties>
+  <dependencies>
+    <dependency><groupId>io.github.gmcnicol</groupId><artifactId>saas-kernel</artifactId><version>${kernel.version}</version></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jdbc</artifactId></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-flyway</artifactId></dependency>
+    <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><scope>runtime</scope></dependency>
+    <dependency><groupId>org.flywaydb</groupId><artifactId>flyway-database-postgresql</artifactId><scope>runtime</scope></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
+    <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-junit-jupiter</artifactId><version>2.0.5</version><scope>test</scope></dependency>
+    <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-postgresql</artifactId><version>2.0.5</version><scope>test</scope></dependency>
+  </dependencies>
+  <build><plugins>
+    <plugin>
+      <groupId>io.github.gmcnicol</groupId><artifactId>saas-kernel-taxi-generator</artifactId><version>${kernel.version}</version>
+      <configuration><sourceDirectory>${project.basedir}/src/main/resources/semantic-pack</sourceDirectory><basePackage>example.bindings</basePackage></configuration>
+      <executions><execution><goals><goal>generate</goal></goals></execution></executions>
+    </plugin>
+    <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-failsafe-plugin</artifactId>
+      <configuration><classesDirectory>${project.build.directory}/${project.build.finalName}.jar</classesDirectory></configuration>
+      <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+    </plugin>
+    <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-antrun-plugin</artifactId><version>3.2.0</version>
+      <executions><execution><id>checksums</id><phase>process-classes</phase><goals><goal>run</goal></goals><configuration><target>
+        <concat destfile="${project.build.directory}/semantic.manifest"><filelist dir="${project.build.outputDirectory}" files="semantic-pack/manifest.properties"/><filterchain><linecontainsregexp negate="true"><regexp pattern="^checksum="/></linecontainsregexp><fixcrlf eol="lf" fixlast="true"/></filterchain></concat>
+        <concat destfile="${project.build.directory}/semantic.content" binary="true"><filelist dir="${project.build.directory}" files="semantic.manifest"/><filelist dir="${project.build.outputDirectory}" files="semantic-pack/schema.taxi,META-INF/saas-kernel/semantic-index.properties,example/AdoptionApplication.class"/><sort><fileset dir="${project.build.outputDirectory}" includes="example/bindings/**/*.class"/></sort></concat>
+        <checksum file="${project.build.directory}/semantic.content" property="semantic.checksum" algorithm="SHA-256"/><echo file="${project.build.outputDirectory}/semantic-pack/checksum.sha256">${semantic.checksum}</echo>
+        <concat destfile="${project.build.directory}/authorisation.manifest"><filelist dir="${project.build.outputDirectory}" files="authorisation/manifest.properties"/><filterchain><linecontainsregexp negate="true"><regexp pattern="^checksum="/></linecontainsregexp><fixcrlf eol="lf" fixlast="true"/></filterchain></concat>
+        <concat destfile="${project.build.directory}/authorisation.content" binary="true"><filelist dir="${project.build.directory}" files="authorisation.manifest"/><filelist dir="${project.build.outputDirectory}" files="authorisation/schema.cedar,authorisation/policies.cedar,example/AdoptionApplication.class"/></concat>
+        <checksum file="${project.build.directory}/authorisation.content" property="authorisation.checksum" algorithm="SHA-256"/><echo file="${project.build.outputDirectory}/authorisation/checksum.sha256">${authorisation.checksum}</echo>
+      </target></configuration></execution></executions>
+    </plugin>
+  </plugins></build>
+</project>

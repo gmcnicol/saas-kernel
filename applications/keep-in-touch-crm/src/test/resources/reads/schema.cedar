@@ -1,0 +1,17 @@
+entity Owner;
+entity Viewer;
+entity NetworkId;
+action "typed/v1/io.github.gmcnicol.crm.NetworkContactRead.contactId.query" appliesTo { principal: [Owner, Viewer], resource: [NetworkId], context: Authority };
+action "typed/v1/io.github.gmcnicol.crm.NetworkContactRead.contactId" appliesTo { principal: [Owner, Viewer], resource: [NetworkContactId], context: Authority };
+action "typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details.displayName.query" appliesTo { principal: [Owner, Viewer], resource: [NetworkId], context: Authority };
+action "typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details.privateNote.query" appliesTo { principal: [Owner, Viewer], resource: [NetworkId], context: Authority };
+entity ContactId = { contactId: String, FollowUpDue?: { contactId: String } };
+entity NetworkContactId = { contactId: String, network: String, owner: String };
+type Authority = { capabilities: { EngageContact?: { remaining?: Long }, ExportContacts?: {} }, readScope: String };
+action "typed/v1/io.github.gmcnicol.crm.FollowUpDue" appliesTo { principal: [Owner, Viewer], resource: [ContactId] };
+action "typed/v1/io.github.gmcnicol.crm.TypedCrmActions.recordInteraction" appliesTo { principal: [Owner, Viewer], resource: [ContactId] };
+action "typed/v1/io.github.gmcnicol.crm.FollowUpProjection.contactId" appliesTo { principal: [Owner, Viewer], resource: [ContactId] };
+action "typed/v1/io.github.gmcnicol.crm.NetworkContactRead.read" appliesTo { principal: [Owner, Viewer], resource: [NetworkContactId], context: Authority };
+action "typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details" appliesTo { principal: [Owner, Viewer], resource: [NetworkContactId], context: Authority };
+action "typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details.displayName" appliesTo { principal: [Owner, Viewer], resource: [NetworkContactId], context: Authority };
+action "typed/v1/io.github.gmcnicol.crm.NetworkContactRead.details.privateNote" appliesTo { principal: [Owner, Viewer], resource: [NetworkContactId], context: Authority };

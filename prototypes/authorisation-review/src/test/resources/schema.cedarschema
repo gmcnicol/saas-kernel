@@ -1,0 +1,6 @@
+entity Principal = { tenant: String, scope: String, kind: String, actor: String, enabled: Bool };
+entity Resource = { tenant: String, scope: String, model: String, owner: String };
+action "read", "review.Contact.details", "review.Contact.details.displayName",
+       "review.Contact.details.email", "review.Contact.details.privateNote",
+       "review.Filing.details.reference", "review.Filing.details.workingNote"
+    appliesTo { principal: [Principal], resource: [Resource] };

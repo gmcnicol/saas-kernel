@@ -188,7 +188,7 @@ final class ApplicationValidator {
             expected.add(javaClass(basePackage + "." + service));
         });
         boolean bindings = index.types().stream().anyMatch(type -> Set.of(
-                        "PROJECTION", "FACT", "CANDIDATE", "EVENT").contains(type.role()))
+                        "PROJECTION", "FACT", "CANDIDATE", "EVENT", "CAPABILITY").contains(type.role()))
                 || !index.actions().isEmpty();
         if (bindings) expected.add(javaClass(basePackage + ".GeneratedSemanticBindings"));
         if (!index.actions().isEmpty()) expected.add(javaClass(basePackage + ".GeneratedSemanticRegistry"));
@@ -248,6 +248,11 @@ final class ApplicationValidator {
             indexedJavaType(type.subjectType().qualifiedName(), "SUBJECT",
                     type.subjectType().javaType().getName(), index.types());
         });
+        bindings.subjects().forEach(type -> indexedJavaType(type.qualifiedName(), "SUBJECT", type.javaType().getName(), index.types()));
+        Set<String> subjectNames = unique(bindings.subjects().stream().map(type -> type.qualifiedName()).toList(), "Subject descriptor");
+        Set<String> indexedSubjects = index.types().stream().filter(type -> type.role().equals("SUBJECT"))
+                .map(SemanticIndex.TypeEntry::qualifiedName).collect(Collectors.toSet());
+        if (!subjectNames.equals(indexedSubjects)) throw new IllegalStateException("Generated Subjects do not match Semantic Index");
         bindings.facts().forEach(type -> actualTypes.add(indexedType(
                 type.qualifiedName(), "FACT", type.contractVersion(),
                 type.javaType().getName(), type.projectionType().qualifiedName(), type.fields(), index.types())));
@@ -257,9 +262,13 @@ final class ApplicationValidator {
         bindings.events().forEach(type -> actualTypes.add(indexedType(
                 type.qualifiedName(), "EVENT", type.contractVersion(),
                 type.javaType().getName(), "", type.fields(), index.types())));
+        bindings.capabilities().forEach(type -> actualTypes.add(indexedType(
+                type.qualifiedName(), "CAPABILITY", type.contractVersion(),
+                type.javaType().getName(), "", type.fields(), index.types())));
         Set<String> expectedDurable = indexedTypes.stream()
                 .filter(value -> value.startsWith("PROJECTION|") || value.startsWith("FACT|")
-                        || value.startsWith("CANDIDATE|") || value.startsWith("EVENT|"))
+                        || value.startsWith("CANDIDATE|") || value.startsWith("EVENT|")
+                        || value.startsWith("CAPABILITY|"))
                 .collect(Collectors.toSet());
         if (!actualTypes.equals(expectedDurable)) {
             throw new IllegalStateException("Generated Semantic Bindings types do not match Semantic Index");
