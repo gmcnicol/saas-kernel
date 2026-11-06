@@ -546,6 +546,208 @@ index 9dd8b70..7659738 100644
  }
  
  /// Simple type that implements `Schema` by expecting no entities to exist at all
+diff --git a/cedar-policy-core/src/evaluator.rs b/cedar-policy-core/src/evaluator.rs
+index 8c9ca78..5e7c092 100644
+--- a/cedar-policy-core/src/evaluator.rs
++++ b/cedar-policy-core/src/evaluator.rs
+@@ -372,6 +372,28 @@ impl<'e> Evaluator<'e> {
+                 PartialValue::Residual(r) => Ok(PartialValue::Residual(Expr::unary_app(*op, r))),
+             },
+             ExprKind::BinaryApp { op, arg1, arg2 } => {
++                // Literal Action scopes cannot error, so borrow their UIDs instead
++                // of materializing a temporary Value set for every policy visit.
++                if let (BinaryOp::In, ExprKind::Var(Var::Action), ExprKind::Set(items), Some(uid)) =
++                    (op, arg1.expr_kind(), arg2.expr_kind(), self.action.uid())
++                {
++                    if items.iter().all(|item| matches!(item.expr_kind(), ExprKind::Lit(Literal::EntityUID(_)))) {
++                        let entity = match self.entities.entity(uid) {
++                            Dereference::Data(entity) => Some(Some(entity)),
++                            Dereference::NoSuchEntity => Some(None),
++                            // Even an empty set must retain the original residual.
++                            Dereference::Residual(_) => None,
++                        };
++                        if let Some(entity) = entity {
++                            return Ok(Self::entity_in(uid, entity, items.iter().filter_map(|item| {
++                                match item.expr_kind() {
++                                    ExprKind::Lit(Literal::EntityUID(uid)) => Some(uid.as_ref()),
++                                    _ => None,
++                                }
++                            })).into());
++                        }
++                    }
++                }
+                 // NOTE: There are more precise partial eval opportunities here, esp w/ typed unknowns
+                 // Current limitations:
+                 //   Operators are not partially evaluated.
+@@ -699,18 +721,17 @@ impl<'e> Evaluator<'e> {
+                 ))
+             }
+         };
+-        for uid2 in rhs {
+-            if uid1 == &uid2
+-                || entity1
+-                    .map(|e1| e1.is_descendant_of(&uid2))
+-                    .unwrap_or(false)
+-            {
+-                return Ok(true.into());
+-            }
+-        }
+-        // if we get here, `uid1` is not a descendant of (or equal to)
+-        // any UID in `rhs`
+-        Ok(false.into())
++        Ok(Self::entity_in(uid1, entity1, rhs.iter()).into())
++    }
++
++    fn entity_in<'a>(
++        uid1: &EntityUID,
++        entity1: Option<&Entity>,
++        mut rhs: impl Iterator<Item = &'a EntityUID>,
++    ) -> bool {
++        rhs.any(|uid2| {
++            uid1 == uid2 || entity1.map(|e1| e1.is_descendant_of(uid2)).unwrap_or(false)
++        })
+     }
+ 
+     /// Evaluation of conditionals
+diff --git a/cedar-policy-core/tests/literal_action_membership.rs b/cedar-policy-core/tests/literal_action_membership.rs
+new file mode 100644
+index 0000000..ddff02f
+--- /dev/null
++++ b/cedar-policy-core/tests/literal_action_membership.rs
+@@ -0,0 +1,133 @@
++/*
++ * Copyright Cedar Contributors
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++use cedar_policy_core::{
++    ast::*,
++    entities::{Entities, NoEntitiesSchema, TCComputation},
++    evaluator::Evaluator,
++    extensions::Extensions,
++    parser,
++};
++use std::{collections::{HashMap, HashSet}, sync::Arc};
++
++fn parse_expr(source: &str) -> Result<Expr, cedar_policy_core::parser::err::ParseErrors> {
++    source.parse()
++}
++
++fn request(action: EntityUIDEntry) -> Request {
++    Request::new_unchecked(
++        EntityUIDEntry::known("User::\"u\"".parse().unwrap(), None),
++        action,
++        EntityUIDEntry::known("Row::\"r\"".parse().unwrap(), None),
++        Some(Context::empty()),
++    )
++}
++
++// A computed LHS takes the original generic membership path, with identical
++// values and source locations, without a test-only engine switch.
++fn generic(expr: &Expr) -> Expr {
++    let ExprKind::BinaryApp { op, arg1, arg2 } = expr.expr_kind() else {
++        panic!("expected binary expression");
++    };
++    Expr::binary_app(
++        *op,
++        Expr::ite(Expr::val(true), arg1.as_ref().clone(), arg1.as_ref().clone())
++            .with_maybe_source_loc(arg1.source_loc().cloned()),
++        arg2.as_ref().clone(),
++    )
++    .with_maybe_source_loc(expr.source_loc().cloned())
++}
++
++fn compare(eval: &Evaluator<'_>, expr: &Expr, slots: &SlotEnv) {
++    let actual = eval.partial_interpret(expr, slots);
++    let expected = eval.partial_interpret(&generic(expr), slots);
++    // Debug includes errors, residual structure and every nested source location.
++    assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "{expr}");
++}
++
++#[test]
++fn literal_action_membership_matches_generic_values_errors_and_locations() {
++    let child = Entity::new("Ns::Action::\"read\"".parse().unwrap(), [],
++        HashSet::from(["Ns::Action::\"parent\"".parse().unwrap()]), [], Extensions::all_available()).unwrap();
++    let entities = Entities::from_entities(
++        [child], None::<&NoEntitiesSchema>, TCComputation::ComputeNow, Extensions::all_available(),
++    ).unwrap();
++    let slots = HashMap::new();
++    for action in ["Ns::Action::\"read\"", "Ns::Action::\"parent\"", "Ns::Action::\"absent\"", "Other::Action::\"read\""] {
++        let eval = Evaluator::new(request(EntityUIDEntry::known(action.parse().unwrap(), None)), &entities, Extensions::all_available());
++        for source in [
++            "action in []",
++            "action in [Ns::Action::\"read\"]",
++            "action in [Ns::Action::\"parent\"]",
++            "action in [Ns::Action::\"absent\"]",
++            "action in [Ns::Action::\"read\", Ns::Action::\"read\"]",
++            "action in [Ns::Action::\"unrelated\", Ns::Action::\"parent\"]",
++            "action in [Other::Action::\"read\"]",
++            "action in [Ns::Action::\"read\", 1]",
++            "action in [1, Ns::Action::\"read\"]",
++            "action in [principal, resource]",
++            "action in (if true then [Ns::Action::\"read\"] else [])",
++            "action in [context.missing]",
++            "action in Ns::Action::\"parent\"",
++            "action in 1",
++            "action in {}",
++            "1 in [Ns::Action::\"read\"]",
++            "principal in [Ns::Action::\"read\"]",
++        ] {
++            compare(&eval, &parse_expr(source).unwrap(), &slots);
++        }
++        let matching = parse_expr(&format!("action in [{action}]")).unwrap();
++        assert_eq!(eval.interpret(&matching, &slots).unwrap(), Value::new(true, None));
++        let bad = parse_expr("context.missing").unwrap();
++        let no_match = parse_expr("action in [Ns::Action::\"unrelated\"]").unwrap();
++        assert_eq!(eval.interpret(&Expr::and(no_match, bad.clone()), &slots).unwrap(), Value::new(false, None));
++        assert!(eval.interpret(&Expr::and(matching, bad), &slots).is_err());
++    }
++}
++
++#[cfg(feature = "partial-eval")]
++#[test]
++fn partial_actions_and_entity_stores_keep_residual_shape_and_locations() {
++    let known = Entity::with_uid("Ns::Action::\"known\"".parse().unwrap());
++    let entities = Entities::from_entities(
++        [known], None::<&NoEntitiesSchema>, TCComputation::ComputeNow, Extensions::all_available(),
++    ).unwrap().partial();
++    for action in [
++        EntityUIDEntry::Unknown { loc: None },
++        EntityUIDEntry::known("Ns::Action::\"absent\"".parse().unwrap(), None),
++        EntityUIDEntry::known("Ns::Action::\"known\"".parse().unwrap(), None),
++    ] {
++        let eval = Evaluator::new(request(action), &entities, Extensions::all_available());
++        for source in [
++            "action in []",
++            "action in [Ns::Action::\"absent\"]",
++            "action in [Ns::Action::\"known\", Ns::Action::\"known\"]",
++            "action in [Ns::Action::\"other\", Ns::Action::\"known\"]",
++            "action in [1, Ns::Action::\"known\"]",
++            "action in [unknown(\"rhs\")]",
++        ] {
++            compare(&eval, &parse_expr(source).unwrap(), &HashMap::new());
++        }
++    }
++}
++
++#[test]
++fn literal_action_scopes_keep_link_environments_and_short_circuit_errors() {
++    let entities = Entities::new();
++    let eval = Evaluator::new(request(EntityUIDEntry::known("Action::\"read\"".parse().unwrap(), None)), &entities, Extensions::all_available());
++    let template = Arc::new(parser::parse_template(None,
++        "permit(principal == ?principal, action in [Action::\"read\", Action::\"other\"], resource == ?resource) when { context.missing };").unwrap());
++    for (principal, errors) in [("u", true), ("other", false)] {
++        let policy = Template::link(template.clone(), PolicyID::from_string(principal), HashMap::from([
++            (SlotId::principal(), format!("User::\"{principal}\"").parse().unwrap()),
++            (SlotId::resource(), "Row::\"r\"".parse().unwrap()),
++        ])).unwrap();
++        let result = eval.evaluate(&policy);
++        if errors { assert!(result.is_err()); } else { assert!(!result.unwrap()); }
++    }
++    let unlinked = parse_expr("action in [?principal]").unwrap();
++    compare(&eval, &unlinked, &HashMap::new());
++    compare(&eval, &unlinked, &HashMap::from([(SlotId::principal(), "Action::\"read\"".parse().unwrap())]));
++}
 diff --git a/cedar-policy-validator/src/coreschema.rs b/cedar-policy-validator/src/coreschema.rs
 index a199918..d389913 100644
 --- a/cedar-policy-validator/src/coreschema.rs

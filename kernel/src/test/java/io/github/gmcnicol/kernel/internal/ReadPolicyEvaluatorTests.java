@@ -63,7 +63,7 @@ class ReadPolicyEvaluatorTests {
                 .mapToObj(i -> "action unused" + i + ";").collect(java.util.stream.Collectors.joining());
         var schema = new Schema("entity User; entity Row { visible?: Bool }; action group; action unrelated in [Action::\"group\"]; "
                 + "action read appliesTo { principal: User, resource: Row, context: {} }; " + extras);
-        var policies = PolicySet.parsePolicies("permit(principal, action == Action::\"read\", resource) when { "
+        var policies = PolicySet.parsePolicies("permit(principal, action in [Action::\"read\", Action::\"group\"], resource) when { "
                 + "Action::\"unrelated\" in Action::\"group\" && resource.visible };");
         try (var sdk = ReadPolicyEvaluator.create(schema, policies, "sdk", new SimpleMeterRegistry());
              var prepared = ReadPolicyEvaluator.create(schema, policies, "prepared", new SimpleMeterRegistry())) {

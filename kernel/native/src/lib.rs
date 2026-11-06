@@ -819,6 +819,51 @@ mod tests {
     }
 
     #[test]
+    fn prepared_scalar_borrows_literal_action_constraints() {
+        // Fixed schema, fresh same-UID private data, and every policy checked.
+        // Extra false Action scopes must not build request-local literal sets.
+        let actions = (0..64).map(|n| format!("action a{n} appliesTo {{ principal: User, resource: Row, context: {{}} }};")).collect::<String>();
+        let schema = format!("entity User {{ ok?: Bool }}; entity Row; action read appliesTo {{ principal: User, resource: Row, context: {{}} }}; {actions}");
+        let mut costs = Vec::new();
+        for (count, width) in [(1, 1), (47, 1), (47, 8)] {
+            let mut policies = serde_json::Map::new();
+            policies.insert("permit".into(), serde_json::json!("permit(principal, action in [Action::\"read\"], resource) when { principal.ok };"));
+            for n in 1..count {
+                let scope = (0..width).map(|i| format!("Action::\"a{}\"", (n + i) % 64)).collect::<Vec<_>>().join(",");
+                policies.insert(format!("unrelated{n}"), serde_json::json!(format!("permit(principal, action in [{scope}], resource);")));
+            }
+            let id = prepare(serde_json::json!({"schema":schema, "policies":policies}).to_string()).unwrap();
+            let mut samples = Vec::new();
+            for value in [Some(true), Some(false), None, Some(false), Some(true), None] {
+                let attrs = value.map(|ok| serde_json::json!({"ok":ok})).unwrap_or(serde_json::json!({}));
+                let text = serde_json::json!({
+                    "principal":{"type":"User", "id":"u"}, "action":{"type":"Action", "id":"read"},
+                    "resource":{"type":"Row", "id":"r"}, "context":{},
+                    "entities":[{"uid":{"type":"User", "id":"u"}, "attrs":attrs, "parents":[]}]
+                }).to_string();
+                let before = LOCAL_ACCOUNTING.with(Cell::get);
+                let evaluations = EVALUATIONS.load(Ordering::Relaxed);
+                let answer = evaluate(id, text, Instant::now() + Duration::from_secs(1)).unwrap();
+                let after = LOCAL_ACCOUNTING.with(Cell::get);
+                assert_eq!(answer, MAGIC | match value { Some(true) => 1, Some(false) => 0, None => 1 << 16 });
+                assert_eq!(EVALUATIONS.load(Ordering::Relaxed), evaluations + 1);
+                samples.push((after.bytes - before.bytes, after.count - before.count));
+            }
+            close(id).unwrap();
+            costs.push(samples);
+        }
+        eprintln!("literal Action policy count/width 1/1,47/1,47/8 scalar costs (bytes, allocations): {costs:?}");
+        for (one, many) in costs[0].iter().zip(&costs[2]) {
+            // Preserve Authorizer's growing false-policy diagnostic containers;
+            // exclude temporary eight-UID Vec/BTreeSet/HashSet/Value containers.
+            assert!(many.0 <= one.0 + 46 * 256 && many.1 <= one.1 + 46,
+                "literal Action sets must stay immutable during evaluation: {costs:?}");
+        }
+        assert_eq!(costs[1], costs[2],
+            "widening visited literal Action sets must not allocate per scalar");
+    }
+
+    #[test]
     fn job_local_accounting_records_requested_bytes_without_losing_global_totals() {
         let before_local = local_allocated();
         let before_global = ALLOCATED.load(Ordering::Relaxed);
