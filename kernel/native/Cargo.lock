@@ -142,7 +142,6 @@ dependencies = [
 [[package]]
 name = "cedar-policy"
 version = "4.2.2"
-source = "git+https://github.com/cedar-policy/cedar?rev=09e21d967f1da2cf2abbe1e0b0b2067b41867735#09e21d967f1da2cf2abbe1e0b0b2067b41867735"
 dependencies = [
  "cedar-policy-core",
  "cedar-policy-formatter",
@@ -164,7 +163,6 @@ dependencies = [
 [[package]]
 name = "cedar-policy-core"
 version = "4.2.2"
-source = "git+https://github.com/cedar-policy/cedar?rev=09e21d967f1da2cf2abbe1e0b0b2067b41867735#09e21d967f1da2cf2abbe1e0b0b2067b41867735"
 dependencies = [
  "either",
  "itertools 0.13.0",
@@ -187,7 +185,6 @@ dependencies = [
 [[package]]
 name = "cedar-policy-formatter"
 version = "4.2.2"
-source = "git+https://github.com/cedar-policy/cedar?rev=09e21d967f1da2cf2abbe1e0b0b2067b41867735#09e21d967f1da2cf2abbe1e0b0b2067b41867735"
 dependencies = [
  "cedar-policy-core",
  "itertools 0.13.0",
@@ -202,7 +199,6 @@ dependencies = [
 [[package]]
 name = "cedar-policy-validator"
 version = "4.2.2"
-source = "git+https://github.com/cedar-policy/cedar?rev=09e21d967f1da2cf2abbe1e0b0b2067b41867735#09e21d967f1da2cf2abbe1e0b0b2067b41867735"
 dependencies = [
  "cedar-policy-core",
  "itertools 0.13.0",

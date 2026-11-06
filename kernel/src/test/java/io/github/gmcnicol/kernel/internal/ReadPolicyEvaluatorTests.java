@@ -32,6 +32,32 @@ class ReadPolicyEvaluatorTests {
             }
         }
     }
+    @Test void linkedScopesActionHierarchyAndFreshContextMatchOriginalSdk() throws Exception {
+        var schema = new Schema("entity User; entity Row { visible: Bool, blocked: Bool }; action group; action read in [Action::\"group\"] appliesTo { principal: User, resource: Row, context: { enabled: Bool } };");
+        var template = new com.cedarpolicy.model.policy.Policy(
+                "permit(principal == ?principal, action in [Action::\"group\"], resource == ?resource) when { resource.visible } unless { !context.enabled };", "template");
+        var links = new ArrayList<com.cedarpolicy.model.policy.TemplateLink>();
+        for (String id : List.of("one", "two")) links.add(new com.cedarpolicy.model.policy.TemplateLink("template", "link-" + id,
+                List.of(new com.cedarpolicy.model.policy.LinkValue("?principal", EntityUID.parse("User::\"" + id + "\"").orElseThrow()),
+                        new com.cedarpolicy.model.policy.LinkValue("?resource", EntityUID.parse("Row::\"" + id + "\"").orElseThrow()))));
+        var policies = new PolicySet(Set.of(new com.cedarpolicy.model.policy.Policy(
+                "forbid(principal, action, resource) when { resource.blocked };", "forbid")), Set.of(template), links);
+        try (var sdk = ReadPolicyEvaluator.create(schema, policies, "sdk", new SimpleMeterRegistry());
+             var prepared = ReadPolicyEvaluator.create(schema, policies, "prepared", new SimpleMeterRegistry())) {
+            for (String user : List.of("one", "two", "other")) for (String row : List.of("one", "two"))
+                for (boolean enabled : List.of(true, false)) for (boolean visible : List.of(true, false))
+                    for (boolean blocked : List.of(true, false)) {
+                        var attrs = Map.<String, Value>of("visible", new PrimBool(visible), "blocked", new PrimBool(blocked));
+                        var context = Map.<String, Value>of("enabled", new PrimBool(enabled));
+                        var expected = user.equals(row) && enabled && visible && !blocked ? ReadDecision.ALLOW : ReadDecision.DENY;
+                        assertThat(sdk.evaluate(new Principal("User", user), "Row", row, attrs, "read", context, System.nanoTime() + 1_000_000_000L))
+                                .isEqualTo(expected);
+                        assertThat(prepared.evaluate(new Principal("User", user), "Row", row, attrs, "read", context, System.nanoTime() + 1_000_000_000L))
+                                .isEqualTo(expected);
+                    }
+        }
+    }
+
     @Test void schemaWarningsAndErroredPermitsNeverBecomeCleanAllows() throws Exception {
         for (String warningEntity : List.of("", "entity String;")) {
             var schema = new Schema(warningEntity + " entity User; entity Row { missing?: Bool }; action read appliesTo { principal: User, resource: Row, context: {} };");

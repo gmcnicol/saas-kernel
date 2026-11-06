@@ -11,6 +11,25 @@ class PreparedCedarEvaluatorTests {
     static final String SCHEMA = "entity User; entity Row { visible: Bool, blocked: Bool }; action read appliesTo { principal: User, resource: Row, context: {} };";
     static final Map<String, String> POLICIES = Map.of("permit", "permit(principal, action, resource) when { resource.visible };",
             "forbid", "forbid(principal, action, resource) when { resource.blocked };");
+    @Test void packagedIdentityIncludesTheEffectivePatchAndDependencyLock() throws Exception {
+        CedarNativeLibrary.load();
+        String root = "/META-INF/saas-kernel/native/";
+        var properties = new Properties();
+        try (var metadata = getClass().getResourceAsStream(root + "build.properties");
+             var patch = getClass().getResourceAsStream(root + "source/patches/prepared-condition.patch");
+             var lock = getClass().getResourceAsStream(root + "Cargo.lock")) {
+            properties.load(Objects.requireNonNull(metadata));
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            String patchHash = HexFormat.of().formatHex(digest.digest(Objects.requireNonNull(patch).readAllBytes()));
+            assertThat(properties.getProperty("cedar.patch.sha256")).isEqualTo(patchHash);
+            assertThat(properties.getProperty("cedar.source")).isEqualTo(
+                    "09e21d967f1da2cf2abbe1e0b0b2067b41867735+patch.sha256:" + patchHash);
+            assertThat(NativeCedar.identity()).isEqualTo(properties.getProperty("abi") + ";cedar/" + properties.getProperty("cedar.source"));
+            assertThat(HexFormat.of().formatHex(digest.digest(Objects.requireNonNull(lock).readAllBytes())))
+                    .isEqualTo(properties.getProperty("cargo.lock.sha256"));
+        }
+    }
+
     @Test void closedHandlesCannotBeReusedOrGrantAuthorityToAnotherAssembly() {
         var evaluator = PreparedCedarEvaluator.open(SCHEMA, POLICIES);
         assertThat(evaluator.evaluate(request(true, false), System.nanoTime() + 1_000_000_000L)).isEqualTo(ReadDecision.ALLOW);

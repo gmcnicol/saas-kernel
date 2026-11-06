@@ -563,7 +563,7 @@ pub extern "system" fn Java_io_github_gmcnicol_kernel_internal_NativeCedar_ident
 ) -> jstring {
     FFI_ENTRIES.fetch_add(1, Ordering::Relaxed);
     let result = env
-        .new_string("kernel-cedar/1;cedar/09e21d967f1da2cf2abbe1e0b0b2067b41867735")
+        .new_string(concat!("kernel-cedar/1;cedar/09e21d967f1da2cf2abbe1e0b0b2067b41867735+patch.sha256:", env!("KERNEL_CEDAR_PATCH_SHA256")))
         .map(|s| s.into_raw())
         .unwrap_or(std::ptr::null_mut());
     flush_allocations();
@@ -717,6 +717,40 @@ pub extern "system" fn JNI_OnUnload(_: *mut jni::sys::JavaVM, _: *mut std::ffi::
 mod tests {
     use super::*;
     #[test]
+    fn prepared_scalar_does_not_rebuild_unvisited_action_scope() {
+        // A false principal scope short-circuits the Action set. Widening that
+        // immutable, unvisited set must not allocate during scalar evaluation.
+        let request = serde_json::json!({
+            "principal": {"type":"User", "id":"u"}, "action":{"type":"Action", "id":"read"},
+            "resource":{"type":"Row", "id":"r"}, "context":{}, "entities":[]
+        }).to_string();
+        let mut costs = Vec::new();
+        for width in [1, 64] {
+            let actions = (0..width).map(|n| format!("Action::\"a{n}\""))
+                .collect::<Vec<_>>().join(",");
+            let source = serde_json::json!({
+                "schema": "entity User; entity Row; action read appliesTo { principal: User, resource: Row, context: {} };",
+                "policies": {"irrelevant": format!("permit(principal == User::\"other\", action in [{actions}], resource);")}
+            }).to_string();
+            let id = prepare(source).unwrap();
+            for _ in 0..3 {
+                let text = request.clone();
+                let before = LOCAL_ACCOUNTING.with(Cell::get);
+                let evaluations = EVALUATIONS.load(Ordering::Relaxed);
+                let answer = evaluate(id, text, Instant::now() + Duration::from_secs(1)).unwrap();
+                let after = LOCAL_ACCOUNTING.with(Cell::get);
+                assert_eq!(answer, MAGIC);
+                assert_eq!(EVALUATIONS.load(Ordering::Relaxed), evaluations + 1);
+                costs.push((after.bytes - before.bytes, after.count - before.count));
+            }
+            close(id).unwrap();
+        }
+        eprintln!("allocation-only scalar costs (bytes, allocations): {costs:?}");
+        assert!(costs.iter().all(|cost| *cost == costs[0]),
+            "unvisited prepared scope must not add decision-local allocations: {costs:?}");
+    }
+
+    #[test]
     fn job_local_accounting_records_requested_bytes_without_losing_global_totals() {
         let before_local = local_allocated();
         let before_global = ALLOCATED.load(Ordering::Relaxed);
@@ -774,6 +808,41 @@ mod tests {
             if expected != EXPIRED { assert_eq!(late, original); }
             else { assert_eq!(original, MAGIC | 1); }
         }
+    }
+
+    #[test]
+    fn closing_an_admitted_scalar_retains_its_ast_but_never_reuses_the_token() {
+        let source = serde_json::json!({
+            "schema": "entity User; entity Row; action read appliesTo { principal: User, resource: Row, context: {} };",
+            "policies": {"permit": "permit(principal, action == Action::\"read\", resource);"}
+        }).to_string();
+        let request = serde_json::json!({
+            "principal": {"type":"User", "id":"u"}, "action":{"type":"Action", "id":"read"},
+            "resource":{"type":"Row", "id":"r"}, "context":{}, "entities":[]
+        }).to_string();
+        let id = prepare(source.clone()).unwrap();
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        let mut checks = 0;
+        let answer = evaluate_with_clock(id, request.clone(), deadline, || {
+            checks += 1;
+            // This checkpoint is after the bundle Arc is acquired and all fresh
+            // inputs validated, but before the actual Authorizer evaluates it.
+            if checks == 2 { close(id).unwrap(); }
+            now
+        }).unwrap();
+        assert_eq!(checks, 3);
+        assert_eq!(answer, MAGIC | 1);
+        assert!(evaluate(id, request.clone(), deadline).is_err());
+        assert!(close(id).is_err());
+        let fresh = prepare(source).unwrap();
+        assert!(fresh > id);
+        assert_eq!(evaluate(fresh, request, deadline).unwrap(), MAGIC | 1);
+        close(fresh).unwrap();
+        let mut r = registry().lock().unwrap();
+        r.prune();
+        assert!(r.handles.is_empty());
+        assert!(r.cache.is_empty());
     }
 
     #[test]

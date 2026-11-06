@@ -1,0 +1,90 @@
+diff --git a/cedar-policy-core/src/ast/policy.rs b/cedar-policy-core/src/ast/policy.rs
+index 1e003c0..9c092f5 100644
+--- a/cedar-policy-core/src/ast/policy.rs
++++ b/cedar-policy-core/src/ast/policy.rs
+@@ -32,7 +32,7 @@ extern crate tsify;
+ /// Contains both the AST for template, and the list of open slots in the template.
+ ///
+ /// Note that this "template" may have no slots, in which case this `Template` represents a static policy
+-#[derive(Clone, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
++#[derive(Clone, Serialize, Deserialize)]
+ #[serde(from = "TemplateBody")]
+ #[serde(into = "TemplateBody")]
+ pub struct Template {
+@@ -42,6 +42,31 @@ pub struct Template {
+     ///
+     /// Note that `slots` may be empty, in which case this `Template` represents a static policy
+     slots: Vec<Slot>,
++    // Derived eagerly from the immutable body; slots remain unbound and are
++    // interpreted with each linked policy's own environment.
++    condition: Expr,
++}
++
++// Derived preparation state is not part of identity, hashing, or diagnostics.
++impl PartialEq for Template {
++    fn eq(&self, other: &Self) -> bool {
++        self.body == other.body && self.slots == other.slots
++    }
++}
++impl Eq for Template {}
++impl std::hash::Hash for Template {
++    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
++        self.body.hash(state);
++        self.slots.hash(state);
++    }
++}
++impl std::fmt::Debug for Template {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("Template")
++            .field("body", &self.body)
++            .field("slots", &self.slots)
++            .finish()
++    }
+ }
+ 
+ impl From<Template> for TemplateBody {
+@@ -156,6 +181,7 @@ impl Template {
+         Template {
+             body: self.body.new_id(id),
+             slots: self.slots.clone(),
++            condition: self.condition.clone(),
+         }
+     }
+ 
+@@ -190,7 +216,7 @@ impl Template {
+     /// principal, resource, and action); the template's "when" conditions; and
+     /// the negation of each of the template's "unless" conditions.
+     pub fn condition(&self) -> Expr {
+-        self.body.condition()
++        self.condition.clone()
+     }
+ 
+     /// List of open slots in this template
+@@ -265,9 +291,11 @@ impl Template {
+         // INVARIANT (slot cache correctness):
+         // StaticPolicy by invariant (inline policy correctness)
+         // can have no slots, so it is safe to make `slots` the empty vec
++        let condition = body.condition();
+         let t = Arc::new(Self {
+             body,
+             slots: vec![],
++            condition,
+         });
+         #[cfg(test)]
+         {
+@@ -287,8 +315,13 @@ impl From<TemplateBody> for Template {
+     fn from(body: TemplateBody) -> Self {
+         // INVARIANT: (slot cache correctness)
+         // Pull all the slots out of the template body's condition.
+-        let slots = body.condition().slots().collect::<Vec<_>>();
+-        Self { body, slots }
++        let condition = body.condition();
++        let slots = condition.slots().collect::<Vec<_>>();
++        Self {
++            body,
++            slots,
++            condition,
++        }
+     }
+ }
+ 

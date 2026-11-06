@@ -121,7 +121,7 @@
             <resource>
                 <directory>native</directory>
                 <targetPath>META-INF/saas-kernel/native/source</targetPath>
-                <includes><include>Cargo.toml</include><include>Cargo.lock</include><include>src/**/*.rs</include><include>build.sh</include></includes>
+                <includes><include>Cargo.toml</include><include>Cargo.lock</include><include>src/**/*.rs</include><include>build.sh</include><include>patches/*.patch</include></includes>
             </resource>
         </resources>
         <plugins>
