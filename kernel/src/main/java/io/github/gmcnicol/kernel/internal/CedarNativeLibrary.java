@@ -45,7 +45,7 @@ final class CedarNativeLibrary {
             Files.write(path, bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
             Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"));
             System.load(path.toAbsolutePath().toString());
-            if (!NativeCedar.identity().equals("kernel-cedar/1;cedar/09e21d967f1da2cf2abbe1e0b0b2067b41867735+patch.sha256:e9f8f8d91560ab06e6cab7b0d0a5693813e7ceb5486807adc917b7a66668775f")) throw new IllegalStateException("Packaged Cedar ABI mismatch");
+            if (!NativeCedar.identity().equals("kernel-cedar/1;cedar/09e21d967f1da2cf2abbe1e0b0b2067b41867735+patch.sha256:59b08f5f07d861dfe3c4c1481a95692cdab47dca1a130624731ef92f85ba73b1")) throw new IllegalStateException("Packaged Cedar ABI mismatch");
             loaded = true;
         } catch (java.io.IOException failure) { throw new IllegalStateException("Cannot load packaged Cedar native resource"); }
         finally {

@@ -1,3 +1,73 @@
+diff --git a/cedar-policy-core/src/ast/entity.rs b/cedar-policy-core/src/ast/entity.rs
+index 2a9ae99..0b536c6 100644
+--- a/cedar-policy-core/src/ast/entity.rs
++++ b/cedar-policy-core/src/ast/entity.rs
+@@ -304,7 +304,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Eid {
+ #[derive(Debug, Clone, Serialize)]
+ pub struct Entity {
+     /// UID
+-    uid: EntityUID,
++    uid: Arc<EntityUID>,
+ 
+     /// Internal BTreMap of attributes.
+     /// We use a btreemap so that the keys have a deterministic order.
+@@ -366,7 +366,7 @@ impl Entity {
+             .map(|kv| evaluate_kvs(kv, false))
+             .collect::<Result<_, EntityAttrEvaluationError>>()?;
+         Ok(Entity {
+-            uid,
++            uid: Arc::new(uid),
+             attrs: evaluated_attrs,
+             ancestors,
+             tags: evaluated_tags,
+@@ -403,7 +403,7 @@ impl Entity {
+         ancestors: HashSet<EntityUID>,
+     ) -> Self {
+         Entity {
+-            uid,
++            uid: Arc::new(uid),
+             attrs,
+             ancestors,
+             tags: BTreeMap::new(),
+@@ -415,6 +415,11 @@ impl Entity {
+         &self.uid
+     }
+ 
++    /// Share immutable UID storage with entity-store keys.
++    pub(crate) fn uid_arc(&self) -> Arc<EntityUID> {
++        Arc::clone(&self.uid)
++    }
++
+     /// Get the value for the given attribute, or `None` if not present
+     pub fn get(&self, attr: &str) -> Option<&PartialValue> {
+         self.attrs.get(attr).map(|v| v.as_ref())
+@@ -468,7 +473,7 @@ impl Entity {
+     /// Create an `Entity` with the given UID, no attributes, no parents, and no tags.
+     pub fn with_uid(uid: EntityUID) -> Self {
+         Self {
+-            uid,
++            uid: Arc::new(uid),
+             attrs: BTreeMap::new(),
+             ancestors: HashSet::new(),
+             tags: BTreeMap::new(),
+@@ -486,7 +491,7 @@ impl Entity {
+     // Only used for convenience in some tests
+     #[cfg(test)]
+     pub fn set_uid(&mut self, uid: EntityUID) {
+-        self.uid = uid;
++        self.uid = Arc::new(uid);
+     }
+ 
+     /// Set the given attribute to the given value.
+@@ -545,7 +550,7 @@ impl Entity {
+             tags,
+         } = self;
+         (
+-            uid,
++            Arc::unwrap_or_clone(uid),
+             attrs.into_iter().map(|(k, v)| (k, v.0)).collect(),
+             ancestors,
+             tags.into_iter().map(|(k, v)| (k, v.0)).collect(),
 diff --git a/cedar-policy-core/src/ast/policy.rs b/cedar-policy-core/src/ast/policy.rs
 index 1e003c0..9c092f5 100644
 --- a/cedar-policy-core/src/ast/policy.rs
@@ -88,3 +158,188 @@ index 1e003c0..9c092f5 100644
      }
  }
  
+diff --git a/cedar-policy-core/src/entities.rs b/cedar-policy-core/src/entities.rs
+index 39a7a52..cfb7c9f 100644
+--- a/cedar-policy-core/src/entities.rs
++++ b/cedar-policy-core/src/entities.rs
+@@ -58,7 +58,7 @@ pub struct Entities {
+     /// Important internal invariant: for any `Entities` object that exists, the
+     /// the `ancestor` relation is transitively closed.
+     #[serde_as(as = "Vec<(_, _)>")]
+-    entities: HashMap<EntityUID, Arc<Entity>>,
++    entities: HashMap<Arc<EntityUID>, Arc<Entity>>,
+ 
+     /// The mode flag determines whether this store functions as a partial store or
+     /// as a fully concrete store.
+@@ -130,12 +130,14 @@ impl Entities {
+         tc_computation: TCComputation,
+         extensions: &Extensions<'_>,
+     ) -> Result<Self> {
++        // Graph helpers use owned UIDs; only this mutating path needs to rebuild them.
++        let mut entity_map = create_entity_map(self.entities.into_values())?;
+         let checker = schema.map(|schema| EntitySchemaConformanceChecker::new(schema, extensions));
+         for entity in collection.into_iter() {
+             if let Some(checker) = checker.as_ref() {
+                 checker.validate_entity(&entity)?;
+             }
+-            match self.entities.entry(entity.uid().clone()) {
++            match entity_map.entry(entity.uid().clone()) {
+                 hash_map::Entry::Occupied(_) => {
+                     return Err(EntitiesError::duplicate(entity.uid().clone()))
+                 }
+@@ -146,9 +148,10 @@ impl Entities {
+         }
+         match tc_computation {
+             TCComputation::AssumeAlreadyComputed => (),
+-            TCComputation::EnforceAlreadyComputed => enforce_tc_and_dag(&self.entities)?,
+-            TCComputation::ComputeNow => compute_tc(&mut self.entities, true)?,
++            TCComputation::EnforceAlreadyComputed => enforce_tc_and_dag(&entity_map)?,
++            TCComputation::ComputeNow => compute_tc(&mut entity_map, true)?,
+         };
++        self.entities = entity_map.into_values().map(|e| (e.uid_arc(), e)).collect();
+         Ok(self)
+     }
+ 
+@@ -196,6 +199,9 @@ impl Entities {
+                 compute_tc(&mut entity_map, true)?;
+             }
+         }
++        // Keep final keys compact and share schema-owned immutable UID strings.
++        let mut entity_map: HashMap<Arc<EntityUID>, Arc<Entity>> =
++            entity_map.into_values().map(|e| (e.uid_arc(), e)).collect();
+         // Now that TC has been enforced, we can check action entities for
+         // conformance with the schema and add action entities to the store.
+         // This is fine to do after TC because the action hierarchy in the
+@@ -213,7 +219,7 @@ impl Entities {
+                 schema
+                     .action_entities()
+                     .into_iter()
+-                    .map(|e: Arc<Entity>| (e.uid().clone(), e)),
++                    .map(|e: Arc<Entity>| (e.uid_arc(), e)),
+             );
+         }
+         Ok(Self {
+@@ -347,7 +353,10 @@ impl IntoIterator for Entities {
+     >;
+ 
+     fn into_iter(self) -> Self::IntoIter {
+-        self.entities.into_values().map(Arc::unwrap_or_clone)
++        // Preserve the public consuming iterator type; evaluation uses borrowed iteration.
++        let owned: HashMap<EntityUID, Arc<Entity>> = self.entities.into_values()
++            .map(|e| (e.uid().clone(), e)).collect();
++        owned.into_values().map(Arc::unwrap_or_clone)
+     }
+ }
+ 
+@@ -456,6 +465,51 @@ pub enum TCComputation {
+ mod json_parsing_tests {
+ 
+     use super::*;
++
++    #[test]
++    fn compact_uid_keys_preserve_value_lookup_and_mutating_paths() {
++        let uid: EntityUID = r#"User::"a-long-private-entity-identifier""#.parse().unwrap();
++        let parent: EntityUID = r#"User::"parent""#.parse().unwrap();
++        let entity = Entity::new_with_attr_partial_value(
++            uid.clone(), [("value".into(), PartialValue::from(42))],
++            [parent.clone()].into_iter().collect(),
++        );
++        let original = entity.clone();
++        let store = Entities::from_entities(
++            [entity], None::<&NoEntitiesSchema>, TCComputation::ComputeNow,
++            Extensions::all_available(),
++        ).unwrap();
++        let key = store.entities.keys().next().unwrap();
++        assert!(std::ptr::eq(key.as_ref(), store.entity(&uid).unwrap().uid()));
++        assert_eq!(key.as_ref(), &uid);
++        assert_eq!(store.entity(&uid.clone()).unwrap().get("value"), Some(&PartialValue::from(42)));
++        assert_eq!(serde_json::to_value(&original).unwrap(),
++            serde_json::to_value(store.entity(&uid).unwrap()).unwrap());
++        assert_eq!(store.clone().into_iter().next().unwrap().into_inner().0, uid);
++        let json = store.to_json_value().unwrap();
++        let parser = EntityJsonParser::new(None::<&NoEntitiesSchema>, Extensions::all_available(), TCComputation::ComputeNow);
++        assert_eq!(store, parser.from_json_value(json).unwrap());
++        assert_eq!(store, store.clone());
++        assert!(!format!("{store:?}").is_empty());
++        assert!(store.clone().add_entities(
++            [Arc::new(original)], None::<&NoEntitiesSchema>, TCComputation::ComputeNow,
++            Extensions::all_available(),
++        ).is_err());
++        let added = store.clone().add_entities(
++            [Arc::new(Entity::with_uid(parent.clone()))], None::<&NoEntitiesSchema>,
++            TCComputation::EnforceAlreadyComputed, Extensions::all_available(),
++        ).unwrap();
++        assert!(added.entity(&uid).unwrap().is_descendant_of(&parent));
++        let cyclic_parent = Entity::new_with_attr_partial_value(
++            parent, [], [uid.clone()].into_iter().collect(),
++        );
++        assert!(store.clone().add_entities(
++            [Arc::new(cyclic_parent)], None::<&NoEntitiesSchema>, TCComputation::ComputeNow,
++            Extensions::all_available(),
++        ).is_err());
++        #[cfg(feature = "partial-eval")]
++        assert!(matches!(store.partial().entity(&EntityUID::with_eid("missing")), Dereference::Residual(_)));
++    }
+     use crate::{extensions::Extensions, test_utils::*, transitive_closure::TcError};
+     use cool_asserts::assert_matches;
+ 
+@@ -2053,6 +2107,59 @@ mod schema_based_parsing_tests {
+         }
+     }
+ 
++    #[test]
++    fn all_schema_actions_share_uids_and_remain_visible() {
++        struct ActionSchema(Vec<Arc<Entity>>);
++        impl Schema for ActionSchema {
++            type EntityTypeDescription = MockEmployeeDescription;
++            type ActionEntityIterator = std::vec::IntoIter<Arc<Entity>>;
++            fn entity_type(&self, ty: &EntityType) -> Option<Self::EntityTypeDescription> {
++                MockSchema.entity_type(ty)
++            }
++            fn action(&self, uid: &EntityUID) -> Option<Arc<Entity>> {
++                self.0.iter().find(|e| e.uid() == uid).cloned()
++            }
++            fn entity_types_with_basename<'a>(&'a self, name: &'a UnreservedId)
++                -> Box<dyn Iterator<Item = EntityType> + 'a> {
++                MockSchema.entity_types_with_basename(name)
++            }
++            fn action_entities(&self) -> Self::ActionEntityIterator {
++                self.0.clone().into_iter()
++            }
++        }
++        let view: EntityUID = r#"Action::"view""#.parse().unwrap();
++        let read_only: EntityUID = r#"Action::"readOnly""#.parse().unwrap();
++        let mut actions = vec![MockSchema.action(&view).unwrap(), MockSchema.action(&read_only).unwrap()];
++        actions.extend((0..256).map(|n| Arc::new(Entity::with_uid(
++            format!("Extra::Nested::Action::\"unused{n}\"").parse().unwrap(),
++        ))));
++        let schema = ActionSchema(actions);
++        let extensions = Extensions::all_available();
++        let store = Entities::from_entities([], Some(&schema), TCComputation::ComputeNow, extensions).unwrap();
++        assert_eq!(store.iter().count(), 258);
++        for action in &schema.0 {
++            let key = store.entities.get_key_value(action.uid()).unwrap().0;
++            assert!(std::ptr::eq(key.as_ref(), action.uid()));
++        }
++        // The requested Action is not view: other Actions' attributes and hierarchy
++        // must still be available to policies.
++        let request = Request::new_unchecked(
++            EntityUIDEntry::known(EntityUID::with_eid("p"), None),
++            EntityUIDEntry::known(read_only, None),
++            EntityUIDEntry::known(EntityUID::with_eid("r"), None), Some(Context::empty()),
++        );
++        let policy = crate::parser::parse_policy(None,
++            r#"permit(principal, action, resource) when { Action::"view".foo == 34 && Action::"view" in Action::"readOnly" };"#,
++        ).unwrap();
++        assert!(crate::evaluator::Evaluator::new(request, &store, extensions).evaluate(&policy.into()).unwrap());
++        let matching = schema.action(&view).unwrap().as_ref().clone();
++        assert_eq!(store, Entities::from_entities([matching.clone()], Some(&schema), TCComputation::ComputeNow, extensions).unwrap());
++        assert!(Entities::from_entities([matching.clone(), matching.clone()], Some(&schema), TCComputation::ComputeNow, extensions).is_err());
++        let mut mismatch = matching;
++        mismatch.set_attr("foo".into(), RestrictedExpr::val(35), extensions).unwrap();
++        assert!(Entities::from_entities([mismatch], Some(&schema), TCComputation::ComputeNow, extensions).is_err());
++    }
++
+     /// Mock schema impl with an entity type that doesn't have a tags declaration
+     struct MockSchemaNoTags;
+     impl Schema for MockSchemaNoTags {

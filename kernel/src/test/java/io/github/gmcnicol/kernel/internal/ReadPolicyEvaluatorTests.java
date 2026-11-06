@@ -58,6 +58,32 @@ class ReadPolicyEvaluatorTests {
         }
     }
 
+    @Test void unrelatedSchemaActionsRemainVisibleAcrossFreshPrivateValues() throws Exception {
+        String extras = java.util.stream.IntStream.range(0, 128)
+                .mapToObj(i -> "action unused" + i + ";").collect(java.util.stream.Collectors.joining());
+        var schema = new Schema("entity User; entity Row { visible?: Bool }; action group; action unrelated in [Action::\"group\"]; "
+                + "action read appliesTo { principal: User, resource: Row, context: {} }; " + extras);
+        var policies = PolicySet.parsePolicies("permit(principal, action == Action::\"read\", resource) when { "
+                + "Action::\"unrelated\" in Action::\"group\" && resource.visible };");
+        try (var sdk = ReadPolicyEvaluator.create(schema, policies, "sdk", new SimpleMeterRegistry());
+             var prepared = ReadPolicyEvaluator.create(schema, policies, "prepared", new SimpleMeterRegistry())) {
+            for (int i = 0; i < 12; i++) {
+                var attrs = switch (i % 3) {
+                    case 0 -> Map.<String, Value>of("visible", new PrimBool(true));
+                    case 1 -> Map.<String, Value>of("visible", new PrimBool(false));
+                    default -> Map.<String, Value>of();
+                };
+                var expected = switch (i % 3) {
+                    case 0 -> ReadDecision.ALLOW;
+                    case 1 -> ReadDecision.DENY;
+                    default -> ReadDecision.INVALID;
+                };
+                assertThat(outcome(sdk, new Principal("User", "u"), attrs, "read")).isEqualTo(expected);
+                assertThat(outcome(prepared, new Principal("User", "u"), attrs, "read")).isEqualTo(expected);
+            }
+        }
+    }
+
     @Test void schemaWarningsAndErroredPermitsNeverBecomeCleanAllows() throws Exception {
         for (String warningEntity : List.of("", "entity String;")) {
             var schema = new Schema(warningEntity + " entity User; entity Row { missing?: Bool }; action read appliesTo { principal: User, resource: Row, context: {} };");

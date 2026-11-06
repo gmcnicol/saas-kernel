@@ -751,6 +751,44 @@ mod tests {
     }
 
     #[test]
+    fn prepared_scalar_uses_compact_schema_action_keys() {
+        // All Actions stay visible, but schema UIDs must not be copied into
+        // full-sized request-local map keys. Measure allocations, not latency.
+        let request = serde_json::json!({
+            "principal": {"type":"User", "id":"u"}, "action":{"type":"Action", "id":"read"},
+            "resource":{"type":"Row", "id":"r"}, "context":{}, "entities":[]
+        }).to_string();
+        let mut costs = Vec::new();
+        for width in [1, 128] {
+            let actions = (0..width).map(|n| format!("action a{n};"))
+                .collect::<String>();
+            let source = serde_json::json!({
+                "schema": format!("entity User; entity Row; action read appliesTo {{ principal: User, resource: Row, context: {{}} }}; namespace Extra {{ {actions} }}"),
+                "policies": {"permit": "permit(principal, action == Action::\"read\", resource);"}
+            }).to_string();
+            let id = prepare(source).unwrap();
+            for _ in 0..3 {
+                let text = request.clone();
+                let before = LOCAL_ACCOUNTING.with(Cell::get);
+                let evaluations = EVALUATIONS.load(Ordering::Relaxed);
+                assert_eq!(evaluate(id, text, Instant::now() + Duration::from_secs(1)).unwrap(), MAGIC | 1);
+                let after = LOCAL_ACCOUNTING.with(Cell::get);
+                assert_eq!(EVALUATIONS.load(Ordering::Relaxed), evaluations + 1);
+                costs.push((after.bytes - before.bytes, after.count - before.count));
+            }
+            close(id).unwrap();
+        }
+        eprintln!("schema Action key scalar costs (bytes, allocations): {costs:?}");
+        assert!(costs[..3].iter().all(|cost| *cost == costs[0]));
+        assert!(costs[3..].iter().all(|cost| *cost == costs[3]));
+        // Allow bucket slack, growth and the schema iterator, but not owned UID
+        // keys. The bound scales with pointer-pair size, not an absolute budget.
+        let compact_growth = 128 * 4 * std::mem::size_of::<(Arc<()>, Arc<()>)>() as u64;
+        assert!(costs[3].0 - costs[0].0 <= compact_growth,
+            "schema Action keys must remain compact: {costs:?}, growth bound {compact_growth}");
+    }
+
+    #[test]
     fn job_local_accounting_records_requested_bytes_without_losing_global_totals() {
         let before_local = local_allocated();
         let before_global = ALLOCATED.load(Ordering::Relaxed);
