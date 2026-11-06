@@ -789,6 +789,36 @@ mod tests {
     }
 
     #[test]
+    fn prepared_scalar_reuses_the_full_schema_action_index() {
+        let request = serde_json::json!({
+            "principal": {"type":"User", "id":"u"}, "action":{"type":"Action", "id":"read"},
+            "resource":{"type":"Row", "id":"r"}, "context":{}, "entities":[]
+        }).to_string();
+        let mut costs = Vec::new();
+        for width in [1, 128, 394] {
+            let actions = (0..width).map(|n| format!("action a{n};")).collect::<String>();
+            let source = serde_json::json!({
+                "schema": format!("entity User; entity Row; action read appliesTo {{ principal: User, resource: Row, context: {{}} }}; namespace Extra {{ {actions} }}"),
+                "policies": {"permit": "permit(principal, action == Action::\"read\", resource);"}
+            }).to_string();
+            let id = prepare(source).unwrap();
+            for _ in 0..3 {
+                let text = request.clone();
+                let before = LOCAL_ACCOUNTING.with(Cell::get);
+                let evaluations = EVALUATIONS.load(Ordering::Relaxed);
+                assert_eq!(evaluate(id, text, Instant::now() + Duration::from_secs(1)).unwrap(), MAGIC | 1);
+                let after = LOCAL_ACCOUNTING.with(Cell::get);
+                assert_eq!(EVALUATIONS.load(Ordering::Relaxed), evaluations + 1);
+                costs.push((after.bytes - before.bytes, after.count - before.count));
+            }
+            close(id).unwrap();
+        }
+        eprintln!("shared schema Action index scalar costs (bytes, allocations): {costs:?}");
+        assert!(costs.iter().all(|cost| *cost == costs[0]),
+            "immutable schema width must not grow per-scalar index allocations: {costs:?}");
+    }
+
+    #[test]
     fn job_local_accounting_records_requested_bytes_without_losing_global_totals() {
         let before_local = local_allocated();
         let before_global = ALLOCATED.load(Ordering::Relaxed);
