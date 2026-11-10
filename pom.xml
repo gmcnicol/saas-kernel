@@ -13,7 +13,7 @@
 
     <groupId>io.github.gmcnicol</groupId>
     <artifactId>saas-kernel-reactor</artifactId>
-    <version>0.2.0-SNAPSHOT</version>
+    <version>0.2.0</version>
     <packaging>pom</packaging>
     <name>SaaS Kernel Reactor</name>
     <description>Product-neutral semantic workflow mechanics for Spring Boot Applications.</description>
@@ -37,8 +37,15 @@
         <connection>scm:git:https://github.com/gmcnicol/saas-kernel.git</connection>
         <developerConnection>scm:git:ssh://git@github.com/gmcnicol/saas-kernel.git</developerConnection>
         <url>https://github.com/gmcnicol/saas-kernel</url>
-        <tag>HEAD</tag>
+        <tag>v${project.version}</tag>
     </scm>
+
+    <distributionManagement>
+        <repository>
+            <id>github</id>
+            <url>https://maven.pkg.github.com/gmcnicol/saas-kernel</url>
+        </repository>
+    </distributionManagement>
 
     <modules>
         <module>kernel</module>
@@ -55,7 +62,6 @@
         <taxi.version>1.70.0</taxi.version>
         <cedar-java.version>4.2.3</cedar-java.version>
         <maven-antrun-plugin.version>3.2.0</maven-antrun-plugin.version>
-        <central-publishing-maven-plugin.version>0.9.0</central-publishing-maven-plugin.version>
         <kotlin.version>2.2.21</kotlin.version>
         <maven.deploy.skip>true</maven.deploy.skip>
     </properties>
@@ -145,6 +151,10 @@
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-gpg-plugin</artifactId>
                         <version>3.2.8</version>
+                        <configuration>
+                            <bestPractices>true</bestPractices>
+                            <gpgArguments><arg>--pinentry-mode</arg><arg>loopback</arg></gpgArguments>
+                        </configuration>
                         <executions>
                             <execution>
                                 <id>sign-release</id>
@@ -152,15 +162,6 @@
                                 <goals><goal>sign</goal></goals>
                             </execution>
                         </executions>
-                    </plugin>
-                    <plugin>
-                        <groupId>org.sonatype.central</groupId>
-                        <artifactId>central-publishing-maven-plugin</artifactId>
-                        <version>${central-publishing-maven-plugin.version}</version>
-                        <extensions>true</extensions>
-                        <configuration>
-                            <publishingServerId>central</publishingServerId>
-                        </configuration>
                     </plugin>
                 </plugins>
             </build>

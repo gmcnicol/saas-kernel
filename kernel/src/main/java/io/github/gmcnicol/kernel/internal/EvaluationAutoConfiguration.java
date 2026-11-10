@@ -257,7 +257,7 @@ public class EvaluationAutoConfiguration {
 
     private static String kernelVersion() {
         String version = EvaluationAutoConfiguration.class.getPackage().getImplementationVersion();
-        return version == null ? "0.2.0-SNAPSHOT" : version;
+        return version == null ? "0.2.0" : version;
     }
 
     private static Properties load(ResourceLoader resources, String path) {

@@ -2,75 +2,236 @@ name: build
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      previous: ${{ steps.version.outputs.previous }}
+      release: ${{ steps.version.outputs.release }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v5
+      - name: Set isolated native cache
+        run: echo "KERNEL_NATIVE_CACHE=$RUNNER_TEMP/kernel-native-cache" >> "$GITHUB_ENV"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
-          java-version: 25
+          java-version: '25.0.4'
           cache: maven
-      - name: Clean verify (includes isolated staged adoption consumer)
-        run: ./mvnw --batch-mode clean verify
-      - name: Verify distributable artefacts
-        shell: bash
+          server-id: github
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/kernel-native-cache
+          key: ${{ runner.os }}-kernel-native-${{ hashFiles('kernel/native/**') }}
+      - name: Check release tooling
+        run: python3 -m unittest discover -s scripts/tests
+      - name: Verify the reviewable version decision
+        id: version
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
-          version=$(./mvnw -q help:evaluate -Dexpression=project.version -DforceStdout)
-          test -f "kernel/target/saas-kernel-$version.jar"
-          test -f "kernel/target/saas-kernel-$version-sources.jar"
-          test -f "kernel/target/saas-kernel-$version-javadoc.jar"
-          test -f "kernel/target/saas-kernel-$version.jar.sha256"
+          base=${BASE_SHA:-$(git rev-parse HEAD^)}
+          python3 scripts/release.py check-version "$base"
+      - name: Check release notes
+        if: steps.version.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: test -f "docs/releases/$VERSION.md"
+      - name: Clean verify including native, public contracts, and isolated adoption
+        run: ./mvnw --batch-mode --no-transfer-progress clean verify
+      - name: Verify distributable artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          test -f "kernel/target/saas-kernel-$VERSION.jar"
+          test -f "kernel/target/saas-kernel-$VERSION-sources.jar"
+          test -f "kernel/target/saas-kernel-$VERSION-javadoc.jar"
+          test -f "kernel/target/saas-kernel-$VERSION.jar.sha256"
           test -f kernel/.flattened-pom.xml
-          test -f "taxi-generator/target/saas-kernel-taxi-generator-$version.jar"
-          test -f "taxi-generator/target/saas-kernel-taxi-generator-$version-sources.jar"
-          test -f "taxi-generator/target/saas-kernel-taxi-generator-$version-javadoc.jar"
-          test -f "taxi-generator/target/saas-kernel-taxi-generator-$version.jar.sha256"
-          test -f taxi-generator/.flattened-pom.xml
-          javap -verbose -classpath "taxi-generator/target/saas-kernel-taxi-generator-$version.jar" \
-            io.github.gmcnicol.taxi.GenerateMojo | grep -q 'major version: 65'
+          test -f "taxi-generator/target/saas-kernel-taxi-generator-$VERSION.jar"
+          test -f "taxi-generator/target/saas-kernel-taxi-generator-$VERSION-sources.jar"
+          test -f "taxi-generator/target/saas-kernel-taxi-generator-$VERSION-javadoc.jar"
+          test -f "taxi-generator/target/saas-kernel-taxi-generator-$VERSION.jar.sha256"
+          javap -verbose -classpath "taxi-generator/target/saas-kernel-taxi-generator-$VERSION.jar" io.github.gmcnicol.taxi.GenerateMojo | grep -q 'major version: 65'
           ! grep -q '<parent>' kernel/.flattened-pom.xml
           ! grep -q '<parent>' taxi-generator/.flattened-pom.xml
           grep -q '<url>https://github.com/gmcnicol/saas-kernel</url>' kernel/.flattened-pom.xml
-          jar tf "applications/keep-in-touch-crm/target/keep-in-touch-crm-$version.jar" | grep -q '^BOOT-INF/'
-          jar tf "applications/ledgerling/target/ledgerling-$version.jar" | grep -q '^BOOT-INF/'
+          jar tf "applications/keep-in-touch-crm/target/keep-in-touch-crm-$VERSION.jar" | grep -q '^BOOT-INF/'
+          jar tf "applications/ledgerling/target/ledgerling-$VERSION.jar" | grep -q '^BOOT-INF/'
           test -z "$(find . -name Dockerfile -print -quit)"
-      - name: Check Kernel binary compatibility
-        shell: bash
+      - name: Check binary compatibility against the actual previous release
+        if: steps.version.outputs.release == 'true' && !endsWith(steps.version.outputs.previous, '-SNAPSHOT')
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          metadata_url=https://repo1.maven.org/maven2/io/github/gmcnicol/saas-kernel/maven-metadata.xml
-          status=$(curl --silent --show-error --output /tmp/kernel-maven-metadata.xml \
-            --write-out '%{http_code}' "$metadata_url")
-          if [[ "$status" == 404 ]]; then
-            echo "No released Kernel version exists yet"
-            exit 0
-          fi
-          [[ "$status" == 200 ]] || { echo "Maven Central returned HTTP $status"; exit 1; }
-          metadata=$(</tmp/kernel-maven-metadata.xml)
-          latest=$(sed -n 's:.*<release>\(.*\)</release>.*:\1:p' <<<"$metadata")
-          if [[ -z "$latest" ]]; then
-            echo "Maven Central metadata has no release version"
-            exit 1
-          fi
-          current=$(./mvnw -q -pl kernel help:evaluate -Dexpression=project.version -DforceStdout)
-          break_binary=true
-          if (( ${current%%.*} > ${latest%%.*} )); then break_binary=false; fi
-          ./mvnw --batch-mode -pl kernel -Djapicmp.oldVersion="$latest" \
-            -Djapicmp.breakBinary="$break_binary" japicmp:cmp
+          ./mvnw --batch-mode --no-transfer-progress -N org.apache.maven.plugins:maven-dependency-plugin:3.9.0:get \
+            -Dartifact="io.github.gmcnicol:saas-kernel:$PREVIOUS" -Dtransitive=false \
+            -DremoteRepositories=github::default::https://maven.pkg.github.com/gmcnicol/saas-kernel
+          IFS=. read -r major minor patch <<< "$VERSION"
+          IFS=. read -r oldmajor oldminor oldpatch <<< "$PREVIOUS"
+          breaking=true
+          if (( major > oldmajor || (major == 0 && minor > oldminor) )); then breaking=false; fi
+          ./mvnw --batch-mode --no-transfer-progress -pl kernel \
+            -Djapicmp.oldVersion="$PREVIOUS" -Djapicmp.breakBinary="$breaking" \
+            com.github.siom79.japicmp:japicmp-maven-plugin:0.27.0:cmp
+      - name: Stage exact tested release bytes
+        if: steps.version.outputs.release == 'true'
+        run: python3 scripts/release.py stage "$RUNNER_TEMP/kernel-release"
+      - name: Retain exact tested release
+        if: steps.version.outputs.release == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: kernel-release-${{ github.sha }}
+          path: ${{ runner.temp }}/kernel-release
+          retention-days: 1
+          if-no-files-found: error
+      - name: Retain verification reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: kernel-test-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            **/target/surefire-reports/TEST-*.xml
+            **/target/failsafe-reports/TEST-*.xml
+            kernel/target/japicmp/
+          retention-days: 1
+          if-no-files-found: ignore
 
   images:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v5
+      - name: Set isolated native cache
+        run: echo "KERNEL_NATIVE_CACHE=$RUNNER_TEMP/kernel-native-cache" >> "$GITHUB_ENV"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
-          java-version: 25
+          java-version: '25.0.4'
           cache: maven
-      - run: ./mvnw --batch-mode -DskipTests install
-      - run: ./mvnw --batch-mode -DskipTests -f applications/keep-in-touch-crm/pom.xml spring-boot:build-image
-      - run: ./mvnw --batch-mode -DskipTests -f applications/ledgerling/pom.xml spring-boot:build-image
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/kernel-native-cache
+          key: ${{ runner.os }}-kernel-native-${{ hashFiles('kernel/native/**') }}
+      - run: ./mvnw --batch-mode --no-transfer-progress -DskipTests install
+      - run: ./mvnw --batch-mode --no-transfer-progress -DskipTests -f applications/keep-in-touch-crm/pom.xml spring-boot:build-image
+      - run: ./mvnw --batch-mode --no-transfer-progress -DskipTests -f applications/ledgerling/pom.xml spring-boot:build-image
+
+  publish:
+    needs: [test, images]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.test.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      packages: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.test.outputs.version }}
+    steps:
+      - name: Set isolated signing directory
+        run: echo "GNUPGHOME=$RUNNER_TEMP/kernel-release-gnupg" >> "$GITHUB_ENV"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25.0.4'
+          cache: maven
+          server-id: github
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: kernel-release-${{ github.sha }}
+          path: ${{ runner.temp }}/kernel-release
+      - name: Verify exact source and artifact receipt
+        run: python3 scripts/release.py verify "$RUNNER_TEMP/kernel-release"
+      - name: Check immutable registry state and reserve the tag
+        id: registry
+        run: |
+          state=$(python3 scripts/release.py probe "$RUNNER_TEMP/kernel-release" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" > "$RUNNER_TEMP/tag.json" 2> "$RUNNER_TEMP/tag-error"; then
+            actual=$(gh api "repos/$GITHUB_REPOSITORY/commits/v$VERSION" --jq .sha)
+            test "$actual" = "$GITHUB_SHA" || { echo 'Release tag belongs to another source; refusing overwrite.'; exit 1; }
+          else
+            grep -q 'HTTP 404' "$RUNNER_TEMP/tag-error" || { echo 'Cannot establish tag state; refusing publication.'; exit 1; }
+            test "$state" = empty || { echo 'Registry artifacts have no matching source reservation.'; exit 1; }
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA" > /dev/null
+          fi
+      - name: Import only the authorised release signer
+        env:
+          MAVEN_GPG_PRIVATE_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+        run: |
+          install -d -m 700 "$GNUPGHOME"
+          printf '%s' "$MAVEN_GPG_PRIVATE_KEY" | gpg --batch --import
+          actual=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" {print $10}')
+          expected=$(tr -d '\r\n' < .github/release-key.fingerprint)
+          test "$actual" = "$expected"
+      - name: Sign and publish tested bytes without rebuilding
+        if: steps.registry.outputs.state == 'empty'
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: |
+          cp -a "$RUNNER_TEMP/kernel-release" "$RUNNER_TEMP/signing-input"
+          for artifact in saas-kernel saas-kernel-taxi-generator; do
+            base="$RUNNER_TEMP/signing-input/$artifact-$VERSION"
+            ./mvnw --batch-mode --no-transfer-progress -N -Prelease \
+              org.apache.maven.plugins:maven-gpg-plugin:3.2.8:sign-and-deploy-file \
+              -Dfile="$base.jar" -DpomFile="$base.pom" \
+              -Dsources="$base-sources.jar" -Djavadoc="$base-javadoc.jar" \
+              -DrepositoryId=github -Durl=https://maven.pkg.github.com/gmcnicol/saas-kernel
+          done
+      - name: Download and verify the actual registry artifacts and signatures
+        run: |
+          python3 scripts/release.py verify-published "$RUNNER_TEMP/kernel-release" "$RUNNER_TEMP/published"
+          for file in "$RUNNER_TEMP/published"/*.asc; do
+            gpg --batch --verify "$file" "${file%.asc}"
+          done
+      - name: Prove a fresh consumer from registry coordinates
+        run: python3 scripts/verify-published-consumer.py "$RUNNER_TEMP/kernel-release" "$RUNNER_TEMP/registry-consumer"
+      - name: Publish versioned source and provenance receipt
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: |
+          stage="$RUNNER_TEMP/kernel-release"
+          for file in release.json kernel-adoption.properties SHA256SUMS; do
+            printf '%s\n' "$MAVEN_GPG_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 \
+              --armor --detach-sign --output "$RUNNER_TEMP/$file.asc" "$stage/$file"
+          done
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "SaaS Kernel $VERSION" --notes-file "docs/releases/$VERSION.md" \
+            "$stage/release.json" "$RUNNER_TEMP/release.json.asc" \
+            "$stage/kernel-adoption.properties" "$RUNNER_TEMP/kernel-adoption.properties.asc" \
+            "$stage/SHA256SUMS" "$RUNNER_TEMP/SHA256SUMS.asc" .github/release-key.asc
+      - name: Remove the ephemeral private keyring
+        if: always()
+        run: |
+          if [[ "${GNUPGHOME:-}" == "$RUNNER_TEMP/kernel-release-gnupg" ]]; then
+            gpgconf --kill gpg-agent || true
+            rm -rf "$GNUPGHOME"
+          fi
