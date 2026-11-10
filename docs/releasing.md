@@ -25,7 +25,7 @@ The first release is **0.2.0**, matching the existing 0.2.0-SNAPSHOT development
 
 Before 1.0, patches preserve backwards compatibility; minor versions may add capabilities or explicitly document breaking changes. At 1.0 and later, incompatible changes require a major release. Keep runtime and generator at the same canonical, non-SNAPSHOT version.
 
-A production/tooling change must include an explicit version increment in the reviewed PR. Update the root POM, owned parent references (including non-reactor prototypes), Application version properties, and the development classpath version fallback together. Add `docs/releases/<version>.md`, including any break and known limitation. Documentation-only changes may keep the version and do not publish. CI rejects reused/decreasing versions and inconsistent module versions. Binary compatibility is checked against the previous released runtime; an explicitly reviewed pre-1.0 minor or stable major change may permit a break, which still needs release-note explanation.
+A production/tooling change must include an explicit version increment in the reviewed PR. Update the root POM, owned parent references (including non-reactor prototypes), Application version properties, and the development classpath version fallback together. Add `docs/releases/<version>.md`, including any break and known limitation. Documentation-only changes may keep the version and do not publish. CI rejects reused/decreasing versions and inconsistent module versions. Binary compatibility is checked against the last completed GitHub Release's runtime, independently of the base POM's version-ordering check; an explicitly reviewed pre-1.0 minor or stable major change may permit a break, which still needs release-note explanation.
 
 The reconciled source, previous review evidence, and the explicit **0.2.0 protected-read latency exception** are in [trusted-main-baseline.md](trusted-main-baseline.md). That exception does not turn a failed latency gate green or waive functional, security/public-contract, native, integrity, signing, or clean-consumer checks.
 
@@ -35,7 +35,7 @@ The reconciled source, previous review evidence, and the explicit **0.2.0 protec
 
 1. Run the standard-library release-tool tests and validate the version decision against the event's exact base SHA.
 2. Run `clean verify` on Java 25.0.4, including public contracts, owned native tests, both packaged Application integration suites, and the isolated generated-binding consumer.
-3. Check release files, flat POMs, and Java-21 generator bytecode. For a subsequent release, resolve the actual previous GitHub Packages version and run the configured binary-compatibility check.
+3. Check release files, flat POMs, and Java-21 generator bytecode. Resolve the last completed GitHub Release's actual GitHub Packages version and run the configured binary-compatibility check. An abandoned partial version is not a compatibility baseline. A 404 from the latest-release endpoint means there is no completed baseline yet; authentication/server failures stop the gate.
 4. Stage the exact already-tested eight artifact/POM files; do not rebuild them in the publisher. Record source commit/tree, SHA-256 hashes, independently expected native provenance, and the adoption manifest. The staging helper rejects dirty source, symlinks, changed/extra files, incorrect versions, and mismatched native/patch/lock identities.
 5. After the image gate, download that same workflow artifact and validate it against the exact main commit. Probe all originals/signatures before writing. Reserve `v<version>` at that source SHA without moving an existing tag.
 6. Import the dedicated release key only inside the publisher. Sign and deploy the tested files with Maven GPG plugin 3.2.8; package credentials come from the job's short-lived `GITHUB_TOKEN`, not a committed or operator-wide token.
@@ -58,6 +58,12 @@ The encrypted private key and passphrase are separate repository Actions secrets
 Published coordinates are immutable. The preflight refuses different bytes or a partially populated version. If one module or sidecar was published before a failure, retain the failed run and source tag, retire that version, and make a reviewed patch-version release; never delete/redeploy it to repair bytes.
 
 A failed publisher may be rerun **only using the original tested Actions artifact** when the registry is still empty or already contains all matching originals/signatures. Rerun the failed publisher job, not the successful build: a rebuilt archive is not assumed byte-identical. Existing matching tags may be reused, never moved. Authentication/server errors are not treated as absence. If GitHub Release asset upload fails after registry verification, inspect the existing release and recover missing metadata assets without clobbering existing files; a published release must not be silently rewritten. Do not interpret a failed publisher as a complete release.
+
+## Deprecation and withdrawal
+
+If a complete release is defective, withdraw it by an explicit notice rather than replacing or deleting its Maven bytes. Add a prominent withdrawal notice to its GitHub Release and current adoption documentation, naming the affected exact version, impact, issue, and replacement version when available. Preserve its original tag, receipts, signatures, and failed-run evidence. Notify known consumers through their issue trackers; for Kit, track and verify the exact replacement adoption separately. Publish a reviewed compatible patch (or an explicitly documented minor/major break) and give exact-version upgrade guidance. A withdrawn complete release remains part of compatibility history; it must not make an ordinary patch silently skip compatibility checks.
+
+GitHub Maven has no routine automated yank operation in this pipeline. A security takedown or actual package deletion needs a separate explicit owner decision, coordinated disclosure, and retained evidence. Revoke/rotate the signing key only if the key itself is compromised; withdrawing an Application/runtime defect does not invalidate unrelated signed releases.
 
 ## Consumer configuration
 

@@ -110,6 +110,21 @@ class RepositoryTest(unittest.TestCase):
         path.write_text(json.dumps(record))
 
 
+class CompletedReleaseTests(unittest.TestCase):
+    def test_compatibility_uses_completed_release_not_retired_source_version(self):
+        self.assertEqual(release.completed_release_version(
+            {"tag_name": "v0.2.0", "draft": False, "prerelease": False}), "0.2.0")
+
+    def test_invalid_or_unpublished_release_cannot_be_a_compatibility_baseline(self):
+        for record in (None, {}, {"tag_name": "v0.2.0", "draft": True, "prerelease": False},
+                       {"tag_name": "v0.2.0", "draft": False, "prerelease": True},
+                       {"tag_name": "0.2.0", "draft": False, "prerelease": False},
+                       {"tag_name": "v0.2.0-SNAPSHOT", "draft": False, "prerelease": False}):
+            with self.subTest(record=record):
+                with self.assertRaises(release.ReleaseError):
+                    release.completed_release_version(record)
+
+
 class VersionTests(RepositoryTest):
     def test_initial_snapshot_to_release_and_github_outputs(self):
         self.versions("0.2.0-SNAPSHOT")

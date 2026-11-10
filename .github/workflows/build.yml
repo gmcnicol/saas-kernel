@@ -76,13 +76,19 @@ jobs:
           jar tf "applications/keep-in-touch-crm/target/keep-in-touch-crm-$VERSION.jar" | grep -q '^BOOT-INF/'
           jar tf "applications/ledgerling/target/ledgerling-$VERSION.jar" | grep -q '^BOOT-INF/'
           test -z "$(find . -name Dockerfile -print -quit)"
-      - name: Check binary compatibility against the actual previous release
-        if: steps.version.outputs.release == 'true' && !endsWith(steps.version.outputs.previous, '-SNAPSHOT')
+      - name: Check binary compatibility against the last completed release
+        if: steps.version.outputs.release == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          PREVIOUS: ${{ steps.version.outputs.previous }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          if gh api "repos/$GITHUB_REPOSITORY/releases/latest" > "$RUNNER_TEMP/previous-release.json" 2> "$RUNNER_TEMP/release-error"; then
+            PREVIOUS=$(python3 -c 'import json,sys; from scripts.release import completed_release_version; print(completed_release_version(json.load(open(sys.argv[1]))))' "$RUNNER_TEMP/previous-release.json")
+          else
+            grep -q 'HTTP 404' "$RUNNER_TEMP/release-error" || { echo 'Cannot establish the compatibility baseline.'; exit 1; }
+            echo 'No completed release exists yet; source-version ordering and immutable publication checks still apply.'
+            exit 0
+          fi
           ./mvnw --batch-mode --no-transfer-progress -N org.apache.maven.plugins:maven-dependency-plugin:3.9.0:get \
             -Dartifact="io.github.gmcnicol:saas-kernel:$PREVIOUS" -Dtransitive=false \
             -DremoteRepositories=github::default::https://maven.pkg.github.com/gmcnicol/saas-kernel
@@ -141,7 +147,7 @@ jobs:
 
   publish:
     needs: [test, images]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.test.outputs.release == 'true'
+    if: github.repository == 'gmcnicol/saas-kernel' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.test.outputs.release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

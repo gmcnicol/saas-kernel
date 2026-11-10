@@ -93,6 +93,16 @@ def semver(version):
     return int(major), int(minor), int(patch), prerelease
 
 
+def completed_release_version(record):
+    require(isinstance(record, dict) and record.get("draft") is False and record.get("prerelease") is False,
+            "Expected a published stable release")
+    tag = record.get("tag_name")
+    require(isinstance(tag, str) and tag.startswith("v"), "Expected a versioned release tag")
+    version = tag[1:]
+    semver(version)
+    return version
+
+
 def reactor_version(root):
     version = field(pom(read_file(root / "pom.xml", MAX_METADATA)), "version")
     semver(version)
