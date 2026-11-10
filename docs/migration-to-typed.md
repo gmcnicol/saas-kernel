@@ -22,7 +22,7 @@ For an Application-owned durable shape change: keep the historical Taxi declarat
 
 | Contract | Current value / check |
 | --- | --- |
-| Runtime + generator Maven coordinates | `0.2.1` in this tree; exact same-version pair required; generated Semantic Index records both and startup compares them to the packaged runtime |
+| Runtime + generator Maven coordinates | `0.3.0` in this tree; exact same-version pair required; generated Semantic Index records both and startup compares them to the packaged runtime |
 | Semantic Pack manifest | `format-version=2` |
 | Manifest Kernel compatibility | `kernel-compatibility=0.1`, the exact assembly compatibility marker currently accepted by `ApplicationValidator.SUPPORTED_KERNEL`; **not** the Maven version, a SemVer range or a claim to run a 0.1 binary |
 | Semantic Index / Authorisation Bundle manifest | `format-version=1` for each |
@@ -32,7 +32,7 @@ For an Application-owned durable shape change: keep the historical Taxi declarat
 | Read/disclosure values and continuations | Additive Java APIs in the matching runtime; handles/tokens have **no durable or cross-process serialization compatibility contract** |
 
 The existing `kernel-compatibility=0.1` has been checked independently of Maven
-0.2.1 against the current validator and successful packaged startup. Do
+0.3.0 against the current validator and successful packaged startup. Do
 not change it merely to make labels match: no compatibility-marker migration is
 part of this change. See ADR 0001 and the [generator reference](taxi-generator.md).
 

@@ -27,7 +27,7 @@ zero and wait for their readiness endpoints to disappear before starting the new
 
 ## Deployment-guard connection budget
 
-From Kernel 0.2.1, reserve **one additional, non-pooled PostgreSQL connection per
+From Kernel 0.3.0, reserve **one additional, non-pooled PostgreSQL connection per
 Application instance** for the Semantic Pack deployment guard. The configured request
 pool retains its full capacity: a maximum of three means three request sessions plus
 one guard session, or four runtime sessions in total. Also account separately for
@@ -36,7 +36,8 @@ capacity planning or return its live advisory lock to a request pool.
 
 The default derives an independent connection from standard Spring JDBC datasources
 or a JDBC-URL-configured Hikari datasource, retaining driver/SSL connection properties.
-It unwraps ordinary Spring/AOP wrappers. Opaque datasources, custom pool subclasses,
+Credential/session-altering or opaque wrappers require explicit configuration.
+Opaque datasources, custom pool subclasses,
 JNDI/datasource-backed pools, rotating credentials and nontrivial session setup require
 an explicit dedicated datasource rather than unsafe credential/property guessing.
 Declare a non-pooled `DataSource` bean named `semanticDeploymentGuardDataSource` with
