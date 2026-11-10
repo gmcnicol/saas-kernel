@@ -133,6 +133,8 @@ def reactor_version(root):
 
 
 def documentation(path):
+    if "/src/main/" in path or "/src/test/" in path:
+        return False
     suffix = Path(path).suffix.lower()
     return (suffix in {".md", ".rst", ".adoc"}
             or (path.startswith("docs/") and suffix in {".txt", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp"})
@@ -144,7 +146,7 @@ def check_version(root, base):
     require(re.fullmatch(r"[0-9a-fA-F]{40}", base) is not None, "BASE_SHA must be exactly 40 hex characters")
     version = reactor_version(root)
     previous = field(pom(git(root, "show", base + ":pom.xml")), "version")
-    if previous == "0.2.0-SNAPSHOT":
+    if previous in {"0.1.0-SNAPSHOT", "0.2.0-SNAPSHOT"}:
         require(version == "0.2.0", "Initial release must be 0.2.0")
         release = True
     else:

@@ -123,6 +123,13 @@ class VersionTests(RepositoryTest):
         self.assertEqual(result, {"version": "0.2.0", "previous": "0.2.0-SNAPSHOT", "release": True})
         self.assertEqual(output.read_text(), "existing=value\nversion=0.2.0\nprevious=0.2.0-SNAPSHOT\nrelease=true\n")
 
+    def test_remote_snapshot_baseline_to_first_release(self):
+        self.versions("0.1.0-SNAPSHOT")
+        base = self.commit()
+        self.versions("0.2.0")
+        self.commit()
+        self.assertTrue(release.check_version(self.root, base)["release"])
+
     def test_unchanged_docs_only_is_explicitly_non_releasing(self):
         base = self.run_git("rev-parse", "HEAD")
         self.write("docs/releasing.md", "Documentation only")
@@ -132,7 +139,8 @@ class VersionTests(RepositoryTest):
         self.assertFalse(release.check_version(self.root, self.run_git("rev-parse", "HEAD"))["release"])
 
     def test_code_workflow_and_scripts_require_new_version(self):
-        for name in ("kernel/src/Foo.java", ".github/workflows/release.yml", "scripts/release.py", "docs/run.sh"):
+        for name in ("kernel/src/Foo.java", ".github/workflows/release.yml", "scripts/release.py", "docs/run.sh",
+                     "kernel/src/main/resources/help.md", "taxi-generator/src/main/resources/template.md"):
             with self.subTest(name=name):
                 base = self.run_git("rev-parse", "HEAD")
                 self.write(name, "changed")
