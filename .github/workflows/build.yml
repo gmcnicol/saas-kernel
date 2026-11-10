@@ -89,9 +89,20 @@ jobs:
             echo 'No completed release exists yet; source-version ordering and immutable publication checks still apply.'
             exit 0
           fi
-          ./mvnw --batch-mode --no-transfer-progress -N org.apache.maven.plugins:maven-dependency-plugin:3.9.0:get \
-            -Dartifact="io.github.gmcnicol:saas-kernel:$PREVIOUS" -Dtransitive=false \
-            -DremoteRepositories=github::default::https://maven.pkg.github.com/gmcnicol/saas-kernel
+          for type in jar pom; do
+            ./mvnw --batch-mode --no-transfer-progress -N org.apache.maven.plugins:maven-dependency-plugin:3.9.0:get \
+              -Dartifact="io.github.gmcnicol:saas-kernel:$PREVIOUS:$type" -Dtransitive=false \
+              -DremoteRepositories=github::default::https://maven.pkg.github.com/gmcnicol/saas-kernel
+          done
+          mkdir "$RUNNER_TEMP/abi-previous"
+          for type in jar pom; do
+            cp "$HOME/.m2/repository/io/github/gmcnicol/saas-kernel/$PREVIOUS/saas-kernel-$PREVIOUS.$type" "$RUNNER_TEMP/abi-previous/previous.$type"
+          done
+          # Mark these exact files local for japicmp's separate Maven invocation; never rebuild them.
+          ./mvnw --batch-mode --no-transfer-progress -N org.apache.maven.plugins:maven-install-plugin:3.1.4:install-file \
+            -Dfile="$RUNNER_TEMP/abi-previous/previous.jar" -DpomFile="$RUNNER_TEMP/abi-previous/previous.pom"
+          ./mvnw --batch-mode --no-transfer-progress -N org.apache.maven.plugins:maven-install-plugin:3.1.4:install-file \
+            -Dfile="kernel/target/saas-kernel-$VERSION.jar" -DpomFile=kernel/.flattened-pom.xml
           IFS=. read -r major minor patch <<< "$VERSION"
           IFS=. read -r oldmajor oldminor oldpatch <<< "$PREVIOUS"
           breaking=true
