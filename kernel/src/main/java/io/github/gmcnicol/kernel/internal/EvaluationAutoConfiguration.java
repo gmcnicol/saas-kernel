@@ -16,6 +16,9 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import io.micrometer.tracing.Tracer;
 import java.io.IOException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.util.List;
 import java.util.Properties;
@@ -267,16 +270,20 @@ public class EvaluationAutoConfiguration {
         return Clock.systemUTC();
     }
 
-    private static DataSource deploymentGuardDataSource(DataSource dataSource) {
-        var source = DataSourceUnwrapper.unwrapRoot(dataSource);
-        // One accounted, non-pooled session keeps the lifetime lock outside the request pool.
+    private static DataSource deploymentGuardDataSource(DataSource source) {
+        // Only exact known types: wrappers and AOP advice can change credentials or session state.
         if (source.getClass() == DriverManagerDataSource.class || source.getClass() == SimpleDriverDataSource.class) {
-            var dedicated = (AbstractDriverBasedDataSource) DataSourceBuilder.derivedFrom(source)
-                    .type(source.getClass()).build();
-            dedicated.setConnectionProperties(copyConnectionProperties(
-                    ((AbstractDriverBasedDataSource) source).getConnectionProperties()));
+            var original = (AbstractDriverBasedDataSource) source;
+            var dedicated = new GuardDataSource();
+            dedicated.setUrl(original.getUrl());
+            dedicated.setUsername(original.getUsername());
+            dedicated.setPassword(original.getPassword());
+            dedicated.setCatalog(original.getCatalog());
+            dedicated.setSchema(original.getSchema());
+            dedicated.setConnectionProperties(copyConnectionProperties(original.getConnectionProperties()));
+            dedicated.useDriverManager = source.getClass() == DriverManagerDataSource.class;
             if (source instanceof SimpleDriverDataSource simple) {
-                ((SimpleDriverDataSource) dedicated).setDriver(simple.getDriver());
+                dedicated.setDriver(simple.getDriver());
             }
             return dedicated;
         }
@@ -294,12 +301,31 @@ public class EvaluationAutoConfiguration {
                     || Boolean.TRUE.equals(properties.getPropertyValue("readOnly"))) {
                 throw unsupportedGuardDataSource();
             }
-            var dedicated = DataSourceBuilder.derivedFrom(source).type(SimpleDriverDataSource.class).build();
+            var dedicated = DataSourceBuilder.derivedFrom(source).type(GuardDataSource.class).build();
             dedicated.setConnectionProperties(copyConnectionProperties(
                     (Properties) properties.getPropertyValue("dataSourceProperties")));
             return dedicated;
         }
         throw unsupportedGuardDataSource();
+    }
+
+    private static final class GuardDataSource extends SimpleDriverDataSource {
+        private boolean useDriverManager;
+
+        @Override
+        protected Connection getConnectionFromDriver(Properties properties) throws SQLException {
+            // Spring's default implementations log the raw URL, which can contain passwords.
+            Connection connection;
+            if (useDriverManager) {
+                connection = DriverManager.getConnection(getUrl(), properties);
+            } else {
+                var driver = getDriver();
+                if (driver == null) throw new SQLException("Deployment guard JDBC driver has not been set");
+                connection = driver.connect(getUrl(), properties);
+            }
+            if (connection == null) throw new SQLException("Driver did not accept the deployment guard JDBC URL");
+            return connection;
+        }
     }
 
     private static Properties copyConnectionProperties(Properties properties) {

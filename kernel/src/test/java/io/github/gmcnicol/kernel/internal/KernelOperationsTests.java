@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -19,6 +20,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.support.BeanDefinitionBuilder;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -34,6 +42,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
+import org.springframework.jdbc.datasource.UserCredentialsDataSourceAdapter;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -288,7 +297,14 @@ class KernelOperationsTests {
         migrateGuardDatabase(dataSource);
         var requestPool = new SingleConnectionPool(dataSource);
         var changed = new SemanticDeploymentGuard(dataSource, "test.PoolIsolation", "f".repeat(64));
-        guardContext(requestPool, "test.PoolIsolation").run(context -> {
+        var dedicated = new DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+        dedicated.setConnectionProperties(properties);
+        guardContext(requestPool, "test.PoolIsolation")
+                .withBean("semanticDeploymentGuardDataSource", DataSource.class, () -> dedicated,
+                        definition -> ((org.springframework.beans.factory.support.AbstractBeanDefinition) definition)
+                                .setDefaultCandidate(false))
+                .run(context -> {
             assertThat(context).hasNotFailed();
             var guard = context.getBean(SemanticDeploymentGuard.class);
             assertThat(guard.isRunning()).isTrue();
@@ -369,7 +385,7 @@ class KernelOperationsTests {
 
     @Test
     @Order(8)
-    void beanGuardPreservesWrappedSimpleSourceAndReleasesExclusionOnSessionLoss() {
+    void beanGuardPreservesSimpleSourceAndReleasesExclusionOnSessionLoss() {
         var dataSource = new SimpleDriverDataSource(
                 new org.postgresql.Driver(), postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
         var properties = new Properties();
@@ -378,10 +394,9 @@ class KernelOperationsTests {
         dataSource.setConnectionProperties(properties);
         migrateGuardDatabase(dataSource);
         var requestPool = new SingleConnectionPool(dataSource);
-        var wrapped = (DataSource) new ProxyFactory(requestPool).getProxy();
         var closed = new CountDownLatch(1);
         var refusingTraffic = new AtomicBoolean();
-        guardContext(wrapped, "test.BeanSessionLoss").withInitializer(context -> context.addApplicationListener(event -> {
+        guardContext(dataSource, "test.BeanSessionLoss").withInitializer(context -> context.addApplicationListener(event -> {
             if (event instanceof ContextClosedEvent) closed.countDown();
             if (event instanceof AvailabilityChangeEvent<?> availability
                     && availability.getState() == ReadinessState.REFUSING_TRAFFIC) refusingTraffic.set(true);
@@ -413,6 +428,118 @@ class KernelOperationsTests {
             }
         });
         assertThat(requestPool.permit.availablePermits()).isEqualTo(1);
+    }
+
+    @Test
+    void beanGuardRejectsCredentialAdaptersWithoutConnectingWithTargetCredentials() {
+        var driver = new GuardTestDriver();
+        var target = new SimpleDriverDataSource(
+                driver, postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+        var adapter = new UserCredentialsDataSourceAdapter();
+        adapter.setTargetDataSource(target);
+        adapter.setUsername("synthetic-runtime-login");
+        adapter.setPassword("synthetic-runtime-password");
+        guardContext(adapter, "test.CredentialAdapter").run(context -> {
+            assertThat(driver.connections).hasValue(0);
+            assertThat(context).hasFailed();
+            assertThat(context.getStartupFailure()).hasStackTraceContaining("semanticDeploymentGuardDataSource");
+        });
+    }
+
+    @Test
+    void beanGuardRejectsArbitraryDelegatesAndAopAdvice() {
+        var target = new DriverManagerDataSource(
+                postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+        var proxy = new ProxyFactory(target);
+        proxy.addAdvice((org.aopalliance.intercept.MethodInterceptor) invocation -> invocation.proceed());
+        for (var opaque : java.util.List.of(new DelegatingDataSource(target) { }, (DataSource) proxy.getProxy())) {
+            guardContext(opaque, "test.OpaqueWrapper").run(context -> {
+                assertThat(context).hasFailed();
+                assertThat(context.getStartupFailure()).hasStackTraceContaining("semanticDeploymentGuardDataSource");
+            });
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void derivedGuardDoesNotLogPasswordBearingUrlsAtDebug(boolean simple) throws Exception {
+        var url = GuardTestDriver.URL;
+        var driver = new GuardTestDriver();
+        var source = simple
+                ? new SimpleDriverDataSource(driver, url, "synthetic-user", "synthetic-password")
+                : new DriverManagerDataSource(url, "synthetic-user", "synthetic-password");
+        var defaults = new Properties();
+        defaults.setProperty("default-option", "preserved-default");
+        var properties = new Properties(defaults);
+        properties.setProperty("ApplicationName", "kernel-log-guard");
+        source.setConnectionProperties(properties);
+        var root = (Logger) LoggerFactory.getLogger(Logger.ROOT_LOGGER_NAME);
+        var jdbcLogger = (Logger) LoggerFactory.getLogger("org.springframework.jdbc.datasource");
+        var guardLogger = (Logger) LoggerFactory.getLogger("io.github.gmcnicol.kernel.internal");
+        var jdbcLevel = jdbcLogger.getLevel();
+        var guardLevel = guardLogger.getLevel();
+        var capture = new ListAppender<ILoggingEvent>();
+        capture.start();
+        root.addAppender(capture);
+        jdbcLogger.setLevel(Level.DEBUG);
+        guardLogger.setLevel(Level.DEBUG);
+        DriverManager.registerDriver(driver);
+        try {
+            guardLogger.debug("guard-log-capture-active");
+            guardContext(source, "test.SafeUrlLogging" + simple).run(context -> {
+                assertThat(context).hasNotFailed();
+                assertThat(context.getBean(SemanticDeploymentGuard.class).isRunning()).isTrue();
+                var derived = (org.springframework.jdbc.datasource.AbstractDriverBasedDataSource)
+                        ReflectionTestUtils.getField(context.getBean(SemanticDeploymentGuard.class), "dataSource");
+                assertThat(derived.getConnectionProperties()).isNotSameAs(properties);
+                assertThat(derived.getConnectionProperties().getProperty("default-option"))
+                        .isEqualTo("preserved-default");
+            });
+            assertThat(driver.connections).hasValue(1);
+            assertThat(capture.list).extracting(ILoggingEvent::getFormattedMessage)
+                    .contains("guard-log-capture-active")
+                    .noneMatch(message -> message.contains(url) || message.contains("synthetic-url-password"));
+        } finally {
+            DriverManager.deregisterDriver(driver);
+            jdbcLogger.setLevel(jdbcLevel);
+            guardLogger.setLevel(guardLevel);
+            root.detachAppender(capture);
+            capture.stop();
+        }
+    }
+
+    @Test
+    void derivedGuardRejectsANullDriverConnectionWithoutLoggingTheUrl() {
+        var source = new SimpleDriverDataSource(
+                new NullConnectionDriver(), "jdbc:guard-null:test?password=synthetic-null-password");
+        guardContext(source, "test.NullDriverConnection").run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(context.getStartupFailure()).hasRootCauseInstanceOf(SQLException.class)
+                    .hasStackTraceContaining("Driver did not accept the deployment guard JDBC URL");
+        });
+    }
+
+    private static final class GuardTestDriver extends org.postgresql.Driver {
+        private static final String URL = "jdbc:guard-logging:test?password=synthetic-url-password";
+        private final java.util.concurrent.atomic.AtomicInteger connections = new java.util.concurrent.atomic.AtomicInteger();
+
+        @Override public boolean acceptsURL(String url) {
+            return URL.equals(url) || super.acceptsURL(url);
+        }
+
+        @Override public Connection connect(String url, Properties info) throws SQLException {
+            connections.incrementAndGet();
+            if (!URL.equals(url)) return super.connect(url, info);
+            assertThat(info.getProperty("user")).isEqualTo("synthetic-user");
+            assertThat(info.getProperty("password")).isEqualTo("synthetic-password");
+            assertThat(info.getProperty("ApplicationName")).isEqualTo("kernel-log-guard");
+            return new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+                    .getConnection();
+        }
+    }
+
+    private static final class NullConnectionDriver extends org.postgresql.Driver {
+        @Override public Connection connect(String url, Properties info) { return null; }
     }
 
     @Configuration(proxyBeanMethods = false)
