@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.github.gmcnicol</groupId>
         <artifactId>saas-kernel-reactor</artifactId>
-        <version>0.2.0</version>
+        <version>0.3.0</version>
     </parent>
     <artifactId>saas-kernel-acceptance-contract</artifactId>
     <name>Kernel Acceptance Contract</name>

@@ -16,6 +16,9 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import io.micrometer.tracing.Tracer;
 import java.io.IOException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.util.List;
 import java.util.Properties;
@@ -23,18 +26,25 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import lang.taxi.Compiler;
 import lang.taxi.CompilerConfig;
+import org.springframework.beans.BeanWrapperImpl;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.actuate.info.InfoContributor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.jdbc.DataSourceBuilder;
+import org.springframework.boot.jdbc.DataSourceUnwrapper;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.AbstractDriverBasedDataSource;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 import javax.sql.DataSource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -105,10 +115,15 @@ public class EvaluationAutoConfiguration {
     @DependsOn({"applicationValidator", "runtimeRoleValidator"})
     SemanticDeploymentGuard semanticDeploymentGuard(
             DataSource dataSource,
+            @Qualifier("semanticDeploymentGuardDataSource") ObjectProvider<DataSource> dedicatedDataSource,
             SemanticPackVersion semanticPack,
             @Value("${spring.application.name}") String applicationId,
             ConfigurableApplicationContext context) {
-        return new SemanticDeploymentGuard(dataSource, applicationId, semanticPack.checksum(), () -> {
+        var guardDataSource = dedicatedDataSource.getIfAvailable(() -> deploymentGuardDataSource(dataSource));
+        if (DataSourceUnwrapper.unwrapRoot(guardDataSource) == DataSourceUnwrapper.unwrapRoot(dataSource)) {
+            throw unsupportedGuardDataSource();
+        }
+        return new SemanticDeploymentGuard(guardDataSource, applicationId, semanticPack.checksum(), () -> {
             org.springframework.boot.availability.AvailabilityChangeEvent.publish(
                     context, org.springframework.boot.availability.ReadinessState.REFUSING_TRAFFIC);
             Thread.ofPlatform().name("kernel-deployment-guard-shutdown").start(context::close);
@@ -255,9 +270,79 @@ public class EvaluationAutoConfiguration {
         return Clock.systemUTC();
     }
 
+    private static DataSource deploymentGuardDataSource(DataSource source) {
+        // Only exact known types: wrappers and AOP advice can change credentials or session state.
+        if (source.getClass() == DriverManagerDataSource.class || source.getClass() == SimpleDriverDataSource.class) {
+            var original = (AbstractDriverBasedDataSource) source;
+            var dedicated = new GuardDataSource();
+            dedicated.setUrl(original.getUrl());
+            dedicated.setUsername(original.getUsername());
+            dedicated.setPassword(original.getPassword());
+            dedicated.setCatalog(original.getCatalog());
+            dedicated.setSchema(original.getSchema());
+            dedicated.setConnectionProperties(copyConnectionProperties(original.getConnectionProperties()));
+            dedicated.useDriverManager = source.getClass() == DriverManagerDataSource.class;
+            if (source instanceof SimpleDriverDataSource simple) {
+                dedicated.setDriver(simple.getDriver());
+            }
+            return dedicated;
+        }
+        if (source.getClass().getName().equals("com.zaxxer.hikari.HikariDataSource")) {
+            var properties = new BeanWrapperImpl(source);
+            // Datasource-backed pools, session setup and rotating credentials cannot be cloned safely.
+            for (var property : List.of("dataSource", "dataSourceClassName", "dataSourceJNDI",
+                    "connectionInitSql", "schema", "catalog", "transactionIsolation",
+                    "credentialsProvider", "credentialsProviderClassName")) {
+                if (properties.isReadableProperty(property) && properties.getPropertyValue(property) != null) {
+                    throw unsupportedGuardDataSource();
+                }
+            }
+            if (properties.getPropertyValue("jdbcUrl") == null
+                    || Boolean.TRUE.equals(properties.getPropertyValue("readOnly"))) {
+                throw unsupportedGuardDataSource();
+            }
+            var dedicated = DataSourceBuilder.derivedFrom(source).type(GuardDataSource.class).build();
+            dedicated.setConnectionProperties(copyConnectionProperties(
+                    (Properties) properties.getPropertyValue("dataSourceProperties")));
+            return dedicated;
+        }
+        throw unsupportedGuardDataSource();
+    }
+
+    private static final class GuardDataSource extends SimpleDriverDataSource {
+        private boolean useDriverManager;
+
+        @Override
+        protected Connection getConnectionFromDriver(Properties properties) throws SQLException {
+            // Spring's default implementations log the raw URL, which can contain passwords.
+            Connection connection;
+            if (useDriverManager) {
+                connection = DriverManager.getConnection(getUrl(), properties);
+            } else {
+                var driver = getDriver();
+                if (driver == null) throw new SQLException("Deployment guard JDBC driver has not been set");
+                connection = driver.connect(getUrl(), properties);
+            }
+            if (connection == null) throw new SQLException("Driver did not accept the deployment guard JDBC URL");
+            return connection;
+        }
+    }
+
+    private static Properties copyConnectionProperties(Properties properties) {
+        // Keep SSL and driver options without sharing the mutable property map.
+        return properties == null ? null : (Properties) properties.clone();
+    }
+
+    private static IllegalStateException unsupportedGuardDataSource() {
+        return new IllegalStateException("Cannot safely create an independent Semantic Pack deployment guard connection. "
+                + "Define @Bean(defaultCandidate = false) named 'semanticDeploymentGuardDataSource': "
+                + "a dedicated non-pooled DataSource using the same runtime login, URL, driver and SSL/options "
+                + "as the request DataSource; account for one additional PostgreSQL connection.");
+    }
+
     private static String kernelVersion() {
         String version = EvaluationAutoConfiguration.class.getPackage().getImplementationVersion();
-        return version == null ? "0.2.0" : version;
+        return version == null ? "0.3.0" : version;
     }
 
     private static Properties load(ResourceLoader resources, String path) {
