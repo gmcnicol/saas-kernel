@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
     <parent>
         <groupId>io.github.gmcnicol</groupId><artifactId>saas-kernel-reactor</artifactId>
-        <version>0.2.0</version><relativePath>../../pom.xml</relativePath>
+        <version>0.2.1</version><relativePath>../../pom.xml</relativePath>
     </parent>
     <artifactId>authorisation-review-NOT-FOR-RELEASE</artifactId>
     <properties><maven.deploy.skip>true</maven.deploy.skip><maven.install.skip>true</maven.install.skip></properties>

@@ -8,7 +8,7 @@ copied KIT implementation code. From the repository root, Java 25 first on `PATH
 ```
 
 Existing Maven Invoker stages `saas-kernel` and `saas-kernel-taxi-generator` at the
-same reactor version (currently **0.2.0**) into
+same reactor version (currently **0.2.1**) into
 `taxi-generator/target/local-repository`. Forked Maven builds the independent
 consumer under `target/it/adoption`, resolving coordinates there, not reactor source
 classes. Failsafe starts its **packaged JAR**, asserts Kernel comes from the staged
