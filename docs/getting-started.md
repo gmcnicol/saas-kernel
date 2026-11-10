@@ -8,14 +8,14 @@ copied KIT implementation code. From the repository root, Java 25 first on `PATH
 ```
 
 Existing Maven Invoker stages `saas-kernel` and `saas-kernel-taxi-generator` at the
-same reactor version (currently **0.2.0-SNAPSHOT**) into
+same reactor version (currently **0.2.0**) into
 `taxi-generator/target/local-repository`. Forked Maven builds the independent
 consumer under `target/it/adoption`, resolving coordinates there, not reactor source
 classes. Failsafe starts its **packaged JAR**, asserts Kernel comes from the staged
 runtime JAR, and exercises real PostgreSQL 18/Cedar. The normal CI clean verify runs
 this too. No credentials, public publication or third released artifact are involved.
-For an authorised public release use [releasing](releasing.md); do not infer Central
-availability from this staging proof.
+For published coordinates and GitHub Maven authentication, see [releasing](releasing.md).
+Do not infer registry availability from this staging proof.
 
 ## What lives where
 
