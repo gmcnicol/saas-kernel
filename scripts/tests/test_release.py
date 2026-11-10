@@ -118,6 +118,7 @@ class CompletedReleaseTests(unittest.TestCase):
     def test_invalid_or_unpublished_release_cannot_be_a_compatibility_baseline(self):
         for record in (None, {}, {"tag_name": "v0.2.0", "draft": True, "prerelease": False},
                        {"tag_name": "v0.2.0", "draft": False, "prerelease": True},
+                       {"tag_name": "v0.2.1-rc.1", "draft": False, "prerelease": False},
                        {"tag_name": "0.2.0", "draft": False, "prerelease": False},
                        {"tag_name": "v0.2.0-SNAPSHOT", "draft": False, "prerelease": False}):
             with self.subTest(record=record):

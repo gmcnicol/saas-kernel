@@ -229,7 +229,8 @@ jobs:
             printf '%s\n' "$MAVEN_GPG_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 \
               --armor --detach-sign --output "$RUNNER_TEMP/$file.asc" "$stage/$file"
           done
-          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
+          prerelease=$(python3 -c 'import sys; from scripts.release import semver; print(str(semver(sys.argv[1])[3] != (1,)).lower())' "$VERSION")
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease="$prerelease" \
             --title "SaaS Kernel $VERSION" --notes-file "docs/releases/$VERSION.md" \
             "$stage/release.json" "$RUNNER_TEMP/release.json.asc" \
             "$stage/kernel-adoption.properties" "$RUNNER_TEMP/kernel-adoption.properties.asc" \

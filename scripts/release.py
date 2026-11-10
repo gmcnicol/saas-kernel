@@ -99,7 +99,7 @@ def completed_release_version(record):
     tag = record.get("tag_name")
     require(isinstance(tag, str) and tag.startswith("v"), "Expected a versioned release tag")
     version = tag[1:]
-    semver(version)
+    require(semver(version)[3] == (1,), "Compatibility baseline must have a final version")
     return version
 
 
