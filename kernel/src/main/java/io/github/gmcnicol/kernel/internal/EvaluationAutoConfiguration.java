@@ -65,7 +65,8 @@ public class EvaluationAutoConfiguration {
             List<TypedFactDerivation<?, ?>> typedDerivations,
             List<TypedApplicabilityPolicy<?>> typedPolicies,
             List<SemanticBindings> typedBindings,
-            SemanticCodec semanticCodec) {
+            SemanticCodec semanticCodec,
+            io.github.gmcnicol.kernel.application.ApplicationWorkflowData applicationData) {
         return new DefaultKernel(
                 jdbc,
                 new TransactionTemplate(transactionManager),
@@ -80,7 +81,19 @@ public class EvaluationAutoConfiguration {
                 typedPolicies,
                 typedBindings,
                 semanticCodec,
-                telemetry);
+                telemetry, applicationData);
+    }
+
+    @Bean
+    @DependsOn({"applicationValidator", "runtimeRoleValidator"})
+    ScopedAuthorisedReads authorisedReads(
+            DataSource dataSource, CedarAuthoriser cedar, List<SemanticBindings> bindings, MeterRegistry meters) {
+        return new ScopedAuthorisedReads(dataSource, cedar, bindings, meters);
+    }
+
+    @Bean
+    io.github.gmcnicol.kernel.application.AuthorisedDisclosures authorisedDisclosures(ScopedAuthorisedReads reads, java.time.Clock clock) {
+        return new FencedDisclosures(reads, clock);
     }
 
     @Bean
@@ -120,11 +133,16 @@ public class EvaluationAutoConfiguration {
         return new ReevaluationWorker(kernel, policy, clock);
     }
 
-    @Bean
+    @Bean(destroyMethod = "close")
     CedarAuthoriser cedarAuthoriser(
             List<AuthorisationBundle> bundles,
             List<io.github.gmcnicol.kernel.application.TypedAuthorisationModel<?>> typedModels,
-            ResourceLoader resources) {
+            List<SemanticBindings> bindings,
+            List<io.github.gmcnicol.kernel.application.EffectiveCapabilityResolver> resolvers,
+            Clock clock,
+            ResourceLoader resources,
+            org.springframework.core.env.Environment environment,
+            MeterRegistry meters) {
         Properties manifest = load(resources, bundles.getFirst().manifestResource());
         String schema = read(resources, manifest.getProperty("schema"));
         String policies = java.util.Arrays.stream(manifest.getProperty("policies").split(","))
@@ -138,7 +156,8 @@ public class EvaluationAutoConfiguration {
                     PolicySet.parsePolicies(policies),
                     typedModels,
                     manifest.getProperty("id"),
-                    checksum);
+                    checksum, bindings, resolvers, clock,
+                    environment.getProperty("kernel.authorisation.read-evaluator", "auto"), meters);
         } catch (Exception exception) {
             throw new IllegalStateException("Cannot initialise Authorisation Bundle", exception);
         }
@@ -165,10 +184,11 @@ public class EvaluationAutoConfiguration {
             List<io.github.gmcnicol.kernel.semanticpack.TypedEventProjector<?, ?>> projectors,
             List<TypedApplicabilityPolicy<?>> policies,
             List<TypedFactDerivation<?, ?>> derivations,
-            SemanticCodec semanticCodec) {
+            SemanticCodec semanticCodec,
+            io.github.gmcnicol.kernel.application.ApplicationWorkflowData applicationData) {
         return new TypedActionService(
                 jdbc, new TransactionTemplate(transactionManager), cedar, worker, clock, telemetry, semanticPack, bindings,
-                handlers, projectors, policies, derivations, semanticCodec);
+                handlers, projectors, policies, derivations, semanticCodec, applicationData);
     }
 
     @Bean
@@ -237,7 +257,7 @@ public class EvaluationAutoConfiguration {
 
     private static String kernelVersion() {
         String version = EvaluationAutoConfiguration.class.getPackage().getImplementationVersion();
-        return version == null ? "0.1.0-SNAPSHOT" : version;
+        return version == null ? "0.2.0" : version;
     }
 
     private static Properties load(ResourceLoader resources, String path) {

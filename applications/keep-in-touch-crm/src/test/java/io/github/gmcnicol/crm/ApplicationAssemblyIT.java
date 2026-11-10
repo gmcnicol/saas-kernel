@@ -109,6 +109,15 @@ class ApplicationAssemblyIT {
     }
 
     @Test
+    void rejectsMismatchedGeneratedCapabilityVersionBeforeReadiness() {
+        Map<String, byte[]> resources = indexedOverrides(index -> index.replace(
+                "io.github.gmcnicol.crm.EngageContact|CAPABILITY|1|",
+                "io.github.gmcnicol.crm.EngageContact|CAPABILITY|99|"));
+        assertStartupFails(resources, List.of(),
+                "Generated Semantic Binding metadata mismatch: io.github.gmcnicol.crm.EngageContact");
+    }
+
+    @Test
     void rejectsMissingSemanticIndexBeforeReadiness() {
         assertStartupFails(Map.of(), List.of(INDEX), "Application resource not found: " + INDEX);
     }

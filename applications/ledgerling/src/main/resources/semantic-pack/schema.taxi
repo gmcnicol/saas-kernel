@@ -1,3 +1,4 @@
+import io.github.gmcnicol.kernel.taxi.Capability
 import io.github.gmcnicol.kernel.taxi.Subject
 import io.github.gmcnicol.kernel.taxi.Contract
 import io.github.gmcnicol.kernel.taxi.ProjectedState
@@ -7,10 +8,35 @@ import io.github.gmcnicol.kernel.taxi.ActionService
 
 namespace io.github.gmcnicol.ledgerling
 
+@Contract(version = 1) @Capability
+model ManageFiling { remaining: Int? }
+
+@Contract(version = 1) @Capability
+model ExportFilings {}
+
 @Subject
 type FilingId inherits String
 type DocumentRequestId inherits String
 type ClientReference inherits String
+
+@Subject
+type PracticeId inherits String
+@Subject
+type ClientFilingId inherits String
+
+model FilingReadDetails {
+    reference: ClientReference
+    workingNotes: String?
+}
+
+@Contract(version = 1)
+@ProjectedState(subject = "io.github.gmcnicol.ledgerling.ClientFilingId")
+model ClientFilingRead {
+    filingId: ClientFilingId
+    practice: String
+    assignedClient: String
+    details: FilingReadDetails?
+}
 
 @Contract(version = 1)
 @ProjectedState(subject = "io.github.gmcnicol.ledgerling.FilingId")

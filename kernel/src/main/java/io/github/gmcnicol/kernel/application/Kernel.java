@@ -24,8 +24,30 @@ public interface Kernel {
             String tenantId, Principal principal, UUID actionOfferId, UUID intentId,
             TypedCandidatePayload<?> payload);
 
-    <P, C, E> TypedIntentEvidence<C, E> readIntentEvidence(
-            String tenantId, UUID intentId, ActionType<P, C, E> actionType);
+    /**
+     * Accepts and completes exactly one named Intent in the active caller-owned transaction.
+     *
+     * <p>The transaction must use the Kernel's configured datasource and transaction manager. This method neither
+     * opens an independent transaction nor drains other due work. {@link ExactIntentCompletion#COMPLETED} is
+     * provisional until the caller commits; rollback removes the Intent, Execution Receipts, projection updates, and
+     * Application writes made in that transaction. Repeating an identical committed request returns
+     * {@link ExactIntentCompletion#ALREADY_SUCCEEDED}; changing request content under the same Intent identity
+     * raises {@link IntentConflictException}.
+     *
+     * @param tenantId tenant that received the Action Offer
+     * @param principal principal to which the Action Offer was issued
+     * @param actionOfferId exact Action Offer being invoked
+     * @param intentId caller-assigned idempotency identity
+     * @param candidate typed Candidate Payload for the offered Action
+     * @param executedAt explicit acceptance and execution time, and part of request identity
+     * @return whether this transaction completed the Intent or reconciled an identical committed success
+     * @throws IllegalStateException when no active, synchronized transaction participates in the Kernel datasource
+     * @throws IntentConflictException when the Intent identity is already bound to different request content
+     * @throws IntentRejectedException when the exact Intent cannot complete successfully
+     */
+    <C> ExactIntentCompletion execute(
+            String tenantId, Principal principal, UUID actionOfferId, UUID intentId,
+            TypedCandidatePayload<C> candidate, Instant executedAt);
 
     Optional<Intent> processNext(Instant processedAt);
 
@@ -36,4 +58,6 @@ public interface Kernel {
     List<IntentView> findIntents(IntentQuery query);
 
     List<IntentAuditEntry> findIntentAudit(IntentAuditQuery query);
+
+    List<IntentEvent> findIntentEvents(String tenantId, UUID intentId);
 }

@@ -57,7 +57,8 @@ class TypedActionServiceTests {
                 mock(JdbcTemplate.class), mock(TransactionOperations.class), mock(CedarAuthoriser.class),
                 new IntentWorkerProperties(), Clock.systemUTC(), mock(KernelTelemetry.class),
                 new SemanticPackVersion("test", "checksum"),
-                bindings, handlers, projectors, policies, List.of(), CanonicalCodec.Limits.defaults());
+                bindings, handlers, projectors, policies, List.of(), CanonicalCodec.Limits.defaults(),
+                mock(io.github.gmcnicol.kernel.application.ApplicationWorkflowData.class));
     }
 
     private record Id(String value) {}

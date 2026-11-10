@@ -31,7 +31,7 @@ public abstract class TypedKernelBehaviourContract {
     protected abstract boolean filtersAuthority(String uniqueId);
 
     @Test
-    final void completesPersistsAndProjectsOrderedTypedEvidence() {
+    final void completesProjectsAndRecordsOrderedEventReceipts() {
         Flow flow = flow("complete");
         Intent intent = flow.accept().apply(UUID.randomUUID());
         flow.clock().accept(flow.processAt());

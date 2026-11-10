@@ -93,23 +93,24 @@ class TypedLedgerlingSemanticConfiguration {
     @Bean
     TypedEventProjector<FilingProjection, RecordsReceivedEventV1> recordsReceivedProjector(JdbcTemplate jdbc) {
         return LedgerlingActions.RECORD_RECORDS_RECEIVED.bindProjector(
-                RecordsReceivedEventV1.TYPE, transition -> project(jdbc, transition.tenantId(),
+                RecordsReceivedEventV1.TYPE, transition -> project(jdbc, transition.tenantId(), transition.intentId(),
                         transition.resultingProjection()));
     }
 
     @Bean
     TypedEventProjector<FilingProjection, PreparationStartedEventV1> preparationStartedProjector(JdbcTemplate jdbc) {
         return LedgerlingActions.START_PREPARATION.bindProjector(
-                PreparationStartedEventV1.TYPE, transition -> project(jdbc, transition.tenantId(),
+                PreparationStartedEventV1.TYPE, transition -> project(jdbc, transition.tenantId(), transition.intentId(),
                         transition.resultingProjection()));
     }
 
-    private static void project(JdbcTemplate jdbc, String tenantId, FilingProjection projection) {
+    private static void project(JdbcTemplate jdbc, String tenantId, java.util.UUID intentId, FilingProjection projection) {
         jdbc.update("""
                 UPDATE ledger_filing_projection
-                SET records_outstanding = ?, preparation_started = ?
+                SET records_outstanding = ?, preparation_started = ?, state_version = state_version + 1
                 WHERE tenant_id = ? AND filing_id = ?
                 """, projection.recordsOutstanding(), projection.preparationStarted(), tenantId,
                 projection.filingId().value());
+        jdbc.update("UPDATE ledger_filing_change SET applied = true WHERE tenant_id = ? AND intent_id = ?", tenantId, intentId);
     }
 }

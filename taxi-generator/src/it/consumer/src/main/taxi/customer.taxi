@@ -1,3 +1,4 @@
+import io.github.gmcnicol.kernel.taxi.Capability
 import io.github.gmcnicol.kernel.taxi.Subject
 import io.github.gmcnicol.kernel.taxi.Contract
 import io.github.gmcnicol.kernel.taxi.ProjectedState
@@ -31,7 +32,19 @@ model Customer {
     status: Status
 }
 
+@Subject
+type CustomerReadId inherits String
+
+model ReadDetails { label: String note: String? }
+
+@Contract(version = 1)
+@ProjectedState(subject = "customer.crm.CustomerReadId")
+model CustomerRead { id: CustomerReadId details: ReadDetails? children: ReadDetails[] }
+
 model Removable {}
+
+@Contract(version = 1) @Capability
+model ManageCustomer { remaining: Int? }
 
 @Contract(version = 1)
 model ChangeCustomer { note: String }

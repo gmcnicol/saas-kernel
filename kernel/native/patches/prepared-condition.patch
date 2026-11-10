@@ -1,0 +1,939 @@
+diff --git a/cedar-policy-core/src/ast/entity.rs b/cedar-policy-core/src/ast/entity.rs
+index 2a9ae99..0b536c6 100644
+--- a/cedar-policy-core/src/ast/entity.rs
++++ b/cedar-policy-core/src/ast/entity.rs
+@@ -304,7 +304,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Eid {
+ #[derive(Debug, Clone, Serialize)]
+ pub struct Entity {
+     /// UID
+-    uid: EntityUID,
++    uid: Arc<EntityUID>,
+ 
+     /// Internal BTreMap of attributes.
+     /// We use a btreemap so that the keys have a deterministic order.
+@@ -366,7 +366,7 @@ impl Entity {
+             .map(|kv| evaluate_kvs(kv, false))
+             .collect::<Result<_, EntityAttrEvaluationError>>()?;
+         Ok(Entity {
+-            uid,
++            uid: Arc::new(uid),
+             attrs: evaluated_attrs,
+             ancestors,
+             tags: evaluated_tags,
+@@ -403,7 +403,7 @@ impl Entity {
+         ancestors: HashSet<EntityUID>,
+     ) -> Self {
+         Entity {
+-            uid,
++            uid: Arc::new(uid),
+             attrs,
+             ancestors,
+             tags: BTreeMap::new(),
+@@ -415,6 +415,11 @@ impl Entity {
+         &self.uid
+     }
+ 
++    /// Share immutable UID storage with entity-store keys.
++    pub(crate) fn uid_arc(&self) -> Arc<EntityUID> {
++        Arc::clone(&self.uid)
++    }
++
+     /// Get the value for the given attribute, or `None` if not present
+     pub fn get(&self, attr: &str) -> Option<&PartialValue> {
+         self.attrs.get(attr).map(|v| v.as_ref())
+@@ -468,7 +473,7 @@ impl Entity {
+     /// Create an `Entity` with the given UID, no attributes, no parents, and no tags.
+     pub fn with_uid(uid: EntityUID) -> Self {
+         Self {
+-            uid,
++            uid: Arc::new(uid),
+             attrs: BTreeMap::new(),
+             ancestors: HashSet::new(),
+             tags: BTreeMap::new(),
+@@ -486,7 +491,7 @@ impl Entity {
+     // Only used for convenience in some tests
+     #[cfg(test)]
+     pub fn set_uid(&mut self, uid: EntityUID) {
+-        self.uid = uid;
++        self.uid = Arc::new(uid);
+     }
+ 
+     /// Set the given attribute to the given value.
+@@ -545,7 +550,7 @@ impl Entity {
+             tags,
+         } = self;
+         (
+-            uid,
++            Arc::unwrap_or_clone(uid),
+             attrs.into_iter().map(|(k, v)| (k, v.0)).collect(),
+             ancestors,
+             tags.into_iter().map(|(k, v)| (k, v.0)).collect(),
+diff --git a/cedar-policy-core/src/ast/policy.rs b/cedar-policy-core/src/ast/policy.rs
+index 1e003c0..9c092f5 100644
+--- a/cedar-policy-core/src/ast/policy.rs
++++ b/cedar-policy-core/src/ast/policy.rs
+@@ -32,7 +32,7 @@ extern crate tsify;
+ /// Contains both the AST for template, and the list of open slots in the template.
+ ///
+ /// Note that this "template" may have no slots, in which case this `Template` represents a static policy
+-#[derive(Clone, Hash, Eq, PartialEq, Debug, Serialize, Deserialize)]
++#[derive(Clone, Serialize, Deserialize)]
+ #[serde(from = "TemplateBody")]
+ #[serde(into = "TemplateBody")]
+ pub struct Template {
+@@ -42,6 +42,31 @@ pub struct Template {
+     ///
+     /// Note that `slots` may be empty, in which case this `Template` represents a static policy
+     slots: Vec<Slot>,
++    // Derived eagerly from the immutable body; slots remain unbound and are
++    // interpreted with each linked policy's own environment.
++    condition: Expr,
++}
++
++// Derived preparation state is not part of identity, hashing, or diagnostics.
++impl PartialEq for Template {
++    fn eq(&self, other: &Self) -> bool {
++        self.body == other.body && self.slots == other.slots
++    }
++}
++impl Eq for Template {}
++impl std::hash::Hash for Template {
++    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
++        self.body.hash(state);
++        self.slots.hash(state);
++    }
++}
++impl std::fmt::Debug for Template {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("Template")
++            .field("body", &self.body)
++            .field("slots", &self.slots)
++            .finish()
++    }
+ }
+ 
+ impl From<Template> for TemplateBody {
+@@ -156,6 +181,7 @@ impl Template {
+         Template {
+             body: self.body.new_id(id),
+             slots: self.slots.clone(),
++            condition: self.condition.clone(),
+         }
+     }
+ 
+@@ -190,7 +216,7 @@ impl Template {
+     /// principal, resource, and action); the template's "when" conditions; and
+     /// the negation of each of the template's "unless" conditions.
+     pub fn condition(&self) -> Expr {
+-        self.body.condition()
++        self.condition.clone()
+     }
+ 
+     /// List of open slots in this template
+@@ -265,9 +291,11 @@ impl Template {
+         // INVARIANT (slot cache correctness):
+         // StaticPolicy by invariant (inline policy correctness)
+         // can have no slots, so it is safe to make `slots` the empty vec
++        let condition = body.condition();
+         let t = Arc::new(Self {
+             body,
+             slots: vec![],
++            condition,
+         });
+         #[cfg(test)]
+         {
+@@ -287,8 +315,13 @@ impl From<TemplateBody> for Template {
+     fn from(body: TemplateBody) -> Self {
+         // INVARIANT: (slot cache correctness)
+         // Pull all the slots out of the template body's condition.
+-        let slots = body.condition().slots().collect::<Vec<_>>();
+-        Self { body, slots }
++        let condition = body.condition();
++        let slots = condition.slots().collect::<Vec<_>>();
++        Self {
++            body,
++            slots,
++            condition,
++        }
+     }
+ }
+ 
+diff --git a/cedar-policy-core/src/entities.rs b/cedar-policy-core/src/entities.rs
+index 39a7a52..ed16ce8 100644
+--- a/cedar-policy-core/src/entities.rs
++++ b/cedar-policy-core/src/entities.rs
+@@ -47,26 +47,18 @@ use err::*;
+ /// Note that `Entities` is `Serialize`, but currently this is only used for the
+ /// FFI layer in DRT. All others use (and should use) the `from_json_*()` and
+ /// `write_to_json()` methods as necessary.
+-#[serde_as]
+-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
++#[derive(Clone, Default)]
+ pub struct Entities {
+-    /// Serde cannot serialize a HashMap to JSON when the key to the map cannot
+-    /// be serialized to a JSON string. This is a limitation of the JSON format.
+-    /// `serde_as` annotation are used to serialize the data as associative
+-    /// lists instead.
+-    ///
+-    /// Important internal invariant: for any `Entities` object that exists, the
+-    /// the `ancestor` relation is transitively closed.
+-    #[serde_as(as = "Vec<(_, _)>")]
+-    entities: HashMap<EntityUID, Arc<Entity>>,
++    /// Fresh request entities; the ancestor relation is transitively closed.
++    entities: HashMap<Arc<EntityUID>, Arc<Entity>>,
++
++    /// Complete immutable schema metadata, disjoint from the fresh delta.
++    schema_actions: Option<Arc<HashMap<EntityUID, Arc<Entity>>>>,
+ 
+     /// The mode flag determines whether this store functions as a partial store or
+     /// as a fully concrete store.
+     /// Mode::Concrete means that the store is fully concrete, and failed dereferences are an error.
+     /// Mode::Partial means the store is partial, and failed dereferences result in a residual.
+-    #[serde(default)]
+-    #[serde(skip_deserializing)]
+-    #[serde(skip_serializing)]
+     mode: Mode,
+ }
+ 
+@@ -75,6 +67,7 @@ impl Entities {
+     pub fn new() -> Self {
+         Self {
+             entities: HashMap::new(),
++            schema_actions: None,
+             mode: Mode::default(),
+         }
+     }
+@@ -85,14 +78,14 @@ impl Entities {
+     #[cfg(feature = "partial-eval")]
+     pub fn partial(self) -> Self {
+         Self {
+-            entities: self.entities,
+             mode: Mode::Partial,
++            ..self
+         }
+     }
+ 
+     /// Get the `Entity` with the given UID, if any
+     pub fn entity(&self, uid: &EntityUID) -> Dereference<'_, Entity> {
+-        match self.entities.get(uid) {
++        match self.entities.get(uid).or_else(|| self.schema_actions.as_ref()?.get(uid)) {
+             Some(e) => Dereference::Data(e),
+             None => match self.mode {
+                 Mode::Concrete => Dereference::NoSuchEntity,
+@@ -109,7 +102,25 @@ impl Entities {
+ 
+     /// Iterate over the `Entity`s in the `Entities`
+     pub fn iter(&self) -> impl Iterator<Item = &Entity> {
+-        self.entities.values().map(|e| e.as_ref())
++        self.entity_arcs().map(Arc::as_ref)
++    }
++
++    fn entity_arcs(&self) -> impl Iterator<Item = &Arc<Entity>> {
++        self.entities.values().chain(self.schema_actions.iter().flat_map(|base| base.values()))
++    }
++
++    fn logical_map(&self) -> HashMap<&EntityUID, &Entity> {
++        self.iter().map(|e| (e.uid(), e)).collect()
++    }
++
++    // Only consuming/mutating operations need a complete owned-key map.
++    fn into_entity_map(self) -> HashMap<EntityUID, Arc<Entity>> {
++        let mut map: HashMap<_, _> = self.entities.into_values()
++            .map(|e| (e.uid().clone(), e)).collect();
++        if let Some(base) = self.schema_actions {
++            map.extend(base.iter().map(|(uid, entity)| (uid.clone(), Arc::clone(entity))));
++        }
++        map
+     }
+ 
+     /// Adds the [`crate::ast::Entity`]s in the iterator to this [`Entities`].
+@@ -124,18 +135,21 @@ impl Entities {
+     /// If you pass [`TCComputation::AssumeAlreadyComputed`], then the caller is
+     /// responsible for ensuring that TC and DAG hold before calling this method.
+     pub fn add_entities(
+-        mut self,
++        self,
+         collection: impl IntoIterator<Item = Arc<Entity>>,
+         schema: Option<&impl Schema>,
+         tc_computation: TCComputation,
+         extensions: &Extensions<'_>,
+     ) -> Result<Self> {
++        // Materialize both layers for the unchanged graph and duplicate checks.
++        let mode = self.mode;
++        let mut entity_map = self.into_entity_map();
+         let checker = schema.map(|schema| EntitySchemaConformanceChecker::new(schema, extensions));
+         for entity in collection.into_iter() {
+             if let Some(checker) = checker.as_ref() {
+                 checker.validate_entity(&entity)?;
+             }
+-            match self.entities.entry(entity.uid().clone()) {
++            match entity_map.entry(entity.uid().clone()) {
+                 hash_map::Entry::Occupied(_) => {
+                     return Err(EntitiesError::duplicate(entity.uid().clone()))
+                 }
+@@ -146,10 +160,14 @@ impl Entities {
+         }
+         match tc_computation {
+             TCComputation::AssumeAlreadyComputed => (),
+-            TCComputation::EnforceAlreadyComputed => enforce_tc_and_dag(&self.entities)?,
+-            TCComputation::ComputeNow => compute_tc(&mut self.entities, true)?,
++            TCComputation::EnforceAlreadyComputed => enforce_tc_and_dag(&entity_map)?,
++            TCComputation::ComputeNow => compute_tc(&mut entity_map, true)?,
+         };
+-        Ok(self)
++        Ok(Self {
++            entities: entity_map.into_values().map(|e| (e.uid_arc(), e)).collect(),
++            schema_actions: None,
++            mode,
++        })
+     }
+ 
+     /// Create an `Entities` object with the given entities.
+@@ -196,11 +214,15 @@ impl Entities {
+                 compute_tc(&mut entity_map, true)?;
+             }
+         }
++        // Keep final keys compact and share schema-owned immutable UID strings.
++        let mut entity_map: HashMap<Arc<EntityUID>, Arc<Entity>> =
++            entity_map.into_values().map(|e| (e.uid_arc(), e)).collect();
+         // Now that TC has been enforced, we can check action entities for
+         // conformance with the schema and add action entities to the store.
+         // This is fine to do after TC because the action hierarchy in the
+         // schema already satisfies TC, and action and non-action entities
+         // can never be in the same hierarchy when using schema-based parsing.
++        let mut schema_actions = None;
+         if let Some(schema) = schema {
+             let checker = EntitySchemaConformanceChecker::new(schema, extensions);
+             for entity in entity_map.values() {
+@@ -208,16 +230,19 @@ impl Entities {
+                     checker.validate_entity(entity)?;
+                 }
+             }
+-            // Add the action entities from the schema
+-            entity_map.extend(
+-                schema
+-                    .action_entities()
+-                    .into_iter()
+-                    .map(|e: Arc<Entity>| (e.uid().clone(), e)),
+-            );
++            if let Some(base) = schema.action_entity_index() {
++                // Supplied Actions were checked above; schema definitions replace
++                // them exactly as on the enumeration path, without cloning the base.
++                entity_map.retain(|uid, _| !base.contains_key(uid.as_ref()));
++                schema_actions = Some(base);
++            } else {
++                entity_map.extend(schema.action_entities().into_iter()
++                    .map(|e: Arc<Entity>| (e.uid_arc(), e)));
++            }
+         }
+         Ok(Self {
+             entities: entity_map,
++            schema_actions,
+             mode: Mode::default(),
+         })
+     }
+@@ -250,9 +275,7 @@ impl Entities {
+ 
+     /// Internal helper function to convert this `Entities` into a `Vec<EntityJson>`
+     fn to_ejsons(&self) -> Result<Vec<EntityJson>> {
+-        self.entities
+-            .values()
+-            .map(Arc::as_ref)
++        self.iter()
+             .map(EntityJson::from_entity)
+             .collect::<std::result::Result<_, JsonSerializationError>>()
+             .map_err(Into::into)
+@@ -322,6 +345,41 @@ impl Entities {
+     }
+ }
+ 
++impl PartialEq for Entities {
++    fn eq(&self, other: &Self) -> bool {
++        self.mode == other.mode
++            && self.entities.len() + self.schema_actions.as_ref().map_or(0, |b| b.len())
++                == other.entities.len() + other.schema_actions.as_ref().map_or(0, |b| b.len())
++            && self.iter().all(|entity| matches!(other.entity(entity.uid()),
++                Dereference::Data(other) if entity == other))
++    }
++}
++
++impl Eq for Entities {}
++
++impl std::fmt::Debug for Entities {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("Entities")
++            .field("entities", &self.logical_map())
++            .field("mode", &self.mode)
++            .finish()
++    }
++}
++
++impl Serialize for Entities {
++    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
++        // Preserve the original associative-list representation and omit mode.
++        #[serde_as]
++        #[derive(Serialize)]
++        #[serde(rename = "Entities")]
++        struct LogicalEntities<'a> {
++            #[serde_as(as = "Vec<(_, _)>")]
++            entities: HashMap<&'a EntityUID, &'a Entity>,
++        }
++        LogicalEntities { entities: self.logical_map() }.serialize(serializer)
++    }
++}
++
+ /// Create a map from EntityUids to Entities, erroring if there are any duplicates
+ fn create_entity_map(
+     es: impl Iterator<Item = Arc<Entity>>,
+@@ -347,16 +405,17 @@ impl IntoIterator for Entities {
+     >;
+ 
+     fn into_iter(self) -> Self::IntoIter {
+-        self.entities.into_values().map(Arc::unwrap_or_clone)
++        // Preserve the public consuming iterator type; evaluation uses borrowed iteration.
++        self.into_entity_map().into_values().map(Arc::unwrap_or_clone)
+     }
+ }
+ 
+ impl std::fmt::Display for Entities {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+-        if self.entities.is_empty() {
++        if self.iter().next().is_none() {
+             write!(f, "<empty Entities>")
+         } else {
+-            for e in self.entities.values() {
++            for e in self.iter() {
+                 writeln!(f, "{e}")?;
+             }
+             Ok(())
+@@ -456,6 +515,51 @@ pub enum TCComputation {
+ mod json_parsing_tests {
+ 
+     use super::*;
++
++    #[test]
++    fn compact_uid_keys_preserve_value_lookup_and_mutating_paths() {
++        let uid: EntityUID = r#"User::"a-long-private-entity-identifier""#.parse().unwrap();
++        let parent: EntityUID = r#"User::"parent""#.parse().unwrap();
++        let entity = Entity::new_with_attr_partial_value(
++            uid.clone(), [("value".into(), PartialValue::from(42))],
++            [parent.clone()].into_iter().collect(),
++        );
++        let original = entity.clone();
++        let store = Entities::from_entities(
++            [entity], None::<&NoEntitiesSchema>, TCComputation::ComputeNow,
++            Extensions::all_available(),
++        ).unwrap();
++        let key = store.entities.keys().next().unwrap();
++        assert!(std::ptr::eq(key.as_ref(), store.entity(&uid).unwrap().uid()));
++        assert_eq!(key.as_ref(), &uid);
++        assert_eq!(store.entity(&uid.clone()).unwrap().get("value"), Some(&PartialValue::from(42)));
++        assert_eq!(serde_json::to_value(&original).unwrap(),
++            serde_json::to_value(store.entity(&uid).unwrap()).unwrap());
++        assert_eq!(store.clone().into_iter().next().unwrap().into_inner().0, uid);
++        let json = store.to_json_value().unwrap();
++        let parser = EntityJsonParser::new(None::<&NoEntitiesSchema>, Extensions::all_available(), TCComputation::ComputeNow);
++        assert_eq!(store, parser.from_json_value(json).unwrap());
++        assert_eq!(store, store.clone());
++        assert!(!format!("{store:?}").is_empty());
++        assert!(store.clone().add_entities(
++            [Arc::new(original)], None::<&NoEntitiesSchema>, TCComputation::ComputeNow,
++            Extensions::all_available(),
++        ).is_err());
++        let added = store.clone().add_entities(
++            [Arc::new(Entity::with_uid(parent.clone()))], None::<&NoEntitiesSchema>,
++            TCComputation::EnforceAlreadyComputed, Extensions::all_available(),
++        ).unwrap();
++        assert!(added.entity(&uid).unwrap().is_descendant_of(&parent));
++        let cyclic_parent = Entity::new_with_attr_partial_value(
++            parent, [], [uid.clone()].into_iter().collect(),
++        );
++        assert!(store.clone().add_entities(
++            [Arc::new(cyclic_parent)], None::<&NoEntitiesSchema>, TCComputation::ComputeNow,
++            Extensions::all_available(),
++        ).is_err());
++        #[cfg(feature = "partial-eval")]
++        assert!(matches!(store.partial().entity(&EntityUID::with_eid("missing")), Dereference::Residual(_)));
++    }
+     use crate::{extensions::Extensions, test_utils::*, transitive_closure::TcError};
+     use cool_asserts::assert_matches;
+ 
+@@ -2053,6 +2157,59 @@ mod schema_based_parsing_tests {
+         }
+     }
+ 
++    #[test]
++    fn all_schema_actions_share_uids_and_remain_visible() {
++        struct ActionSchema(Vec<Arc<Entity>>);
++        impl Schema for ActionSchema {
++            type EntityTypeDescription = MockEmployeeDescription;
++            type ActionEntityIterator = std::vec::IntoIter<Arc<Entity>>;
++            fn entity_type(&self, ty: &EntityType) -> Option<Self::EntityTypeDescription> {
++                MockSchema.entity_type(ty)
++            }
++            fn action(&self, uid: &EntityUID) -> Option<Arc<Entity>> {
++                self.0.iter().find(|e| e.uid() == uid).cloned()
++            }
++            fn entity_types_with_basename<'a>(&'a self, name: &'a UnreservedId)
++                -> Box<dyn Iterator<Item = EntityType> + 'a> {
++                MockSchema.entity_types_with_basename(name)
++            }
++            fn action_entities(&self) -> Self::ActionEntityIterator {
++                self.0.clone().into_iter()
++            }
++        }
++        let view: EntityUID = r#"Action::"view""#.parse().unwrap();
++        let read_only: EntityUID = r#"Action::"readOnly""#.parse().unwrap();
++        let mut actions = vec![MockSchema.action(&view).unwrap(), MockSchema.action(&read_only).unwrap()];
++        actions.extend((0..256).map(|n| Arc::new(Entity::with_uid(
++            format!("Extra::Nested::Action::\"unused{n}\"").parse().unwrap(),
++        ))));
++        let schema = ActionSchema(actions);
++        let extensions = Extensions::all_available();
++        let store = Entities::from_entities([], Some(&schema), TCComputation::ComputeNow, extensions).unwrap();
++        assert_eq!(store.iter().count(), 258);
++        for action in &schema.0 {
++            let key = store.entities.get_key_value(action.uid()).unwrap().0;
++            assert!(std::ptr::eq(key.as_ref(), action.uid()));
++        }
++        // The requested Action is not view: other Actions' attributes and hierarchy
++        // must still be available to policies.
++        let request = Request::new_unchecked(
++            EntityUIDEntry::known(EntityUID::with_eid("p"), None),
++            EntityUIDEntry::known(read_only, None),
++            EntityUIDEntry::known(EntityUID::with_eid("r"), None), Some(Context::empty()),
++        );
++        let policy = crate::parser::parse_policy(None,
++            r#"permit(principal, action, resource) when { Action::"view".foo == 34 && Action::"view" in Action::"readOnly" };"#,
++        ).unwrap();
++        assert!(crate::evaluator::Evaluator::new(request, &store, extensions).evaluate(&policy.into()).unwrap());
++        let matching = schema.action(&view).unwrap().as_ref().clone();
++        assert_eq!(store, Entities::from_entities([matching.clone()], Some(&schema), TCComputation::ComputeNow, extensions).unwrap());
++        assert!(Entities::from_entities([matching.clone(), matching.clone()], Some(&schema), TCComputation::ComputeNow, extensions).is_err());
++        let mut mismatch = matching;
++        mismatch.set_attr("foo".into(), RestrictedExpr::val(35), extensions).unwrap();
++        assert!(Entities::from_entities([mismatch], Some(&schema), TCComputation::ComputeNow, extensions).is_err());
++    }
++
+     /// Mock schema impl with an entity type that doesn't have a tags declaration
+     struct MockSchemaNoTags;
+     impl Schema for MockSchemaNoTags {
+diff --git a/cedar-policy-core/src/entities/json/schema.rs b/cedar-policy-core/src/entities/json/schema.rs
+index 9dd8b70..7659738 100644
+--- a/cedar-policy-core/src/entities/json/schema.rs
++++ b/cedar-policy-core/src/entities/json/schema.rs
+@@ -18,7 +18,7 @@ use super::SchemaType;
+ use crate::ast::{Entity, EntityType, EntityUID};
+ use crate::entities::{Name, UnreservedId};
+ use smol_str::SmolStr;
+-use std::collections::HashSet;
++use std::collections::{HashMap, HashSet};
+ use std::sync::Arc;
+ 
+ /// Trait for `Schema`s that can inform the parsing of Entity JSON data
+@@ -48,6 +48,14 @@ pub trait Schema {
+ 
+     /// Get all the actions declared in the schema
+     fn action_entities(&self) -> Self::ActionEntityIterator;
++
++    /// Internal immutable metadata: the complete, transitively closed Action
++    /// index, with exactly the definitions returned by `action_entities()`.
++    /// Implementations without a prepared index retain the enumeration path.
++    #[doc(hidden)]
++    fn action_entity_index(&self) -> Option<Arc<HashMap<EntityUID, Arc<Entity>>>> {
++        None
++    }
+ }
+ 
+ /// Simple type that implements `Schema` by expecting no entities to exist at all
+diff --git a/cedar-policy-core/src/evaluator.rs b/cedar-policy-core/src/evaluator.rs
+index 8c9ca78..5e7c092 100644
+--- a/cedar-policy-core/src/evaluator.rs
++++ b/cedar-policy-core/src/evaluator.rs
+@@ -372,6 +372,28 @@ impl<'e> Evaluator<'e> {
+                 PartialValue::Residual(r) => Ok(PartialValue::Residual(Expr::unary_app(*op, r))),
+             },
+             ExprKind::BinaryApp { op, arg1, arg2 } => {
++                // Literal Action scopes cannot error, so borrow their UIDs instead
++                // of materializing a temporary Value set for every policy visit.
++                if let (BinaryOp::In, ExprKind::Var(Var::Action), ExprKind::Set(items), Some(uid)) =
++                    (op, arg1.expr_kind(), arg2.expr_kind(), self.action.uid())
++                {
++                    if items.iter().all(|item| matches!(item.expr_kind(), ExprKind::Lit(Literal::EntityUID(_)))) {
++                        let entity = match self.entities.entity(uid) {
++                            Dereference::Data(entity) => Some(Some(entity)),
++                            Dereference::NoSuchEntity => Some(None),
++                            // Even an empty set must retain the original residual.
++                            Dereference::Residual(_) => None,
++                        };
++                        if let Some(entity) = entity {
++                            return Ok(Self::entity_in(uid, entity, items.iter().filter_map(|item| {
++                                match item.expr_kind() {
++                                    ExprKind::Lit(Literal::EntityUID(uid)) => Some(uid.as_ref()),
++                                    _ => None,
++                                }
++                            })).into());
++                        }
++                    }
++                }
+                 // NOTE: There are more precise partial eval opportunities here, esp w/ typed unknowns
+                 // Current limitations:
+                 //   Operators are not partially evaluated.
+@@ -699,18 +721,17 @@ impl<'e> Evaluator<'e> {
+                 ))
+             }
+         };
+-        for uid2 in rhs {
+-            if uid1 == &uid2
+-                || entity1
+-                    .map(|e1| e1.is_descendant_of(&uid2))
+-                    .unwrap_or(false)
+-            {
+-                return Ok(true.into());
+-            }
+-        }
+-        // if we get here, `uid1` is not a descendant of (or equal to)
+-        // any UID in `rhs`
+-        Ok(false.into())
++        Ok(Self::entity_in(uid1, entity1, rhs.iter()).into())
++    }
++
++    fn entity_in<'a>(
++        uid1: &EntityUID,
++        entity1: Option<&Entity>,
++        mut rhs: impl Iterator<Item = &'a EntityUID>,
++    ) -> bool {
++        rhs.any(|uid2| {
++            uid1 == uid2 || entity1.map(|e1| e1.is_descendant_of(uid2)).unwrap_or(false)
++        })
+     }
+ 
+     /// Evaluation of conditionals
+diff --git a/cedar-policy-core/tests/literal_action_membership.rs b/cedar-policy-core/tests/literal_action_membership.rs
+new file mode 100644
+index 0000000..ddff02f
+--- /dev/null
++++ b/cedar-policy-core/tests/literal_action_membership.rs
+@@ -0,0 +1,133 @@
++/*
++ * Copyright Cedar Contributors
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++use cedar_policy_core::{
++    ast::*,
++    entities::{Entities, NoEntitiesSchema, TCComputation},
++    evaluator::Evaluator,
++    extensions::Extensions,
++    parser,
++};
++use std::{collections::{HashMap, HashSet}, sync::Arc};
++
++fn parse_expr(source: &str) -> Result<Expr, cedar_policy_core::parser::err::ParseErrors> {
++    source.parse()
++}
++
++fn request(action: EntityUIDEntry) -> Request {
++    Request::new_unchecked(
++        EntityUIDEntry::known("User::\"u\"".parse().unwrap(), None),
++        action,
++        EntityUIDEntry::known("Row::\"r\"".parse().unwrap(), None),
++        Some(Context::empty()),
++    )
++}
++
++// A computed LHS takes the original generic membership path, with identical
++// values and source locations, without a test-only engine switch.
++fn generic(expr: &Expr) -> Expr {
++    let ExprKind::BinaryApp { op, arg1, arg2 } = expr.expr_kind() else {
++        panic!("expected binary expression");
++    };
++    Expr::binary_app(
++        *op,
++        Expr::ite(Expr::val(true), arg1.as_ref().clone(), arg1.as_ref().clone())
++            .with_maybe_source_loc(arg1.source_loc().cloned()),
++        arg2.as_ref().clone(),
++    )
++    .with_maybe_source_loc(expr.source_loc().cloned())
++}
++
++fn compare(eval: &Evaluator<'_>, expr: &Expr, slots: &SlotEnv) {
++    let actual = eval.partial_interpret(expr, slots);
++    let expected = eval.partial_interpret(&generic(expr), slots);
++    // Debug includes errors, residual structure and every nested source location.
++    assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "{expr}");
++}
++
++#[test]
++fn literal_action_membership_matches_generic_values_errors_and_locations() {
++    let child = Entity::new("Ns::Action::\"read\"".parse().unwrap(), [],
++        HashSet::from(["Ns::Action::\"parent\"".parse().unwrap()]), [], Extensions::all_available()).unwrap();
++    let entities = Entities::from_entities(
++        [child], None::<&NoEntitiesSchema>, TCComputation::ComputeNow, Extensions::all_available(),
++    ).unwrap();
++    let slots = HashMap::new();
++    for action in ["Ns::Action::\"read\"", "Ns::Action::\"parent\"", "Ns::Action::\"absent\"", "Other::Action::\"read\""] {
++        let eval = Evaluator::new(request(EntityUIDEntry::known(action.parse().unwrap(), None)), &entities, Extensions::all_available());
++        for source in [
++            "action in []",
++            "action in [Ns::Action::\"read\"]",
++            "action in [Ns::Action::\"parent\"]",
++            "action in [Ns::Action::\"absent\"]",
++            "action in [Ns::Action::\"read\", Ns::Action::\"read\"]",
++            "action in [Ns::Action::\"unrelated\", Ns::Action::\"parent\"]",
++            "action in [Other::Action::\"read\"]",
++            "action in [Ns::Action::\"read\", 1]",
++            "action in [1, Ns::Action::\"read\"]",
++            "action in [principal, resource]",
++            "action in (if true then [Ns::Action::\"read\"] else [])",
++            "action in [context.missing]",
++            "action in Ns::Action::\"parent\"",
++            "action in 1",
++            "action in {}",
++            "1 in [Ns::Action::\"read\"]",
++            "principal in [Ns::Action::\"read\"]",
++        ] {
++            compare(&eval, &parse_expr(source).unwrap(), &slots);
++        }
++        let matching = parse_expr(&format!("action in [{action}]")).unwrap();
++        assert_eq!(eval.interpret(&matching, &slots).unwrap(), Value::new(true, None));
++        let bad = parse_expr("context.missing").unwrap();
++        let no_match = parse_expr("action in [Ns::Action::\"unrelated\"]").unwrap();
++        assert_eq!(eval.interpret(&Expr::and(no_match, bad.clone()), &slots).unwrap(), Value::new(false, None));
++        assert!(eval.interpret(&Expr::and(matching, bad), &slots).is_err());
++    }
++}
++
++#[cfg(feature = "partial-eval")]
++#[test]
++fn partial_actions_and_entity_stores_keep_residual_shape_and_locations() {
++    let known = Entity::with_uid("Ns::Action::\"known\"".parse().unwrap());
++    let entities = Entities::from_entities(
++        [known], None::<&NoEntitiesSchema>, TCComputation::ComputeNow, Extensions::all_available(),
++    ).unwrap().partial();
++    for action in [
++        EntityUIDEntry::Unknown { loc: None },
++        EntityUIDEntry::known("Ns::Action::\"absent\"".parse().unwrap(), None),
++        EntityUIDEntry::known("Ns::Action::\"known\"".parse().unwrap(), None),
++    ] {
++        let eval = Evaluator::new(request(action), &entities, Extensions::all_available());
++        for source in [
++            "action in []",
++            "action in [Ns::Action::\"absent\"]",
++            "action in [Ns::Action::\"known\", Ns::Action::\"known\"]",
++            "action in [Ns::Action::\"other\", Ns::Action::\"known\"]",
++            "action in [1, Ns::Action::\"known\"]",
++            "action in [unknown(\"rhs\")]",
++        ] {
++            compare(&eval, &parse_expr(source).unwrap(), &HashMap::new());
++        }
++    }
++}
++
++#[test]
++fn literal_action_scopes_keep_link_environments_and_short_circuit_errors() {
++    let entities = Entities::new();
++    let eval = Evaluator::new(request(EntityUIDEntry::known("Action::\"read\"".parse().unwrap(), None)), &entities, Extensions::all_available());
++    let template = Arc::new(parser::parse_template(None,
++        "permit(principal == ?principal, action in [Action::\"read\", Action::\"other\"], resource == ?resource) when { context.missing };").unwrap());
++    for (principal, errors) in [("u", true), ("other", false)] {
++        let policy = Template::link(template.clone(), PolicyID::from_string(principal), HashMap::from([
++            (SlotId::principal(), format!("User::\"{principal}\"").parse().unwrap()),
++            (SlotId::resource(), "Row::\"r\"".parse().unwrap()),
++        ])).unwrap();
++        let result = eval.evaluate(&policy);
++        if errors { assert!(result.is_err()); } else { assert!(!result.unwrap()); }
++    }
++    let unlinked = parse_expr("action in [?principal]").unwrap();
++    compare(&eval, &unlinked, &HashMap::new());
++    compare(&eval, &unlinked, &HashMap::from([(SlotId::principal(), "Action::\"read\"".parse().unwrap())]));
++}
+diff --git a/cedar-policy-validator/src/coreschema.rs b/cedar-policy-validator/src/coreschema.rs
+index a199918..d389913 100644
+--- a/cedar-policy-validator/src/coreschema.rs
++++ b/cedar-policy-validator/src/coreschema.rs
+@@ -70,6 +70,10 @@ impl<'a> entities::Schema for CoreSchema<'a> {
+     fn action_entities(&self) -> Self::ActionEntityIterator {
+         self.schema.actions.values().cloned()
+     }
++
++    fn action_entity_index(&self) -> Option<Arc<std::collections::HashMap<ast::EntityUID, Arc<ast::Entity>>>> {
++        Some(Arc::clone(&self.schema.actions))
++    }
+ }
+ 
+ /// Struct which carries enough information that it can impl Core's `EntityTypeDescription`
+@@ -504,6 +508,20 @@ mod test {
+             .expect("failed to create ValidatorSchema")
+     }
+ 
++    #[test]
++    fn normalized_stores_reuse_the_full_schema_action_index() {
++        use cedar_policy_core::entities::{Entities, Schema, TCComputation};
++        let schema = schema();
++        let core = CoreSchema::new(&schema);
++        let action = core.action(&ast::EntityUID::with_eid_and_type("Action", "view_photo").unwrap()).unwrap();
++        let entity_refs = Arc::strong_count(&action);
++        let first = Entities::from_entities([], Some(&core), TCComputation::ComputeNow, Extensions::all_available()).unwrap();
++        let second = Entities::from_entities([], Some(&core), TCComputation::ComputeNow, Extensions::all_available()).unwrap();
++        assert_eq!(first.iter().count(), 2);
++        assert_eq!(first, second);
++        assert_eq!(Arc::strong_count(&action), entity_refs, "normalization must share the full index, not clone each Action Arc");
++    }
++
+     /// basic success with concrete request and no context
+     #[test]
+     fn success_concrete_request_no_context() {
+diff --git a/cedar-policy-validator/src/schema.rs b/cedar-policy-validator/src/schema.rs
+index 83cf053..15a7792 100644
+--- a/cedar-policy-validator/src/schema.rs
++++ b/cedar-policy-validator/src/schema.rs
+@@ -170,8 +170,8 @@ pub struct ValidatorSchema {
+     /// `ValidatorSchema`, but not efficient to extract -- getting the `Entity`
+     /// from the `ValidatorSchema` is O(N) as of this writing, but with this
+     /// cache it's O(1).
+-    #[serde_as(as = "Vec<(_, _)>")]
+-    pub(crate) actions: HashMap<EntityUID, Arc<Entity>>,
++    #[serde_as(as = "Arc<Vec<(_, _)>>")]
++    pub(crate) actions: Arc<HashMap<EntityUID, Arc<Entity>>>,
+ }
+ 
+ /// Construct [`ValidatorSchema`] from a string containing a schema formatted
+@@ -290,7 +290,7 @@ impl ValidatorSchema {
+         Self {
+             entity_types: HashMap::new(),
+             action_ids: HashMap::new(),
+-            actions: HashMap::new(),
++            actions: Arc::new(HashMap::new()),
+         }
+     }
+ 
+@@ -600,7 +600,7 @@ impl ValidatorSchema {
+         Ok(ValidatorSchema {
+             entity_types,
+             action_ids,
+-            actions,
++            actions: Arc::new(actions),
+         })
+     }
+ 
+diff --git a/cedar-policy-validator/tests/schema_action_index.rs b/cedar-policy-validator/tests/schema_action_index.rs
+new file mode 100644
+index 0000000..cb9d8a0
+--- /dev/null
++++ b/cedar-policy-validator/tests/schema_action_index.rs
+@@ -0,0 +1,114 @@
++/*
++ * Copyright Cedar Contributors
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      https://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++use cedar_policy_core::{
++    ast::*,
++    entities::{err::EntitiesError, Dereference, Entities, EntityJsonParser, Schema, TCComputation},
++    evaluator::Evaluator,
++    extensions::Extensions,
++};
++use cedar_policy_validator::{ActionBehavior, CoreSchema, ValidatorSchema, ValidatorSchemaFragment};
++use serde_json::{json, Value};
++use std::{collections::HashSet, sync::Arc};
++
++fn uid(text: &str) -> EntityUID { text.parse().unwrap() }
++
++fn sorted(mut value: Value) -> Value {
++    value.as_array_mut().unwrap().sort_by_key(Value::to_string);
++    value
++}
++
++#[test]
++fn layered_store_preserves_full_normalized_store_semantics() {
++    let extensions = Extensions::all_available();
++    let fragment = ValidatorSchemaFragment::from_schema_fragment(
++        serde_json::from_value(json!({"": {
++            "entityTypes": {"User": {"memberOfTypes": ["User"]}},
++            "actions": {
++                "group": {},
++                "unrelated": {"attributes": {"flag": true}, "memberOf": [{"id": "group"}]},
++                "read": {"appliesTo": {"principalTypes": ["User"], "resourceTypes": ["User"]}}
++            }
++        }})).unwrap(), ActionBehavior::PermitAttributes, extensions,
++    ).unwrap();
++    let schema = ValidatorSchema::from_schema_fragments([fragment], extensions).unwrap();
++    let core = CoreSchema::new(&schema);
++    let user = Entity::new_with_attr_partial_value(uid(r#"User::"u""#), [],
++        HashSet::from([uid(r#"User::"missing""#)]));
++    let store = Entities::from_entities([user.clone()], Some(&core), TCComputation::ComputeNow, extensions).unwrap();
++    assert_eq!(store.iter().count(), 4);
++    assert!(matches!(store.entity(&uid(r#"User::"missing""#)), Dereference::NoSuchEntity));
++    let action = core.action(&uid(r#"Action::"unrelated""#)).unwrap();
++    let base = core.action_entity_index().unwrap();
++    let base_refs = Arc::strong_count(&base);
++    let action_refs = Arc::strong_count(&action);
++    let second = Entities::from_entities([user.clone(), action.as_ref().clone()], Some(&core), TCComputation::ComputeNow, extensions).unwrap();
++    assert_eq!(Arc::strong_count(&base), base_refs + 1);
++    assert_eq!(Arc::strong_count(&action), action_refs);
++    assert_eq!(store, second);
++    drop(second);
++    assert_eq!(Arc::strong_count(&base), base_refs);
++    let request = Request::new_unchecked(
++        EntityUIDEntry::known(user.uid().clone(), None),
++        EntityUIDEntry::known(uid(r#"Action::"read""#), None),
++        EntityUIDEntry::known(user.uid().clone(), None), Some(Context::empty()),
++    );
++    let policy = cedar_policy_core::parser::parse_policy(None,
++        r#"permit(principal, action, resource) when { Action::"unrelated".flag && Action::"unrelated" in Action::"group" };"#,
++    ).unwrap();
++    assert!(Evaluator::new(request, &store, extensions).evaluate(&policy.into()).unwrap());
++
++    // A flat equivalent is an independent oracle for all logical-store APIs.
++    let flat = Entities::from_entities(store.clone(), None::<&CoreSchema<'_>>,
++        TCComputation::EnforceAlreadyComputed, extensions).unwrap();
++    assert_eq!(store, flat);
++    assert_eq!(sorted(store.to_json_value().unwrap()), sorted(flat.to_json_value().unwrap()));
++    let serialized = serde_json::to_value(&store).unwrap();
++    assert_eq!(serialized.as_object().unwrap().len(), 1);
++    assert_eq!(sorted(serialized["entities"].clone()), sorted(serde_json::to_value(&flat).unwrap()["entities"].clone()));
++    let debug = format!("{store:?}");
++    assert!(debug.starts_with("Entities { entities:"));
++    assert!(debug.contains("unrelated") && debug.contains("flag") && !debug.contains("schema_actions"));
++    assert!(store.to_string().contains("unrelated"));
++    assert!(store.to_dot_str().contains("unrelated"));
++    let reparsed = EntityJsonParser::new(None::<&CoreSchema<'_>>, extensions, TCComputation::ComputeNow)
++        .from_json_value(store.to_json_value().unwrap()).unwrap();
++    assert_eq!(store, reparsed);
++    let _: std::iter::Map<std::collections::hash_map::IntoValues<EntityUID, Arc<Entity>>, fn(Arc<Entity>) -> Entity> = store.clone().into_iter();
++    for mode in [TCComputation::AssumeAlreadyComputed, TCComputation::EnforceAlreadyComputed, TCComputation::ComputeNow] {
++        assert_eq!(store, Entities::from_entities([user.clone(), action.as_ref().clone()], Some(&core), mode, extensions).unwrap());
++    }
++    let matching = action.as_ref().clone();
++    assert!(matches!(Entities::from_entities([matching.clone(), matching.clone()], Some(&core), TCComputation::ComputeNow, extensions), Err(EntitiesError::Duplicate(_))));
++    let mismatch = Entity::with_uid(action.uid().clone());
++    assert!(matches!(Entities::from_entities([mismatch.clone()], Some(&core), TCComputation::ComputeNow, extensions), Err(EntitiesError::InvalidEntity(_))));
++    let cycle = Entity::new_with_attr_partial_value(uid(r#"User::"cycle""#), [], HashSet::from([uid(r#"User::"cycle""#)]));
++    assert!(matches!(Entities::from_entities([cycle, mismatch], Some(&core), TCComputation::ComputeNow, extensions), Err(EntitiesError::TransitiveClosureError(_))));
++    let unknown = Entity::new_with_attr_partial_value(uid(r#"User::"bad""#), [], HashSet::from([uid(r#"Unknown::"parent""#)]));
++    assert!(matches!(Entities::from_entities([unknown], Some(&core), TCComputation::ComputeNow, extensions), Err(EntitiesError::InvalidEntity(_))));
++    assert!(matches!(store.clone().add_entities([Arc::clone(&action)], Some(&core), TCComputation::ComputeNow, extensions), Err(EntitiesError::Duplicate(_))));
++    let added = store.clone().add_entities([Arc::new(Entity::with_uid(uid(r#"User::"new""#)))], Some(&core), TCComputation::ComputeNow, extensions).unwrap();
++    assert_eq!(added.iter().count(), 5);
++    assert!(matches!(added.entity(action.uid()), Dereference::Data(_)));
++    #[cfg(feature = "partial-eval")]
++    {
++        let partial = store.clone().partial();
++        assert!(matches!(partial.entity(action.uid()), Dereference::Data(_)));
++        assert!(matches!(partial.entity(user.uid()), Dereference::Data(_)));
++        assert!(matches!(partial.entity(&uid(r#"User::"missing""#)), Dereference::Residual(_)));
++        assert_ne!(partial, store);
++        assert_eq!(sorted(partial.to_json_value().unwrap()), sorted(store.to_json_value().unwrap()));
++    }
++}

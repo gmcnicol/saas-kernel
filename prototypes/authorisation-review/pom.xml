@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- #67 review ONLY: deliberately absent from reactor and all production dependency graphs. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>io.github.gmcnicol</groupId><artifactId>saas-kernel-reactor</artifactId>
+        <version>0.2.0</version><relativePath>../../pom.xml</relativePath>
+    </parent>
+    <artifactId>authorisation-review-NOT-FOR-RELEASE</artifactId>
+    <properties><maven.deploy.skip>true</maven.deploy.skip><maven.install.skip>true</maven.install.skip></properties>
+    <dependencies>
+        <dependency><groupId>io.github.gmcnicol</groupId><artifactId>saas-kernel</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.assertj</groupId><artifactId>assertj-core</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-junit-jupiter</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-postgresql</artifactId><scope>test</scope></dependency>
+    </dependencies>
+    <build><plugins>
+        <plugin>
+            <groupId>io.github.gmcnicol</groupId><artifactId>saas-kernel-taxi-generator</artifactId><version>${project.version}</version>
+            <configuration><basePackage>review.bindings</basePackage></configuration>
+            <executions><execution><goals><goal>generate</goal></goals></execution></executions>
+        </plugin>
+    </plugins></build>
+</project>

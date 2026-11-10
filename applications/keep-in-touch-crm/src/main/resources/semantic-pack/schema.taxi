@@ -1,3 +1,4 @@
+import io.github.gmcnicol.kernel.taxi.Capability
 import io.github.gmcnicol.kernel.taxi.Subject
 import io.github.gmcnicol.kernel.taxi.Contract
 import io.github.gmcnicol.kernel.taxi.ProjectedState
@@ -8,9 +9,38 @@ import io.github.gmcnicol.kernel.taxi.Published
 
 namespace io.github.gmcnicol.crm
 
+@Published @Contract(version = 1) @Capability
+model EngageContact { remaining: Int? }
+
+@Published @Contract(version = 1) @Capability
+model ExportContacts {}
+
 @Subject
 @Published
 type ContactId inherits String
+
+@Published @Subject
+type NetworkId inherits String
+
+@Published @Subject
+type NetworkContactId inherits String
+
+@Published
+model ContactReadDetails {
+    displayName: String
+    privateNote: String?
+}
+
+@Contract(version = 1)
+@ProjectedState(subject = "io.github.gmcnicol.crm.NetworkContactId")
+@Published
+model NetworkContactRead {
+    contactId: NetworkContactId
+    network: String
+    owner: String
+    details: ContactReadDetails?
+    tags: String[]
+}
 
 @Contract(version = 1)
 @ProjectedState(subject = "io.github.gmcnicol.crm.ContactId")

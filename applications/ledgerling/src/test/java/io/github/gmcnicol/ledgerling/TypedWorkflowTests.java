@@ -8,6 +8,7 @@ import io.github.gmcnicol.kernel.application.Principal;
 import io.github.gmcnicol.kernel.application.RetryableIntentException;
 import io.github.gmcnicol.kernel.application.TypedProjectedState;
 import io.github.gmcnicol.kernel.application.TypedSubject;
+import io.github.gmcnicol.kernel.contract.ExactIntentExecutionContract;
 import io.github.gmcnicol.kernel.contract.TypedKernelBehaviourContract;
 import io.github.gmcnicol.kernel.semanticpack.TypedApplicabilityPolicy;
 import io.github.gmcnicol.kernel.semanticpack.TypedIntentHandler;
@@ -38,7 +39,7 @@ import org.testcontainers.utility.DockerImageName;
 
 @Testcontainers
 @SpringBootTest
-class TypedWorkflowTests extends TypedKernelBehaviourContract {
+class TypedWorkflowTests extends TypedKernelBehaviourContract implements ExactIntentExecutionContract {
 
     @Container
     static final PostgreSQLContainer postgres = new PostgreSQLContainer(DockerImageName.parse("postgres:18-alpine"))
@@ -73,6 +74,38 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
     }
 
     @Override
+    public ExactFlow exactFlow(String uniqueId) {
+        String tenant = "ledger-exact-contract-" + uniqueId;
+        String id = "filing-exact-" + uniqueId;
+        Instant dueAt = Instant.parse("2020-08-15T09:00:00Z");
+        seedFiling(tenant, id, dueAt, true, false);
+        FilingProjection projection = filings.projection(tenant, id);
+        var snapshot = kernel.evaluate(new TypedProjectedState<>(tenant,
+                new TypedSubject<>(FilingId.TYPE, projection.filingId()), 1,
+                FilingProjection.TYPE, projection), dueAt);
+        Principal principal = new Principal("Staff", "exact-contract");
+        UUID offerId = kernel.authorise(tenant, snapshot.id(), principal, dueAt.plusSeconds(1),
+                        FilingProjection.TYPE).actionOffers().stream()
+                .filter(candidate -> candidate.actionType() == LedgerlingActions.RECORD_RECORDS_RECEIVED)
+                .findFirst().orElseThrow().id();
+        return new ExactFlow(
+                kernel, tenant, principal, offerId, dueAt.plusSeconds(2),
+                variation -> LedgerlingActions.RECORD_RECORDS_RECEIVED.candidate(
+                        new RecordRecordsReceivedCandidateV1(switch (variation) {
+                            case ORIGINAL -> dueAt.plusSeconds(1);
+                            case CHANGED -> dueAt.plusSeconds(2);
+                        })),
+                () -> !filings.projection(tenant, id).recordsOutstanding(),
+                () -> admin().queryForObject(
+                        "SELECT count(*) FROM ledger_filing_change WHERE tenant_id = ?", Integer.class, tenant));
+    }
+
+    @Override
+    public CallerTransactions callerTransactions() {
+        return ExactIntentExecutionContract.springTransactions(transactionManager);
+    }
+
+    @Override
     protected Flow flow(String uniqueId) {
         String tenant = "ledger-contract-" + uniqueId;
         String id = "filing-" + uniqueId;
@@ -97,8 +130,7 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
                                     new RecordRecordsReceivedCandidateV1(dueAt.plusSeconds(1))));
                 },
                 at -> org.mockito.Mockito.doReturn(at).when(clock).instant(),
-                () -> kernel.evaluate(new TypedProjectedState<>(
-                        tenant, subject, 2, FilingProjection.TYPE, projection), processAt.minusSeconds(1)),
+                () -> admin().update("UPDATE ledger_filing_projection SET state_version = 2 WHERE tenant_id = ? AND filing_id = ?", tenant, id),
                 intent -> admin().update("""
                         UPDATE kernel.typed_intent SET status = 'CLAIMED', attempt_count = 1,
                             lease_token = ?, lease_until = ? WHERE id = ?
@@ -107,9 +139,9 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
                         .doCallRealMethod().when(handler).handle(
                                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
                                 org.mockito.ArgumentMatchers.any()),
-                () -> kernel.readIntentEvidence(
+                () -> kernel.findIntentEvents(
                         tenant, kernel.findIntents(io.github.gmcnicol.kernel.application.IntentQuery.tenant(tenant))
-                                .getFirst().id(), LedgerlingActions.RECORD_RECORDS_RECEIVED).events().size(),
+                                .getFirst().id()).size(),
                 () -> !filings.projection(tenant, id).recordsOutstanding(),
                 () -> !meters.find("kernel.intent.outcomes").counters().isEmpty());
     }
@@ -197,9 +229,8 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
 
         assertThat(completed.id()).isEqualTo(intent.id());
         assertThat(completed.status()).isEqualTo(IntentStatus.SUCCEEDED);
-        assertThat(kernel.readIntentEvidence(
-                        "tenant-one", intent.id(), LedgerlingActions.RECORD_RECORDS_RECEIVED).events())
-                .singleElement().extracting(event -> event.requestId().value()).isEqualTo("request-a");
+        assertThat(kernel.findIntentEvents("tenant-one", intent.id()))
+                .singleElement().extracting(event -> event.sequence()).isEqualTo(1);
         new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
             jdbc.execute("SET LOCAL ROLE kernel_runtime");
             jdbc.queryForObject("SELECT set_config('kernel.tenant_id', 'tenant-one', true)", String.class);
@@ -249,9 +280,8 @@ class TypedWorkflowTests extends TypedKernelBehaviourContract {
         org.mockito.Mockito.doReturn(startsAt).when(clock).instant();
 
         assertThat(kernel.processNext(startsAt).orElseThrow().status()).isEqualTo(IntentStatus.SUCCEEDED);
-        assertThat(kernel.readIntentEvidence(
-                        "tenant-correction", intent.id(), LedgerlingActions.RECORD_RECORDS_RECEIVED).events())
-                .singleElement().extracting(event -> event.requestId().value()).isEqualTo("request-correction");
+        assertThat(kernel.findIntentEvents("tenant-correction", intent.id()))
+                .singleElement().extracting(event -> event.sequence()).isEqualTo(1);
         assertThat(filings.projection("tenant-correction", "filing-correction").recordsOutstanding()).isFalse();
         assertThat(kernel.processNextReevaluation(startsAt)).isEmpty();
     }

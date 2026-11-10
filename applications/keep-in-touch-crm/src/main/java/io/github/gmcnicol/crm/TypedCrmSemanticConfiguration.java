@@ -56,10 +56,14 @@ class TypedCrmSemanticConfiguration {
     TypedEventProjector<FollowUpProjection, InteractionRecordedEventV1> typedInteractionRecordedProjector(
             JdbcTemplate jdbc) {
         return TypedCrmActions.RECORD_INTERACTION.bindProjector(
-                InteractionRecordedEventV1.TYPE, transition -> jdbc.update("""
+                InteractionRecordedEventV1.TYPE, transition -> {
+                    jdbc.update("""
                         UPDATE crm_contact_engagement_projection
                         SET open_follow_up_id = NULL, state_version = state_version + 1
                         WHERE tenant_id = ? AND contact_id = ?
-                        """, transition.tenantId(), transition.event().contactId().value()));
+                        """, transition.tenantId(), transition.event().contactId().value());
+                    jdbc.update("UPDATE crm_interaction SET recorded_at = ? WHERE tenant_id = ? AND intent_id = ?",
+                            java.sql.Timestamp.from(transition.occurredAt()), transition.tenantId(), transition.intentId());
+                });
     }
 }

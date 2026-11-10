@@ -40,11 +40,29 @@ _Avoid_: Cedar pack, policy pack, semantic pack
 A product-shaped scenario that validates the Kernel contract. Acceptance Fixtures are contrasting peers, not levels in a complexity ladder.
 _Avoid_: Demo app, complexity stage
 
+## Access and disclosure
+
+**Effective Capability**:
+A current, scope-bound right resolved by the Application from its valid grants, independent of how those grants originated. It is necessary authority, not a substitute for resource and field permission.
+_Avoid_: Subscription, workflow Fact, caller claim
+
+**Authorised Record**:
+An immutable ordinary-read projection containing only explicitly selected, permitted semantic leaves. It is not a workflow Evaluation Snapshot or authority for a future disclosure.
+_Avoid_: Raw DTO, Authorisation Envelope, reusable grant
+
+**Authorised Index**:
+An Application-owned current relation of records permitted for a principal's scoped query, including permission to query its predicate and ordering fields.
+_Avoid_: Raw candidate scan, Kernel repository
+
+**Disclosure Lineage**:
+The binding of a bounded disclosure to its original contributing resources, selected values, authority, policy, purpose and expiry. A derived response retains that lineage rather than acquiring authority from new sources.
+_Avoid_: Payload archive, signed download, permission snapshot
+
 ## Workflow
 
 **Projected State**:
-The current domain state derived from recorded Events.
-_Avoid_: Source of truth, mutable record
+A view of current Application-owned domain records, supplied for evaluation and execution.
+_Avoid_: Kernel copy, historical snapshot store
 
 **Fact**:
 A semantic statement derived from Projected State and used to evaluate business applicability.
@@ -54,9 +72,9 @@ _Avoid_: Permission, raw field
 An immutable result containing Facts and Applicable Actions derived for a subject from one Projected State version, at an explicit evaluation time, using one Semantic Pack version.
 _Avoid_: Evidence graph, decision log
 
-**Canonical Evidence**:
-The exact versioned UTF-8 JSON and checksum persisted for one typed Projected State, Fact, Candidate Payload, or Event. It protects semantic history and is not an Application business model or query store.
-_Avoid_: Source of truth, business JSON, relational projection
+**Execution Receipt**:
+A record identifying an executed Action's outcome and its domain record references, without duplicating the domain values.
+_Avoid_: Domain archive, payload evidence
 
 **Authorisation Envelope**:
 A principal-specific projection containing only Cedar-authorised fields, Facts, and Action Offers for one Evaluation Snapshot.

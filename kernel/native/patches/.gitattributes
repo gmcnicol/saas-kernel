@@ -1,0 +1,2 @@
+# Unified diff context must preserve blank lines from the pinned upstream source.
+*.patch -whitespace
