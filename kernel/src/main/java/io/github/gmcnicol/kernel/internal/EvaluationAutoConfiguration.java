@@ -23,18 +23,25 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import lang.taxi.Compiler;
 import lang.taxi.CompilerConfig;
+import org.springframework.beans.BeanWrapperImpl;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.actuate.info.InfoContributor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.jdbc.DataSourceBuilder;
+import org.springframework.boot.jdbc.DataSourceUnwrapper;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.core.io.ResourceLoader;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.AbstractDriverBasedDataSource;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 import javax.sql.DataSource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -105,10 +112,15 @@ public class EvaluationAutoConfiguration {
     @DependsOn({"applicationValidator", "runtimeRoleValidator"})
     SemanticDeploymentGuard semanticDeploymentGuard(
             DataSource dataSource,
+            @Qualifier("semanticDeploymentGuardDataSource") ObjectProvider<DataSource> dedicatedDataSource,
             SemanticPackVersion semanticPack,
             @Value("${spring.application.name}") String applicationId,
             ConfigurableApplicationContext context) {
-        return new SemanticDeploymentGuard(dataSource, applicationId, semanticPack.checksum(), () -> {
+        var guardDataSource = dedicatedDataSource.getIfAvailable(() -> deploymentGuardDataSource(dataSource));
+        if (DataSourceUnwrapper.unwrapRoot(guardDataSource) == DataSourceUnwrapper.unwrapRoot(dataSource)) {
+            throw unsupportedGuardDataSource();
+        }
+        return new SemanticDeploymentGuard(guardDataSource, applicationId, semanticPack.checksum(), () -> {
             org.springframework.boot.availability.AvailabilityChangeEvent.publish(
                     context, org.springframework.boot.availability.ReadinessState.REFUSING_TRAFFIC);
             Thread.ofPlatform().name("kernel-deployment-guard-shutdown").start(context::close);
@@ -253,6 +265,53 @@ public class EvaluationAutoConfiguration {
     @ConditionalOnMissingBean
     Clock kernelClock() {
         return Clock.systemUTC();
+    }
+
+    private static DataSource deploymentGuardDataSource(DataSource dataSource) {
+        var source = DataSourceUnwrapper.unwrapRoot(dataSource);
+        // One accounted, non-pooled session keeps the lifetime lock outside the request pool.
+        if (source.getClass() == DriverManagerDataSource.class || source.getClass() == SimpleDriverDataSource.class) {
+            var dedicated = (AbstractDriverBasedDataSource) DataSourceBuilder.derivedFrom(source)
+                    .type(source.getClass()).build();
+            dedicated.setConnectionProperties(copyConnectionProperties(
+                    ((AbstractDriverBasedDataSource) source).getConnectionProperties()));
+            if (source instanceof SimpleDriverDataSource simple) {
+                ((SimpleDriverDataSource) dedicated).setDriver(simple.getDriver());
+            }
+            return dedicated;
+        }
+        if (source.getClass().getName().equals("com.zaxxer.hikari.HikariDataSource")) {
+            var properties = new BeanWrapperImpl(source);
+            // Datasource-backed pools, session setup and rotating credentials cannot be cloned safely.
+            for (var property : List.of("dataSource", "dataSourceClassName", "dataSourceJNDI",
+                    "connectionInitSql", "schema", "catalog", "transactionIsolation",
+                    "credentialsProvider", "credentialsProviderClassName")) {
+                if (properties.isReadableProperty(property) && properties.getPropertyValue(property) != null) {
+                    throw unsupportedGuardDataSource();
+                }
+            }
+            if (properties.getPropertyValue("jdbcUrl") == null
+                    || Boolean.TRUE.equals(properties.getPropertyValue("readOnly"))) {
+                throw unsupportedGuardDataSource();
+            }
+            var dedicated = DataSourceBuilder.derivedFrom(source).type(SimpleDriverDataSource.class).build();
+            dedicated.setConnectionProperties(copyConnectionProperties(
+                    (Properties) properties.getPropertyValue("dataSourceProperties")));
+            return dedicated;
+        }
+        throw unsupportedGuardDataSource();
+    }
+
+    private static Properties copyConnectionProperties(Properties properties) {
+        // Keep SSL and driver options without sharing the mutable property map.
+        return properties == null ? null : (Properties) properties.clone();
+    }
+
+    private static IllegalStateException unsupportedGuardDataSource() {
+        return new IllegalStateException("Cannot safely create an independent Semantic Pack deployment guard connection. "
+                + "Define @Bean(defaultCandidate = false) named 'semanticDeploymentGuardDataSource': "
+                + "a dedicated non-pooled DataSource using the same runtime login, URL, driver and SSL/options "
+                + "as the request DataSource; account for one additional PostgreSQL connection.");
     }
 
     private static String kernelVersion() {
