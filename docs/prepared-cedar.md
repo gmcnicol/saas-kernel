@@ -4,7 +4,7 @@
 
 ## Source and release inventory
 
-The installed Cedar Java 4.2.3 uber JAR contains native entries for Linux x86_64/aarch64, macOS x86_64/aarch64 and Windows x86_64. This inventories existing SDK resources, not independent certification of those platforms. Kernel's existing build/release CI is Ubuntu. The release contract remains exactly two same-version Maven artifacts: runtime and Taxi generator. Native code/resources are embedded inside the existing runtime, never published as another artifact or service.
+The released 0.3.0 baseline used Cedar Java 4.2.3. The proposed advisory fix upgrades the SDK dependency to 4.11.0 while retaining the prepared engine below; [the assessment](cedar-advisory-assessment.md) records the human scope decision, dependency hashes and remaining gates. Both inspected uber JARs contain native entries for Linux x86_64/aarch64, macOS x86_64/aarch64 and Windows x86_64. This inventories existing SDK resources, not independent certification of those platforms. Kernel's existing build/release CI is Ubuntu. The release contract remains exactly two same-version Maven artifacts: runtime and Taxi generator. Native code/resources are embedded inside the existing runtime, never published as another artifact or service.
 
 The prepared engine pins Cedar Git commit **09e21d967f1da2cf2abbe1e0b0b2067b41867735**, with all dependency resolution recorded in `kernel/native/Cargo.lock`. The installed SDK Linux x86_64 binary embeds `git/checkouts/cedar-79b5bb6b8289a73a/09e21d9`; coordinator independently resolved that prefix and recorded JAR SHA256 `8f12d3d98deeef09781c4dd0d628b57f07712e6f2d89a5d400c8b74b5e77dd11` and native-entry SHA256 `ebaafb3ba13a464f5865c281ea8a523f5ff1d4384ef0134d39dde8543d479b07`. This is strong embedded source-lineage evidence for that entry, **not cryptographic build attestation**, exact compiler/dependency/binary equivalence or automatic provenance for every SDK platform. The captured prototype used an earlier two-commits-behind source. No large Cedar engine upgrade is included here.
 
@@ -16,7 +16,7 @@ The initial adoption used unpatched upstream. The later human-approved `kit-perf
 
 - `auto` (default): prepared scalar on Linux x86_64, glibc >=2.36; explicitly identified original-SDK adapter on genuinely unsupported prepared targets.
 - `prepared`: requires that ABI and its packaged binary. Unsupported ABI, missing resource, wrong digest/identity or load failure fails assembly. Execution failure denies; **there is no fallback after native failure**.
-- `sdk`: explicitly select the original SDK scalar adapter for differential checks/compatibility operations; it is not reported as prepared or fast.
+- `sdk`: explicitly select the SDK scalar adapter for differential checks/compatibility operations; the proposed advisory fix selects 4.11.0, uncached, rather than the affected original 4.2.3. It is not reported as prepared or fast.
 
 Operator meter `kernel.read.authorization.backend{backend=...}` distinguishes `prepared-scalar`, `sdk-explicit` and `sdk-unsupported-platform`. Retaining the SDK path preserves its existing platform behavior, not a new promise that an untested SDK platform works. Only Linux x86_64/glibc is being exercised for the new path. No macOS/Windows/aarch64 prepared binary or all-platform publication is advertised.
 
@@ -32,6 +32,8 @@ The loader probes glibc through Java25's public Foreign Function API, verifies a
 - A panicked job returns failure without retry or payload logging. Immutable parsed state is not mutated by evaluation, and each job constructs a fresh Authorizer; healthy later jobs can proceed. Poisoned lifecycle/registry locks fail closed; process restart is the recovery boundary for unrecoverable shared-state failure. Host/JVM/process OOM is not sandboxed by this library.
 
 Only immutable parsed schema/policy state is shared. Contexts, entities, permissions, capabilities and source snapshots are not retained across decisions/reads/fences. Native statistics contain aggregate counters only.
+
+The proposed advisory fix also prepares Java-side schema kind metadata through the SDK's public schema-conversion API. Both routes check original Cedar value kinds before schema-guided JSON coercion, so bare entity/extension-shaped maps cannot become typed references/extensions. Legitimate records with `type`, `id`, `fn` or `arg` fields remain records. Prepared checks stream inside the existing admission/byte boundary; SDK/workflow preflight streams to a discard sink without introducing an aggregate workflow byte ceiling. Full request/entity validation remains enabled. Upstream caching is not enabled: its schema-warning loss violates Kernel's strict-diagnostics contract.
 
 ## Build and evidence
 
