@@ -14,6 +14,8 @@ The initial adoption used unpatched upstream. The later human-approved `kit-perf
 
 The [platform compatibility matrix](platform-compatibility.md) records executed minimum-libc,
 below-floor SDK fallback and musl failure results separately from untested binary inventory.
+[JNI qualification](jni-qualification.md) records the retained-bridge decision, fixed-workload timing,
+explicit lifecycle cleanup, no-GC regressions and final artifact receipts.
 
 `kernel.authorisation.read-evaluator` is a production configuration property:
 

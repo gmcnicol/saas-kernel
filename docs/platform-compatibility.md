@@ -4,7 +4,7 @@
 
 This is the current qualification record for the **retained prepared scalar JNI bridge**, not a promise that every platform included in the Cedar SDK works with Kernel.
 
-The executed checks below used the proposed advisory implementation at source `5724be6473b0f50bb3f7997aa42dc08f3b7dcba9` (documentation at `817e6b4`), Java SDK 4.11.0 without upstream caching, and the unchanged owned native bridge. The private runtime JAR still carries 0.3.0 metadata but **is not the signed released 0.3.0**. Published 0.3.0 retains SDK 4.2.3; these new results do not silently recertify that release or authorise publication/deployment.
+The executed checks below used the proposed advisory implementation at lifecycle-hardened source `5d004b595d19c08280b82d120063b18db2e08fe6`, Java SDK 4.11.0 without upstream caching, and the retained bridge with unchanged Cedar engine base/patch and ABI. Earlier qualification at `5724be6` was repeated against the final rebuilt artifact; the [qualification receipt](jni-qualification.md) records the lifecycle fix and new bytes. The private runtime JAR still carries 0.3.0 metadata but **is not the signed released 0.3.0**. Published 0.3.0 retains SDK 4.2.3; these new results do not silently recertify that release or authorise publication/deployment.
 
 Downstream Applications may remain pinned to released 0.3.0 and adopt a later Kernel separately. Actual KIT adoption is not a prerequisite for this qualification. Kernel still requires matching packaged runtime/generator and independent consumer checks.
 
@@ -70,9 +70,9 @@ Qualification inputs on 11 November 2026:
 
 ```text
 private runtime SHA256:
-5885340a211c1c7351334e51dc5ebb37d7a655cc1230be49c6077faed518a3ff
+242b1fb529dca0caf7908dbcf47ad8a38d21719bf8ab38efd3162a24a9520ec1
 owned native SHA256:
-7875216d4d573f6ddc14334c4e4867e43373c44373be0889df9edc7929fc8bf9
+8b9d83e3cf67321c0afa536da64f0f32c8c28a30e1ccb05c86fe288d9e1efbe1
 SDK 4.11.0 uber SHA256:
 cc841f8ec352dee0330b5137abcdaf76c35be5892e56e7a810db964b1fc08b57
 Bookworm userspace image:
@@ -83,7 +83,7 @@ Alpine/JVM image:
 eclipse-temurin@sha256:3137541deb3cac6626b5d9a4a2187bc0d6a34312f858bd2c67dd01e732e6b682
 ```
 
-The Bookworm image supplied userspace only; the already installed Temurin 25.0.4 directory was mounted read-only. Containers share the host kernel and do not establish oldest-kernel support. Private execution logs are retained under `$HOME/.cache/kernel-jni-validation-20261111/proof/`: `host-{auto,prepared,sdk}.log`, `glibc-236.log`, `glibc-235.log` and `musl.log`. Checksums identify exact observed inputs, not independently attested reproducible builds or public release availability.
+The Bookworm image supplied userspace only; the already installed Temurin 25.0.4 directory was mounted read-only. Containers share the host kernel and do not establish oldest-kernel support. Private execution logs are retained under `$HOME/.cache/kernel-jni-validation-20261111/proof-final/`: `host-{auto,prepared,sdk}.log`, `glibc-236.log`, `glibc-235.log` and `musl.log`. Checksums identify exact observed inputs, not independently attested reproducible builds or public release availability.
 
 Still required before broader support claims: actual Linux ARM64/Apple Silicon/Intel Mac execution; platform-specific Application/consumer suites; minimum kernel/CPU qualification where promised; and controlled performance/lifecycle qualification beyond these smoke checks. No unavailable hardware lane is converted into a pass by skipping tests.
 

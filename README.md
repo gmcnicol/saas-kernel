@@ -25,7 +25,7 @@ it does not itself publish or prove registry availability.**
   [collections](docs/authorised-collections.md), [final sends](docs/fenced-disclosures.md)
 - [Versions and migration](docs/migration-to-typed.md), [generator](docs/taxi-generator.md),
   [persistence](docs/persistence.md), [operators](docs/operators.md),
-  [platform compatibility](docs/platform-compatibility.md)
+  [platform compatibility](docs/platform-compatibility.md), [JNI qualification](docs/jni-qualification.md)
 - [Architecture and downstream boundaries](docs/adr/0003-authorised-disclosure-review.md),
   [adversarial tests](docs/authorisation-contract-tests.md), [measured costs](docs/authorised-collection-measurements.md)
 
