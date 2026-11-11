@@ -31,6 +31,7 @@ interface ReadPolicyEvaluator extends AutoCloseable {
                         String operation, Map<String, Value> context, long deadline) throws Exception {
                     try { counter.increment(); }
                     catch (RuntimeException ignored) { /* Telemetry is not authority. */ }
+                    CedarValueCodec.validate(attributes, context);
                     var actor = new Entity(uid(principal.type(), principal.id()), Map.of(), Set.of());
                     var resource = new Entity(uid(type, id), attributes, Set.of());
                     var request = new AuthorizationRequest(actor.getEUID(), uid("Action", operation), resource.getEUID(), Optional.of(context), Optional.of(schema), true);

@@ -193,14 +193,16 @@ final class CedarAuthoriser implements AutoCloseable {
         try {
             TypedAuthorisationModel<P> model = model(projectionType);
             Entity principalEntity = entity(principal.type(), principal.id());
+            var attributes = attributes(model, projection, facts);
+            CedarValueCodec.validate(attributes, context);
             Entity resourceEntity = entity(
-                    simpleName(subject.type().qualifiedName()), subject.externalId(), attributes(model, projection, facts));
+                    simpleName(subject.type().qualifiedName()), subject.externalId(), attributes);
             var request = new AuthorizationRequest(
                     principalEntity.getEUID(), euid("Action", TYPED_ACTION_PREFIX + operation),
                     resourceEntity.getEUID(), Optional.of(context), Optional.of(schema), true);
-            return engine.isAuthorized(request, policies, Set.of(principalEntity, resourceEntity))
-                    .success.map(response -> response.isAllowed()
-                            && (model.requiredCapabilities().isEmpty() || response.getErrors().isEmpty()))
+            var result = engine.isAuthorized(request, policies, Set.of(principalEntity, resourceEntity));
+            return result.warnings.isEmpty() && result.success
+                    .map(response -> response.isAllowed() && response.getErrors().isEmpty())
                     .orElse(false);
         } catch (Exception exception) {
             return false;
