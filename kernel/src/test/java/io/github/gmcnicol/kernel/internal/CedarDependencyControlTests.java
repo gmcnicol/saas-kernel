@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test;
 
 /** Isolated upstream reproductions, deliberately NOT Kernel policy-construction or evaluator routes. */
 class CedarDependencyControlTests {
-    private static final boolean PATCHED = Boolean.getBoolean("cedar.control.patched");
+    private static final boolean PATCHED = Boolean.parseBoolean(System.getProperty("cedar.control.patched", "true"));
 
     @Test void unescapedSourceRenderingCanInjectAPermit() throws Exception {
         String input = "\" || true || \"";

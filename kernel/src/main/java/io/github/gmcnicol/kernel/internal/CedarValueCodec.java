@@ -2,6 +2,7 @@ package io.github.gmcnicol.kernel.internal;
 
 import com.cedarpolicy.value.*;
 import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import tools.jackson.core.JsonGenerator;
@@ -17,19 +18,30 @@ final class CedarValueCodec {
     private static final JsonMapper JSON = JsonMapper.builder()
             .addModule(new SimpleModule().addSerializer(Value.class, new ValueSerializer<Value>() {
                 @Override public void serialize(Value value, JsonGenerator json, SerializationContext context) {
-                    writeValue(json, value, 1);
+                    writeValue(json, value, 1, null);
+                }
+            }).addSerializer(CedarValueSchema.CheckedRecord.class, new ValueSerializer<CedarValueSchema.CheckedRecord>() {
+                @Override public void serialize(CedarValueSchema.CheckedRecord record, JsonGenerator json, SerializationContext context) {
+                    json.writeStartObject();
+                    for (var entry : record.values().entrySet()) {
+                        json.writeName(entry.getKey());
+                        writeValue(json, entry.getValue(), 1, record.type().field(entry.getKey()));
+                    }
+                    json.writeEndObject();
                 }
             }))
             .disable(SerializationFeature.WRAP_EXCEPTIONS)
             .build();
     private CedarValueCodec() {}
 
-    static void validate(Map<String, Value> attributes, Map<String, Value> context) {
-        encode(List.of(attributes, context), 1_048_576);
+    static void validate(CedarValueSchema.CheckedRecord attributes, CedarValueSchema.CheckedRecord context) {
+        // Workflow values are admitted individually; do not impose a new aggregate read-wire ceiling.
+        JSON.writeValue(OutputStream.nullOutputStream(), List.of(attributes, context));
     }
 
-    private static void writeValue(JsonGenerator json, Value value, int depth) {
+    private static void writeValue(JsonGenerator json, Value value, int depth, CedarValueSchema.Type type) {
         if (depth > 64) throw new ReadEvaluationLimit(Reason.BUDGET);
+        if (type != null) type.check(value);
         switch (value) {
             case PrimBool bool -> json.writeBoolean(bool.getValue());
             case PrimLong number -> json.writeNumber(number.getValue());
@@ -41,13 +53,13 @@ final class CedarValueCodec {
                     if ("__entity".equals(entry.getKey()) || "__extn".equals(entry.getKey()))
                         throw new IllegalArgumentException("Reserved Cedar record key");
                     json.writeName(entry.getKey());
-                    writeValue(json, entry.getValue(), depth + 2);
+                    writeValue(json, entry.getValue(), depth + 2, type == null ? null : type.field(entry.getKey()));
                 }
                 json.writeEndObject();
             }
             case CedarList list -> {
                 json.writeStartArray();
-                for (var item : list) writeValue(json, item, depth + 1);
+                for (var item : list) writeValue(json, item, depth + 1, type == null ? null : type.element());
                 json.writeEndArray();
             }
             case EntityUID entity -> {

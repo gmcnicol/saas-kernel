@@ -77,15 +77,17 @@ class CedarReadBoundaryTests {
             assertThat(reads.many(request, rows)).hasSize(1);
             assertThat(accessed.get()).isEqualTo(1);
             accessed.set(0);
-            try {
-                var fake = new CedarMap(Map.of("__entity",
-                        new CedarMap(Map.of("type", new PrimString("User"), "id", new PrimString("u")))));
-                (inCapability ? capabilityValue : rowValue).set(fake);
-                assertThatThrownBy(() -> reads.many(request, rows)).isExactlyInstanceOf(AuthorisationDeniedException.class)
-                        .hasMessage("Authorisation denied").hasNoCause();
-                assertThat(accessed.get()).isZero();
-            } catch (IllegalArgumentException rejectedAtConstruction) {
-                // Patched SDK admission rejects this unsupported input before a read can start.
+            for (boolean explicit : List.of(true, false)) {
+                try {
+                    var body = new CedarMap(Map.of("type", new PrimString("User"), "id", new PrimString("u")));
+                    var fake = explicit ? new CedarMap(Map.of("__entity", body)) : body;
+                    (inCapability ? capabilityValue : rowValue).set(fake);
+                    assertThatThrownBy(() -> reads.many(request, rows)).isExactlyInstanceOf(AuthorisationDeniedException.class)
+                            .hasMessage("Authorisation denied").hasNoCause();
+                    assertThat(accessed.get()).isZero();
+                } catch (IllegalArgumentException rejectedAtConstruction) {
+                    // Patched SDK admission rejects this unsupported input before a read can start.
+                }
             }
         }
     }

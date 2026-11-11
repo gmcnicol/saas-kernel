@@ -24,6 +24,7 @@ interface ReadPolicyEvaluator extends AutoCloseable {
         String backend = nativeMode ? "prepared-scalar" : selection.equals("sdk") ? "sdk-explicit" : "sdk-unsupported-platform";
         var counter = meters.counter("kernel.read.authorization.calls", "backend", backend);
         meters.gauge("kernel.read.authorization.backend", List.of(io.micrometer.core.instrument.Tag.of("backend", backend)), 1);
+        var valueSchema = new CedarValueSchema(schema);
         if (!nativeMode) {
             var engine = new BasicAuthorizationEngine();
             return new ReadPolicyEvaluator() {
@@ -31,7 +32,7 @@ interface ReadPolicyEvaluator extends AutoCloseable {
                         String operation, Map<String, Value> context, long deadline) throws Exception {
                     try { counter.increment(); }
                     catch (RuntimeException ignored) { /* Telemetry is not authority. */ }
-                    CedarValueCodec.validate(attributes, context);
+                    CedarValueCodec.validate(valueSchema.attributes(type, attributes), valueSchema.context(operation, context));
                     var actor = new Entity(uid(principal.type(), principal.id()), Map.of(), Set.of());
                     var resource = new Entity(uid(type, id), attributes, Set.of());
                     var request = new AuthorizationRequest(actor.getEUID(), uid("Action", operation), resource.getEUID(), Optional.of(context), Optional.of(schema), true);
@@ -64,9 +65,9 @@ interface ReadPolicyEvaluator extends AutoCloseable {
                 var actor = Map.of("type", principal.type(), "id", principal.id());
                 var resource = Map.of("type", type, "id", id);
                 var entities = List.of(Map.of("uid", actor, "attrs", Map.of(), "parents", List.of()),
-                        Map.of("uid", resource, "attrs", attributes, "parents", List.of()));
+                        Map.of("uid", resource, "attrs", valueSchema.attributes(type, attributes), "parents", List.of()));
                 return prepared.evaluate(Map.of("principal", actor, "action", Map.of("type", "Action", "id", operation),
-                        "resource", resource, "context", context, "entities", entities), deadline);
+                        "resource", resource, "context", valueSchema.context(operation, context), "entities", entities), deadline);
             }
             public void close() { prepared.close(); }
         };

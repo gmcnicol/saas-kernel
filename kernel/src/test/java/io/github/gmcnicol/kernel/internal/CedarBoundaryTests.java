@@ -53,6 +53,9 @@ class CedarBoundaryTests {
                     try (var evaluator = ReadPolicyEvaluator.create(schema, policies, backend, new SimpleMeterRegistry())) {
                         assertThat(evaluate(evaluator, nest(typed, nesting))).as("typed control: %s %s %s", backend, key, clause)
                                 .isEqualTo(ReadDecision.ALLOW);
+                        assertThat(evaluate(evaluator, nest(payload, nesting)))
+                                .as("implicit shape: %s %s nesting=%s", backend, key, nesting)
+                                .isEqualTo(ReadDecision.INVALID);
                         for (Value body : List.of(payload, new PrimString("malformed"))) {
                             ReadDecision decision;
                             try {
@@ -79,12 +82,14 @@ class CedarBoundaryTests {
             var principal = new Principal("User", "u");
             var subject = new TypedSubject<>(SUBJECT, "r");
             assertThat(cedar.allows(principal, subject, VIEW, new Row(uid("u")), FactSet.empty(), DATA)).isTrue();
-            try {
-                var fake = new CedarMap(Map.of("__entity",
-                        new CedarMap(Map.of("type", new PrimString("User"), "id", new PrimString("u")))));
-                assertThat(cedar.allows(principal, subject, VIEW, new Row(fake), FactSet.empty(), DATA)).isFalse();
-            } catch (IllegalArgumentException rejectedAtConstruction) {
-                // Patched SDK admission is also an acceptable rejection boundary.
+            for (boolean explicit : List.of(true, false)) {
+                try {
+                    var body = new CedarMap(Map.of("type", new PrimString("User"), "id", new PrimString("u")));
+                    var fake = explicit ? new CedarMap(Map.of("__entity", body)) : body;
+                    assertThat(cedar.allows(principal, subject, VIEW, new Row(fake), FactSet.empty(), DATA)).isFalse();
+                } catch (IllegalArgumentException rejectedAtConstruction) {
+                    // Patched SDK admission is also an acceptable rejection boundary.
+                }
             }
         }
     }
@@ -94,8 +99,12 @@ class CedarBoundaryTests {
     }
 
     private static ReadDecision evaluate(ReadPolicyEvaluator evaluator, Value value) throws Exception {
-        return evaluator.evaluate(new Principal("User", "u"), "Row", "r", Map.of("data", value),
-                "read", Map.of(), System.nanoTime() + 1_000_000_000L);
+        try {
+            return evaluator.evaluate(new Principal("User", "u"), "Row", "r", Map.of("data", value),
+                    "read", Map.of(), System.nanoTime() + 1_000_000_000L);
+        } catch (IllegalArgumentException rejected) {
+            return ReadDecision.INVALID;
+        }
     }
 
     private static EntityUID uid(String id) {

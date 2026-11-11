@@ -35,6 +35,7 @@ final class CedarAuthoriser implements AutoCloseable {
 
     private final BasicAuthorizationEngine engine = new BasicAuthorizationEngine();
     private final ReadPolicyEvaluator readEvaluator;
+    private final CedarValueSchema valueSchema;
     private final Schema schema;
     private final PolicySet policies;
     private final List<TypedAuthorisationModel<?>> typedModels;
@@ -80,6 +81,7 @@ final class CedarAuthoriser implements AutoCloseable {
             }
         }));
         this.schema = schema;
+        this.valueSchema = new CedarValueSchema(schema);
         this.policies = policies;
         this.typedModels = List.copyOf(typedModels);
         if (this.typedModels.stream().map(TypedAuthorisationModel::projectionType).distinct().count()
@@ -194,7 +196,8 @@ final class CedarAuthoriser implements AutoCloseable {
             TypedAuthorisationModel<P> model = model(projectionType);
             Entity principalEntity = entity(principal.type(), principal.id());
             var attributes = attributes(model, projection, facts);
-            CedarValueCodec.validate(attributes, context);
+            CedarValueCodec.validate(valueSchema.attributes(simpleName(subject.type().qualifiedName()), attributes),
+                    valueSchema.context(TYPED_ACTION_PREFIX + operation, context));
             Entity resourceEntity = entity(
                     simpleName(subject.type().qualifiedName()), subject.externalId(), attributes);
             var request = new AuthorizationRequest(
