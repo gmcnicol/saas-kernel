@@ -4,6 +4,10 @@ Each Application is one executable Spring Boot JAR or standard JVM buildpack ima
 contains HTTP delivery, Kernel runtime, Intent Worker, and Reevaluation Worker. PostgreSQL is the
 only required external runtime service.
 
+Check the [platform compatibility matrix](platform-compatibility.md) before selecting a JVM or
+container base. The prepared JNI route requires Linux x86_64/glibc >=2.36. SDK fallback is not
+universal portability: the tested unmodified Alpine/musl configuration cannot load the SDK.
+
 Configure the Application datasource as a `NOINHERIT`, non-owner, non-superuser,
 non-`BYPASSRLS` login with `SET` membership in `kernel_runtime` and `kernel_worker`. Kernel selects
 one least-privilege role inside each transaction. Use separate privileged Flyway credentials.

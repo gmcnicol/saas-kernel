@@ -17,3 +17,7 @@ Human decision `kit-performance-upstream-cache-fix` authorises a narrow source-p
 ## Advisory-boundary amendment
 
 Human decision `cedar-kind-boundary-sdk-upgrade-scope` on 11 November 2026 permits Cedar Java 4.11.0 in the proposed fix while retaining the existing prepared bridge and its pinned Cedar base/patch. Public schema-to-JSON conversion supplies immutable kind metadata, so streaming admission can reject Java record/string promotion without banning ordinary record field names or adding a Cedar-language parser; SDK/workflow validation must preserve individually admitted workflow sizes. Upstream schema/policy caching remains disabled because it drops schema warnings. This supersedes the old original-SDK dependency selection for the proposed implementation, not its historical verification evidence; it does not authorise bridge removal, merge, publication or deployment, or waive semantic, performance, platform and packaged-consumer gates.
+
+## Retention and qualification decision
+
+The owner subsequently chose to retain the prepared JNI bridge as the compromise, rather than pursue upstream caching as its replacement. Issue #76 now qualifies performance, lifecycle and platform behavior; actual downstream adoption, including KIT's current 0.3.0 pin, is separate work and is not a prerequisite for Kernel qualification. Matching packaged Kernel runtime/generator consumer checks, security contracts and explicit platform evidence remain required.

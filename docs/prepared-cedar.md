@@ -12,6 +12,9 @@ The initial adoption used unpatched upstream. The later human-approved `kit-perf
 
 ## Platform selection and loading
 
+The [platform compatibility matrix](platform-compatibility.md) records executed minimum-libc,
+below-floor SDK fallback and musl failure results separately from untested binary inventory.
+
 `kernel.authorisation.read-evaluator` is a production configuration property:
 
 - `auto` (default): prepared scalar on Linux x86_64, glibc >=2.36; explicitly identified original-SDK adapter on genuinely unsupported prepared targets.

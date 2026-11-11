@@ -122,6 +122,10 @@ Those focused candidate runs reused the byte-identified existing prepared native
 
 ## Platform inventory and remaining gates
 
+The inventory below records this assessment's earlier state. See the subsequent
+[platform compatibility qualification](platform-compatibility.md) for executed minimum-libc,
+below-floor SDK fallback and Alpine/musl outcomes; that matrix is the current platform status.
+
 Both inspected SDK uber JARs contain Linux x86_64/aarch64, macOS x86_64/aarch64 and Windows x86_64 native entries. ZIP inventory is not execution certification.
 
 | Requested target | Evidence |
