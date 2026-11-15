@@ -13,7 +13,7 @@
 
     <groupId>io.github.gmcnicol</groupId>
     <artifactId>saas-kernel-reactor</artifactId>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
     <packaging>pom</packaging>
     <name>SaaS Kernel Reactor</name>
     <description>Product-neutral semantic workflow mechanics for Spring Boot Applications.</description>
@@ -60,7 +60,7 @@
         <spring-modulith.version>2.1.0</spring-modulith.version>
         <testcontainers.version>2.0.5</testcontainers.version>
         <taxi.version>1.70.0</taxi.version>
-        <cedar-java.version>4.2.3</cedar-java.version>
+        <cedar-java.version>4.11.0</cedar-java.version>
         <maven-antrun-plugin.version>3.2.0</maven-antrun-plugin.version>
         <kotlin.version>2.2.21</kotlin.version>
         <maven.deploy.skip>true</maven.deploy.skip>

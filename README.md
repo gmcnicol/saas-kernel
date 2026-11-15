@@ -24,7 +24,8 @@ it does not itself publish or prove registry availability.**
 - Contracts: [capabilities](docs/effective-capabilities.md), [reads](docs/authorised-reads.md),
   [collections](docs/authorised-collections.md), [final sends](docs/fenced-disclosures.md)
 - [Versions and migration](docs/migration-to-typed.md), [generator](docs/taxi-generator.md),
-  [persistence](docs/persistence.md), [operators](docs/operators.md)
+  [persistence](docs/persistence.md), [operators](docs/operators.md),
+  [platform compatibility](docs/platform-compatibility.md), [JNI qualification](docs/jni-qualification.md)
 - [Architecture and downstream boundaries](docs/adr/0003-authorised-disclosure-review.md),
   [adversarial tests](docs/authorisation-contract-tests.md), [measured costs](docs/authorised-collection-measurements.md)
 
@@ -33,6 +34,7 @@ artifacts: `io.github.gmcnicol:saas-kernel` and
 `io.github.gmcnicol:saas-kernel-taxi-generator`, same version. Signed, immutable
 releases use [GitHub Packages and the main-merge pipeline](docs/releasing.md), with
 an empty-repository consumer proof before the release receipt is published.
-See [0.3.0 deployment-guard fix and connection budget](docs/releases/0.3.0.md).
+See [0.3.1 Cedar boundary and lifecycle fixes](docs/releases/0.3.1.md) and the
+[0.3.0 deployment-guard fix and connection budget](docs/releases/0.3.0.md).
 The [0.2.0 latency exception](docs/releases/0.2.0.md) remains historical evidence;
 the original three-total-connection timing gate did not pass.

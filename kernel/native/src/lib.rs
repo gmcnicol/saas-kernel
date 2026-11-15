@@ -716,6 +716,45 @@ pub extern "system" fn JNI_OnUnload(_: *mut jni::sys::JavaVM, _: *mut std::ffi::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_cache_byte_charge_rejects_distinct_preparation_and_recovers() {
+        let source = serde_json::json!({
+            "schema": "entity User; entity Row; action read appliesTo { principal: User, resource: Row, context: {} };",
+            "policies": {"permit": "permit(principal, action, resource);"}
+        }).to_string();
+        let other = format!(" {source}");
+        let request = serde_json::json!({
+            "principal": {"type":"User", "id":"u"}, "action":{"type":"Action", "id":"read"},
+            "resource":{"type":"Row", "id":"r"}, "context":{}, "entities":[]
+        }).to_string();
+        let first = prepare(source.clone()).unwrap();
+        // Inject accounting at the exact cap, not 64 MiB of synthetic retained data.
+        registry().lock().unwrap().cache.get_mut(&source).unwrap().charge = CACHE_BYTES;
+        let shared = prepare(source).unwrap();
+        assert!(shared > first);
+        assert!(prepare(other.clone()).is_err());
+        {
+            let r = registry().lock().unwrap();
+            assert_eq!(r.handles.len(), 2);
+            assert_eq!(r.cache.len(), 1);
+            assert_eq!(r.charge(), CACHE_BYTES);
+        }
+        assert_eq!(evaluate(first, request.clone(), Instant::now() + Duration::from_secs(1)).unwrap(), MAGIC | 1);
+        close(first).unwrap();
+        assert_eq!(registry().lock().unwrap().charge(), CACHE_BYTES);
+        close(shared).unwrap();
+        assert_eq!(registry().lock().unwrap().charge(), 0);
+        let recovered = prepare(other).unwrap();
+        assert!(recovered > shared);
+        assert_eq!(evaluate(recovered, request, Instant::now() + Duration::from_secs(1)).unwrap(), MAGIC | 1);
+        close(recovered).unwrap();
+        let r = registry().lock().unwrap();
+        assert!(r.handles.is_empty());
+        assert!(r.cache.is_empty());
+        assert_eq!(r.charge(), 0);
+    }
+
     #[test]
     fn prepared_scalar_does_not_rebuild_unvisited_action_scope() {
         // A false principal scope short-circuits the Action set. Widening that

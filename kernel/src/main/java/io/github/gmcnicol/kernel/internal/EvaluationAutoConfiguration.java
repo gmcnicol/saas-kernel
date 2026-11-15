@@ -342,7 +342,7 @@ public class EvaluationAutoConfiguration {
 
     private static String kernelVersion() {
         String version = EvaluationAutoConfiguration.class.getPackage().getImplementationVersion();
-        return version == null ? "0.3.0" : version;
+        return version == null ? "0.3.1" : version;
     }
 
     private static Properties load(ResourceLoader resources, String path) {

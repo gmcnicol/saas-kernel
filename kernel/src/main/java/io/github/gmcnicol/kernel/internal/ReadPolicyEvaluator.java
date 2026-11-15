@@ -24,6 +24,7 @@ interface ReadPolicyEvaluator extends AutoCloseable {
         String backend = nativeMode ? "prepared-scalar" : selection.equals("sdk") ? "sdk-explicit" : "sdk-unsupported-platform";
         var counter = meters.counter("kernel.read.authorization.calls", "backend", backend);
         meters.gauge("kernel.read.authorization.backend", List.of(io.micrometer.core.instrument.Tag.of("backend", backend)), 1);
+        var valueSchema = new CedarValueSchema(schema);
         if (!nativeMode) {
             var engine = new BasicAuthorizationEngine();
             return new ReadPolicyEvaluator() {
@@ -31,6 +32,7 @@ interface ReadPolicyEvaluator extends AutoCloseable {
                         String operation, Map<String, Value> context, long deadline) throws Exception {
                     try { counter.increment(); }
                     catch (RuntimeException ignored) { /* Telemetry is not authority. */ }
+                    CedarValueCodec.validate(valueSchema.attributes(type, attributes), valueSchema.context(operation, context));
                     var actor = new Entity(uid(principal.type(), principal.id()), Map.of(), Set.of());
                     var resource = new Entity(uid(type, id), attributes, Set.of());
                     var request = new AuthorizationRequest(actor.getEUID(), uid("Action", operation), resource.getEUID(), Optional.of(context), Optional.of(schema), true);
@@ -47,28 +49,34 @@ interface ReadPolicyEvaluator extends AutoCloseable {
         }).toList();
         var prepared = PreparedCedarEvaluator.open(schema.schemaText.orElseThrow(() -> new IllegalStateException("Read bundle must use authored Cedar schema")),
                 policies.getStaticPolicies(), policies.getTemplates(), links);
-        String[] names = { "handles", "bundles", "cache.charged.bytes", "live.bytes", "peak.bytes", "allocated.bytes", "allocations", "evaluations", "failures", "queued", "invocations", "ffi.entries", "worker.threads" };
-        for (int i = 0; i < names.length; i++) {
-            final int index = i;
-            meters.gauge("kernel.read.native." + names[i], index, n -> {
-                long[] stats = NativeCedar.statistics();
-                return stats == null || stats.length != names.length ? Double.NaN : stats[n];
-            });
-        }
-        return new ReadPolicyEvaluator() {
-            public ReadDecision evaluate(Principal principal, String type, String id, Map<String, Value> attributes,
-                    String operation, Map<String, Value> context, long deadline) {
-                try { counter.increment(); }
-                catch (RuntimeException ignored) { /* Telemetry is not authority. */ }
-                var actor = Map.of("type", principal.type(), "id", principal.id());
-                var resource = Map.of("type", type, "id", id);
-                var entities = List.of(Map.of("uid", actor, "attrs", Map.of(), "parents", List.of()),
-                        Map.of("uid", resource, "attrs", attributes, "parents", List.of()));
-                return prepared.evaluate(Map.of("principal", actor, "action", Map.of("type", "Action", "id", operation),
-                        "resource", resource, "context", context, "entities", entities), deadline);
+        try {
+            String[] names = { "handles", "bundles", "cache.charged.bytes", "live.bytes", "peak.bytes", "allocated.bytes", "allocations", "evaluations", "failures", "queued", "invocations", "ffi.entries", "worker.threads" };
+            for (int i = 0; i < names.length; i++) {
+                final int index = i;
+                meters.gauge("kernel.read.native." + names[i], index, n -> {
+                    long[] stats = NativeCedar.statistics();
+                    return stats == null || stats.length != names.length ? Double.NaN : stats[n];
+                });
             }
-            public void close() { prepared.close(); }
-        };
+            return new ReadPolicyEvaluator() {
+                public ReadDecision evaluate(Principal principal, String type, String id, Map<String, Value> attributes,
+                        String operation, Map<String, Value> context, long deadline) {
+                    try { counter.increment(); }
+                    catch (RuntimeException ignored) { /* Telemetry is not authority. */ }
+                    var actor = Map.of("type", principal.type(), "id", principal.id());
+                    var resource = Map.of("type", type, "id", id);
+                    var entities = List.of(Map.of("uid", actor, "attrs", Map.of(), "parents", List.of()),
+                            Map.of("uid", resource, "attrs", valueSchema.attributes(type, attributes), "parents", List.of()));
+                    return prepared.evaluate(Map.of("principal", actor, "action", Map.of("type", "Action", "id", operation),
+                            "resource", resource, "context", valueSchema.context(operation, context), "entities", entities), deadline);
+                }
+                public void close() { prepared.close(); }
+            };
+        } catch (RuntimeException | Error failure) {
+            try { prepared.close(); }
+            catch (RuntimeException | Error cleanup) { failure.addSuppressed(cleanup); }
+            throw failure;
+        }
     }
     private static EntityUID uid(String type, String id) {
         return new EntityUID(EntityTypeName.parse(type).orElseThrow(() -> new IllegalArgumentException("Invalid Cedar type")), id);

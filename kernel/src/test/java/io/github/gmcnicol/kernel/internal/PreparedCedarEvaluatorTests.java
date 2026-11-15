@@ -41,7 +41,7 @@ class PreparedCedarEvaluatorTests {
     }
     @Test void immutableBundleSharingReleasesEveryHandleWithoutRecyclingTokens() {
         CedarNativeLibrary.load();
-        String encoded = PreparedCedarEvaluator.encode(Map.of("schema", SCHEMA, "policies", POLICIES), 262_144);
+        String encoded = CedarValueCodec.encode(Map.of("schema", SCHEMA, "policies", POLICIES), 262_144);
         var handles = new ArrayList<Long>();
         long before = NativeCedar.statistics()[0];
         try {
