@@ -1,5 +1,7 @@
 # Retained JNI qualification
 
+The [issue acceptance reconciliation](cedar-issue-resolution.md) connects this historical qualification to signed release 0.3.1 and the 0.3.2 regression completion. The original source/artifact identities and measurements below are unchanged, not relabelled as new release measurements.
+
 ## Decision and scope
 
 The owner chose to retain the prepared scalar Rust/JNI bridge. SDK 4.11.0 remains the patched uncached compatibility/introspection dependency; upstream caching is not a replacement because it drops schema warnings. Actual downstream adoption, including KIT's current 0.3.0 pin, is separate. Kernel packaged-consumer and security checks are not waived.

@@ -2,7 +2,10 @@ package io.github.gmcnicol.kernel.internal;
 
 import static org.assertj.core.api.Assertions.*;
 
+import com.cedarpolicy.model.policy.LinkValue;
+import com.cedarpolicy.model.policy.Policy;
 import com.cedarpolicy.model.policy.PolicySet;
+import com.cedarpolicy.model.policy.TemplateLink;
 import com.cedarpolicy.model.schema.Schema;
 import com.cedarpolicy.value.*;
 import io.github.gmcnicol.kernel.application.*;
@@ -48,6 +51,45 @@ class CedarLiteralBoundaryTests {
                 assertThat(evaluator.evaluate(new Principal("User", input), "Row", input, Map.of("data", data), "read",
                         changed, System.nanoTime() + 1_000_000_000L)).isEqualTo(ReadDecision.DENY);
                 assertThat(policies.getStaticPolicies()).isEqualTo(original);
+            }
+        }
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"sdk", "prepared"})
+    @org.junit.jupiter.api.condition.EnabledIf("preparedRuntimeSupported")
+    void templateLinksKeepHostileIdentifiersLiteralWithoutAddingPermitsOrDisablingForbids(String backend) throws Exception {
+        var schema = new Schema("entity User; entity Row; "
+                + "action read appliesTo { principal: User, resource: Row, context: {} };");
+        for (String input : INPUTS) for (boolean matchingForbid : List.of(false, true)) {
+            String templateId = "template-" + input;
+            String linkedId = "linked-" + input;
+            String source = (matchingForbid ? "forbid" : "permit")
+                    + "(principal == ?principal, action == Action::\"read\", resource == ?resource);";
+            var linkValues = List.of(new LinkValue("?principal", uid("User", input)),
+                    new LinkValue("?resource", uid("Row", input)));
+            var link = new TemplateLink(templateId, linkedId, linkValues);
+            var staticPolicies = matchingForbid ? Set.of(new Policy("permit(principal, action, resource);", "permit"))
+                    : Set.<Policy>of();
+            var policies = new PolicySet(staticPolicies, Set.of(new Policy(source, templateId)), List.of(link));
+            var originalStatic = Map.copyOf(policies.getStaticPolicies());
+            try (var evaluator = ReadPolicyEvaluator.create(schema, policies, backend, new SimpleMeterRegistry())) {
+                assertThat(evaluator.evaluate(new Principal("User", input), "Row", input, Map.of(), "read", Map.of(),
+                        System.nanoTime() + 1_000_000_000L))
+                        .as("%s exact linked identities, forbid=%s, input=%s", backend, matchingForbid, input)
+                        .isEqualTo(matchingForbid ? ReadDecision.DENY : ReadDecision.ALLOW);
+                for (boolean otherPrincipal : List.of(false, true)) {
+                    assertThat(evaluator.evaluate(new Principal("User", otherPrincipal ? input + "-different" : input),
+                            "Row", otherPrincipal ? input : input + "-different", Map.of(), "read", Map.of(),
+                            System.nanoTime() + 1_000_000_000L))
+                            .as("%s different linked identity, forbid=%s, input=%s", backend, matchingForbid, input)
+                            .isEqualTo(matchingForbid ? ReadDecision.ALLOW : ReadDecision.DENY);
+                }
+                assertThat(policies.getStaticPolicies()).isEqualTo(originalStatic);
+                assertThat(policies.getTemplates()).containsExactlyEntriesOf(Map.of(templateId, source));
+                assertThat(link.getTemplateId()).isEqualTo(templateId);
+                assertThat(link.getResultPolicyId()).isEqualTo(linkedId);
+                assertThat(link.getLinkValues()).containsExactlyInAnyOrderEntriesOf(
+                        Map.of("?principal", uid("User", input), "?resource", uid("Row", input)));
             }
         }
     }
