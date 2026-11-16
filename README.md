@@ -34,7 +34,8 @@ artifacts: `io.github.gmcnicol:saas-kernel` and
 `io.github.gmcnicol:saas-kernel-taxi-generator`, same version. Signed, immutable
 releases use [GitHub Packages and the main-merge pipeline](docs/releasing.md), with
 an empty-repository consumer proof before the release receipt is published.
-See [0.3.2 advisory regressions and qualification reconciliation](docs/releases/0.3.2.md),
+See [0.3.3 build-once promotion](docs/releases/0.3.3.md),
+[0.3.2 advisory regressions and qualification reconciliation](docs/releases/0.3.2.md),
 [0.3.1 Cedar boundary and lifecycle fixes](docs/releases/0.3.1.md), and the
 [0.3.0 deployment-guard fix and connection budget](docs/releases/0.3.0.md).
 The [0.2.0 latency exception](docs/releases/0.2.0.md) remains historical evidence;
