@@ -1,5 +1,8 @@
 # Cedar advisory assessment and initial SDK comparison
 
+For the released 0.3.1 disposition and the additional 0.3.2 template/disclosure regressions, see
+[issue acceptance and evidence](cedar-issue-resolution.md). The dated investigation below retains its original sources, artifacts and failures; its local/unpublished statements describe that historical stage.
+
 ## Disposition and source
 
 Assessment date: 11 November 2026. This records work on #77/#78 and the initial semantic gate of #76, not a release, deployment or bridge-removal decision.
@@ -56,10 +59,10 @@ The [injection advisory][injection-advisory] requires a source-rendering sink. N
 | Fixture | Coverage |
 | --- | --- |
 | `CedarBoundaryTests` | Reserved and implicit entity/extension maps, malformed shapes, direct/record/list nesting, `when`/`unless`, typed controls, supported field converter and workflow errors. |
-| `CedarReadBoundaryTests` | Public `AuthorisedReads`, real PostgreSQL, validated policies, converter/capability attacks, both routes, zero protected record/accessor release; ordinary reserved-name strings remain usable. |
+| `CedarReadBoundaryTests` | Public reads and `AuthorisedDisclosures`, real PostgreSQL, validated policies, entity/extension converter/capability attacks and errored forbids on both routes. Initial, post-format, provider-context and buffered-response fences reject without new protected output; ordinary reserved-name strings remain usable. |
 | `CedarValueSchemaTests` | Legitimate entity/extension-shaped records; common/root/namespaced aliases; nested typed references; context map/string promotion negatives. |
 | `CedarWorkflowSizeTests` | Independently canonical-admitted projection and Fact whose combined attributes exceed 1 MiB still pass an ordinary workflow permit. This is a shared-authoriser regression, not a new large-domain public Application fixture. |
-| `CedarLiteralBoundaryTests` | Exact identifier/string preservation; nested data; projection fields/Facts; false permits and matching forbids; unchanged policy identity. |
+| `CedarLiteralBoundaryTests` | Exact identifier/string preservation; nested data; projection fields/Facts; typed template-link principal/resource slots and policy identifiers; false permits and matching forbids; unchanged policy identity. |
 | `CedarDependencyControlTests` | Explicitly isolated upstream advisory controls, distinguished from Kernel boundary regressions. |
 | `CedarWorkflowBoundaryTests` | Public `Kernel.evaluate`/`Kernel.authorise`; no fields, Facts, returned offers or persisted offers after a matching/errored forbid, with a clean ordinary control. |
 | Existing contracts | Strict diagnostics, scalar order, native admission/lifetime/integrity, SQL/RLS, authority/freshness/disclosure and isolated packaged runtime/generator consumer fixtures. |
@@ -140,7 +143,7 @@ Consumers still use embedded native code; Cedar does not become pure Java. The e
 
 Subsequent retained-JNI work is recorded in [the qualification receipt](jni-qualification.md): final source `5d004b5` passed 430 Java/9 native tests, matching isolated packaged consumers, explicit no-GC lifecycle/resource regressions, actual minimum/below-floor libc probes, and one final unchanged reference-workload run passing all four page/context p95 targets. CPU and requested-native-heap observations are reported with their limits; they are not production-tail, RSS-isolation or hard-preemption guarantees. The three-request-plus-one-guard envelope was preserved. The unchanged pinned KIT fixture served as reference equipment; actual downstream product adoption is separate, not a prerequisite for Kernel qualification.
 
-Still unrun/unresolved: actual non-Linux/ARM execution and platform-specific Application/performance certification; sustained production tails and deterministic GC/unload behavior; downstream converter/policy-builder audit; explicit new template-link payload matrices and every advisory combination across disclosures. Existing disclosure/freshness contracts and the JNI qualification do not replace those advisory-specific combinations. No merge, publication or deployment is claimed; #76–#78 remain open for their respective remaining work.
+At this assessment stage, explicit template-link payload matrices and advisory-specific disclosure combinations remained unrun. The subsequent [issue resolution](cedar-issue-resolution.md) supplies those matrices and reconciles the released fixes with their acceptance criteria. Actual non-Linux/ARM execution, platform-specific Application/performance certification, sustained production tails, deterministic GC/unload behavior and arbitrary downstream converter/policy-builder auditing remain outside the stated qualified support and trust contract; they are not silently reported as passing tests. This historical assessment itself makes no merge, publication or deployment claim.
 
 ## Verification receipt
 

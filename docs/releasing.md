@@ -94,7 +94,7 @@ Use credentials in private Maven settings, never the POM:
 </server></servers>
 ```
 
-Set both dependency and generator plugin versions to `0.2.0`. `actions/setup-java` can create that server entry with `server-id: github`; provide `GITHUB_TOKEN` through the environment of the consuming Maven step and grant only `contents: read`/`packages: read`. The published consumer POMs have no unresolved reactor parent or unpublished production dependency.
+Set both dependency and generator plugin versions to `0.3.2`. Cedar advisory boundary fixes require 0.3.1 or later; the earlier 0.2.x/0.3.0 coordinates retain the affected SDK and must not be treated as patched. `actions/setup-java` can create that server entry with `server-id: github`; provide `GITHUB_TOKEN` through the environment of the consuming Maven step and grant only `contents: read`/`packages: read`. The published consumer POMs have no unresolved reactor parent or unpublished production dependency.
 
 Before adoption, verify the release's source tag, public signing-key fingerprint, detached signatures, JAR hashes, and `kernel-adoption.properties`. Regenerate bindings with the same-version plugin and check the packaged native/patch/lock identities, not just a declared property. `scripts/verify-published-consumer.py` is the release pipeline's empty-repository proof; ordinary consumers do not run the producer native build or use its private staging files.
 

@@ -2,6 +2,8 @@
 
 ## Scope and release status
 
+See [issue acceptance and evidence](cedar-issue-resolution.md) for the signed 0.3.1 integration and 0.3.2 regression disposition. The matrix below remains the original packaged qualification, not a newly executed platform matrix for each release.
+
 This is the current qualification record for the **retained prepared scalar JNI bridge**, not a promise that every platform included in the Cedar SDK works with Kernel.
 
 The executed checks below used the proposed advisory implementation at lifecycle-hardened source `5d004b595d19c08280b82d120063b18db2e08fe6`, Java SDK 4.11.0 without upstream caching, and the retained bridge with unchanged Cedar engine base/patch and ABI. Earlier qualification at `5724be6` was repeated against the final rebuilt artifact; the [qualification receipt](jni-qualification.md) records the lifecycle fix and new bytes. The private runtime JAR still carries 0.3.0 metadata but **is not the signed released 0.3.0**. Published 0.3.0 retains SDK 4.2.3; these new results do not silently recertify that release or authorise publication/deployment.
